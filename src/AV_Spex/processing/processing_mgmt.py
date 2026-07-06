@@ -329,18 +329,18 @@ class ProcessingManager:
                 if excluded_audio:
                     logger.info(
                         f"Excluding flagged audio channel(s) from access copy: "
-                        f"{'; '.join(exclusion_reasons)}"
+                        f"{'; '.join(exclusion_reasons)}\n"
                     )
                 elif exclusion_reasons:
                     logger.warning(
                         f"All audio channels were flagged ({'; '.join(exclusion_reasons)}); "
-                        f"keeping all audio in the access copy"
+                        f"keeping all audio in the access copy\n"
                     )
             else:
                 logger.warning(
-                    "Access file option 'exclude flagged audio channel' is on, but "
-                    "qct-parse audio analysis did not run or produced no results; "
-                    "including all audio in the access copy"
+                    f"Access file option 'exclude flagged audio channel' is on, but "
+                    f"qct-parse audio analysis did not run or produced no results; "
+                    f"including all audio in the access copy\n"
                 )
 
         processing_results['access_file'] = process_access_file(
@@ -883,7 +883,7 @@ def process_qctools_output(video_path, source_directory, destination_directory, 
 
     if qct_parse_run_tool:
         if not results['qctools_output_path'] or not os.path.isfile(results['qctools_output_path']):
-            logger.critical(f"Unable to check qctools report. No QCTools report file found in input directory.")
+            logger.critical(f"Unable to check qctools report. No QCTools report file found in input directory.\n")
         else:
             if not report_directory:
                 report_directory = dir_setup.make_report_dir(source_directory, video_id)
@@ -925,7 +925,7 @@ def process_qctools_output(video_path, source_directory, destination_directory, 
         results['color_bars_end_time'] = max(head_candidates)
         logger.info(
             f"Merged head bars end time: {results['color_bars_end_time']:.1f}s "
-            f"(qct-parse={qctparse_head_end}, CLAMS={clams_head_end})"
+            f"(qct-parse={qctparse_head_end}, CLAMS={clams_head_end})\n"
         )
     else:
         results['color_bars_end_time'] = None

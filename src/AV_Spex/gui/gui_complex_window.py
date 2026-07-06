@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QCheckBox, QLineEdit,
-    QLabel, QComboBox, QPushButton, QScrollArea
+    QLabel, QComboBox, QStyle, QStyleOptionButton
 )
 from PyQt6.QtCore import Qt
 
@@ -9,21 +9,35 @@ from AV_Spex.utils.config_setup import ChecksConfig
 from AV_Spex.utils.config_manager import ConfigManager
 
 config_mgr = ConfigManager()
-checks_config = config_mgr.get_config('checks', ChecksConfig)
 
 class ComplexWindow(QWidget, ThemeableMixin):
-    """Configuration window for complex analysis settings."""
-    
+    """Configuration window for complex analysis settings.
+
+    Sections are grouped by what is being checked (report generation,
+    color bars & tone, video signal, audio) rather than by which tool
+    implements the check. Each option carries a short description label
+    beneath it, matching the other tabs.
+
+    qct-parse's run_tool is implicit here: turning on any qct-parse-backed
+    check enables it, turning off all of them disables it (mirrors the
+    CLI's --enable-* auto-enable guardrails). The Checks tab still exposes
+    run_tool directly; both write the full flag set so the config stays
+    coherent.
+    """
+
+    INDENT = 24
+    DESC_INDENT = 20
+
     def __init__(self):
         super().__init__()
         self.is_loading = False
 
         # Initialize themed_group_boxes before setup_theme_handling
         self.themed_group_boxes = {}
-        
+
         # Setup theme handling
         self.setup_theme_handling()
-        
+
         # Setup UI and load config
         self.setup_ui()
         self.load_config_values()
@@ -32,600 +46,443 @@ class ComplexWindow(QWidget, ThemeableMixin):
         """Create fixed layout structure"""
         main_layout = QVBoxLayout(self)
 
-        self.setup_qctools_section(main_layout)
-        self.setup_qct_parse_section(main_layout)
-        self.setup_clams_detection_section(main_layout)
-        self.setup_frame_analysis_sections(main_layout)
+        self.setup_report_generation_section(main_layout)
+        self.setup_colorbars_section(main_layout)
+        self.setup_video_signal_section(main_layout)
+        self.setup_audio_section(main_layout)
+        main_layout.addStretch()
         self.connect_signals()
 
-    def setup_qctools_section(self, main_layout):
-        """Set up the QCTools section"""
+    # --- small layout helpers -------------------------------------------
+
+    def _make_checkbox(self, text):
+        cb = QCheckBox(text)
+        cb.setStyleSheet("font-weight: bold;")
+        return cb
+
+    def _desc_label(self, text, extra_indent=0):
+        """Return a wrapped description label indented under its option.
+
+        Indented sub-options get the small gray style used for dependent
+        options on the Checks tab; top-level options keep the default size.
+        """
+        label = QLabel(text)
+        label.setIndent(self.DESC_INDENT + extra_indent)
+        label.setWordWrap(True)
+        if extra_indent:
+            label.setStyleSheet("color: gray; font-size: 10px;")
+            label.setProperty("small_desc", True)
+        return label
+
+    def _add_option(self, layout, option, desc, spacing=None):
+        """Add an option (checkbox or row layout) with its description
+        directly beneath it, tighter than the spacing between options.
+
+        Small gray sub-option descriptions hug their option (0px); the
+        full-size descriptions get a slightly larger gap (3px). Pass
+        `spacing` to override (e.g. rows whose height is padded out by a
+        taller widget like a combo box need less)."""
+        pair = QVBoxLayout()
+        pair.setSpacing(0)
+        pair.setContentsMargins(0, 0, 0, 0)
+        if isinstance(option, QHBoxLayout):
+            pair.addLayout(option)
+        else:
+            pair.addWidget(option)
+        if spacing is None:
+            spacing = 0 if desc.property("small_desc") else 3
+        if spacing:
+            # An explicit spacer item rather than setSpacing so the gap can
+            # go negative — combo boxes carry empty pixels at the bottom of
+            # their widget rect that layout spacing alone can't compensate
+            pair.addSpacing(spacing)
+        pair.addWidget(desc)
+        layout.addLayout(pair)
+
+    def _indent_row(self, widget):
+        """Return an HBox with the widget indented under its parent option."""
+        row = QHBoxLayout()
+        row.setSpacing(6)  # explicit: nested rows inherit _add_option's 0 spacing
+        row.addSpacing(self.INDENT)
+        row.addWidget(widget)
+        row.addStretch()
+        return row
+
+    def _checkbox_text_offset(self):
+        """Width of a checkbox indicator + its label spacing, so text-only
+        rows can line up with the text of indented checkboxes. The style
+        must be queried with a checkbox option/widget — without that
+        context it reports smaller metrics."""
+        cb = QCheckBox()
+        opt = QStyleOptionButton()
+        opt.initFrom(cb)
+        style = cb.style()
+        return (style.pixelMetric(QStyle.PixelMetric.PM_IndicatorWidth, opt, cb)
+                + style.pixelMetric(QStyle.PixelMetric.PM_CheckBoxLabelSpacing, opt, cb))
+
+    def _param_row(self, label_text, line_edit):
+        """Return an indented label + input row for a numeric parameter.
+        The label is aligned with the text of indented checkboxes."""
+        row = QHBoxLayout()
+        row.setSpacing(6)  # explicit: nested rows inherit _add_option's 0 spacing
+        row.addSpacing(self.INDENT + self._checkbox_text_offset())
+        label = QLabel(label_text)
+        label.setStyleSheet("font-weight: bold;")
+        line_edit.setMaximumWidth(60)
+        row.addWidget(label)
+        row.addWidget(line_edit)
+        row.addStretch()
+        return row
+
+    # --- QCTools Report section -----------------------------------------
+
+    def setup_report_generation_section(self, main_layout):
+        """QCTools report generation (the sidecar most other checks read)."""
         theme_manager = ThemeManager.instance()
-        
-        # QCTools section
-        self.qctools_group = QGroupBox("QCTools")
+
+        self.qctools_group = QGroupBox("QCTools Report")
         theme_manager.style_groupbox(self.qctools_group, "top center")
         self.themed_group_boxes['qctools'] = self.qctools_group
 
-        qctools_layout = QVBoxLayout()
+        layout = QVBoxLayout()
 
-        # Run Tool checkbox
-        self.run_qctools_cb = QCheckBox("Run Tool")
-        self.run_qctools_cb.setStyleSheet("font-weight: bold;")
-        run_qctools_desc = QLabel("Run QCTools on input video file")
-        run_qctools_desc.setIndent(20)
+        self.run_qctools_cb = self._make_checkbox("Run QCTools")
+        self._add_option(layout, self.run_qctools_cb, self._desc_label(
+            "Run QCTools on the input video file to generate the per-frame "
+            "report that the color bars, video signal, and audio checks read. "
+            "An existing report is reused instead of re-running."))
 
-        # File Extension dropdown
-        qctools_ext_label = QLabel("QCTools File Extension")
-        qctools_ext_label.setStyleSheet("font-weight: bold;")
-        qctools_ext_desc = QLabel("Set the extension for QCTools output files")
-        qctools_ext_desc.setIndent(20)
+        ext_row = QHBoxLayout()
+        ext_row.setSpacing(6)
+        ext_label = QLabel("File Extension:")
+        ext_label.setStyleSheet("font-weight: bold;")
         self.qctools_ext_combo = QComboBox()
         self.qctools_ext_combo.addItems(["qctools.xml.gz", "qctools.mkv"])
         self.qctools_ext_combo.setMinimumWidth(160)
-        
-        # Create a horizontal layout for the extension input
-        qctools_ext_layout = QHBoxLayout()
-        qctools_ext_layout.addWidget(qctools_ext_label)
-        qctools_ext_layout.addWidget(self.qctools_ext_combo)
-        qctools_ext_layout.addStretch()
+        ext_row.addWidget(ext_label)
+        ext_row.addWidget(self.qctools_ext_combo)
+        ext_row.addStretch()
+        layout.addSpacing(6)
+        # spacing=-3: see the Border Detection row — combo boxes carry empty
+        # pixels below their visible control
+        self._add_option(layout, ext_row, self._desc_label(
+            "Set the extension for QCTools output files"),
+            spacing=-3)
 
-        # Add all widgets to the qctools layout
-        qctools_layout.addWidget(self.run_qctools_cb)
-        qctools_layout.addWidget(run_qctools_desc)
-        qctools_layout.addSpacing(10)  # Add some space between sections
-        qctools_layout.addLayout(qctools_ext_layout)
-        qctools_layout.addWidget(qctools_ext_desc)
-        
-        self.qctools_group.setLayout(qctools_layout)
+        self.qctools_group.setLayout(layout)
         main_layout.addWidget(self.qctools_group)
-        
-    # QCT Parse Section
-    def setup_qct_parse_section(self, main_layout):
-        """Set up the qct-parse section with palette-aware styling"""
-        theme_manager = ThemeManager.instance()
-        
-        # QCT Parse section
-        self.qct_group = QGroupBox("qct-parse")
-        theme_manager.style_groupbox(self.qct_group, "top center")
-        self.themed_group_boxes['qct'] = self.qct_group
 
-        qct_layout = QVBoxLayout()
+    # --- Color Bars & Tone section ----------------------------------------
 
-        # Checkboxes with descriptions on second line
-        self.run_qctparse_cb = QCheckBox("Run Tool")
-        self.run_qctparse_cb.setStyleSheet("font-weight: bold;")
-        run_qctparse_desc = QLabel("Run qct-parse tool on QCtools report of input video file")
-        run_qctparse_desc.setIndent(20)
-
-        self.bars_detection_cb = QCheckBox("Detect Color Bars")
-        self.bars_detection_cb.setStyleSheet("font-weight: bold;")
-        bars_detection_desc = QLabel("Detect color bars in the video content")
-        bars_detection_desc.setIndent(20)
-
-        self.evaluate_bars_cb = QCheckBox("Evaluate Color Bars")
-        self.evaluate_bars_cb.setStyleSheet("font-weight: bold;")
-        evaluate_bars_desc = QLabel("Compare content to color bars for validation")
-        evaluate_bars_desc.setIndent(20)
-
-        self.thumb_export_cb = QCheckBox("Thumbnail Export")
-        self.thumb_export_cb.setStyleSheet("font-weight: bold;")
-        thumb_export_desc = QLabel("Export thumbnails of failed frames for review")
-        thumb_export_desc.setIndent(20)
-
-        self.audio_analysis_cb = QCheckBox("Perform Audio Analysis")
-        self.audio_analysis_cb.setStyleSheet("font-weight: bold;")
-        audio_analysis_desc = QLabel("Detect audio clipping, channel imbalance, audible timecode, and audio dropout")
-        audio_analysis_desc.setIndent(20)
-
-        self.detect_clamped_levels_cb = QCheckBox("Detect Clamped Levels")
-        self.detect_clamped_levels_cb.setStyleSheet("font-weight: bold;")
-        detect_clamped_levels_desc = QLabel("Detect broadcast-range level clamping from the analog-to-digital converter")
-        detect_clamped_levels_desc.setIndent(20)
-
-        self.detect_chroma_phase_errors_cb = QCheckBox("Detect Chroma Phase Errors")
-        self.detect_chroma_phase_errors_cb.setStyleSheet("font-weight: bold;")
-        detect_chroma_phase_errors_desc = QLabel("Detect tape tracking artifacts where chroma collapses toward cyan or magenta")
-        detect_chroma_phase_errors_desc.setIndent(20)
-
-        # Add all widgets to the qct layout
-        qct_layout.addWidget(self.run_qctparse_cb)
-        qct_layout.addWidget(run_qctparse_desc)
-        qct_layout.addWidget(self.bars_detection_cb)
-        qct_layout.addWidget(bars_detection_desc)
-        qct_layout.addWidget(self.evaluate_bars_cb)
-        qct_layout.addWidget(evaluate_bars_desc)
-        qct_layout.addWidget(self.thumb_export_cb)
-        qct_layout.addWidget(thumb_export_desc)
-        qct_layout.addWidget(self.audio_analysis_cb)
-        qct_layout.addWidget(audio_analysis_desc)
-        qct_layout.addWidget(self.detect_clamped_levels_cb)
-        qct_layout.addWidget(detect_clamped_levels_desc)
-        qct_layout.addWidget(self.detect_chroma_phase_errors_cb)
-        qct_layout.addWidget(detect_chroma_phase_errors_desc)
-        
-        self.qct_group.setLayout(qct_layout)
-        main_layout.addWidget(self.qct_group)
-
-    # Unified CLAMS Detection Section (SSIM-based bars + cross-correlation tone)
-    def setup_clams_detection_section(self, main_layout):
-        """Run CLAMS bars and tone detectors together in one step."""
+    def setup_colorbars_section(self, main_layout):
+        """Color bars detection/evaluation (qct-parse) and CLAMS bars + tone."""
         theme_manager = ThemeManager.instance()
 
-        self.clams_detection_group = QGroupBox("CLAMS Detection")
-        theme_manager.style_groupbox(self.clams_detection_group, "top center")
-        self.themed_group_boxes['clams_detection'] = self.clams_detection_group
+        self.colorbars_group = QGroupBox("Color Bars && Tone")
+        theme_manager.style_groupbox(self.colorbars_group, "top center")
+        self.themed_group_boxes['colorbars'] = self.colorbars_group
 
-        clams_layout = QVBoxLayout()
+        layout = QVBoxLayout()
 
-        self.run_clams_detection_cb = QCheckBox("Run Tool")
-        self.run_clams_detection_cb.setStyleSheet("font-weight: bold;")
-        run_clams_desc = QLabel(
-            "Run the CLAMS SSIM-based SMPTE bars detector and the cross-correlation "
-            "tone detector together. The bars detector runs in parallel with qct-parse "
-            "for side-by-side comparison; the tone detector identifies spans of "
-            "monotonic audio (e.g. the tones in SMPTE bars-and-tones). qct-parse "
-            "remains authoritative for downstream BRNG-skip and access-file trim."
-        )
-        run_clams_desc.setWordWrap(True)
-        run_clams_desc.setIndent(20)
+        self.bars_detection_cb = self._make_checkbox("Detect Color Bars")
+        self._add_option(layout, self.bars_detection_cb, self._desc_label(
+            "Detect color bars in the video content (via qct-parse). The "
+            "detected section is used to skip bars in BRNG analysis and trim "
+            "them from the access file."))
 
-        clams_layout.addWidget(self.run_clams_detection_cb)
-        clams_layout.addWidget(run_clams_desc)
+        self.evaluate_bars_cb = self._make_checkbox("Evaluate Color Bars")
+        self._add_option(layout, self._indent_row(self.evaluate_bars_cb), self._desc_label(
+            "Compare content to color bars for validation",
+            extra_indent=self.INDENT))
 
-        self.clams_detection_group.setLayout(clams_layout)
-        main_layout.addWidget(self.clams_detection_group)
+        self.thumb_export_cb = self._make_checkbox("Export Thumbnails")
+        self._add_option(layout, self._indent_row(self.thumb_export_cb), self._desc_label(
+            "Export thumbnails of failed frames for review",
+            extra_indent=self.INDENT))
 
-    # Frame Analysis Sections (restructured)
-    def setup_frame_analysis_sections(self, main_layout):
-        """Set up the individual frame analysis sections"""
-        self.setup_bitplane_check_section(main_layout)
-        self.setup_analysis_periods_section(main_layout)
-        self.setup_border_detection_section(main_layout)
-        self.setup_signalstats_section(main_layout)
-        self.setup_brng_analysis_section(main_layout)
-        self.setup_dropped_sample_detection_section(main_layout)
-        self.setup_duplicate_frame_detection_section(main_layout)
+        self.run_clams_detection_cb = self._make_checkbox("CLAMS Bars + Tone Detection")
+        self._add_option(layout, self.run_clams_detection_cb, self._desc_label(
+            "Run the CLAMS SSIM-based SMPTE bars detector and the "
+            "cross-correlation tone detector together, in parallel with "
+            "qct-parse for side-by-side comparison. qct-parse remains "
+            "authoritative for BRNG-skip and access-file trim."))
 
-    def setup_bitplane_check_section(self, main_layout):
-        """Set up the bitplane check section with enable checkbox"""
+        self.colorbars_group.setLayout(layout)
+        main_layout.addWidget(self.colorbars_group)
+
+    # --- Video Signal Checks section --------------------------------------
+
+    def setup_video_signal_section(self, main_layout):
+        """Video signal checks: qct-parse detections and frame analysis."""
         theme_manager = ThemeManager.instance()
 
-        self.bitplane_check_group = QGroupBox("Bitplane Check")
-        theme_manager.style_groupbox(self.bitplane_check_group, "top left")
-        self.themed_group_boxes['bitplane_check'] = self.bitplane_check_group
+        self.video_signal_group = QGroupBox("Video Signal Checks")
+        theme_manager.style_groupbox(self.video_signal_group, "top center")
+        self.themed_group_boxes['video_signal'] = self.video_signal_group
 
-        bitplane_layout = QVBoxLayout()
+        layout = QVBoxLayout()
 
-        self.enable_bitplane_check_cb = QCheckBox("Enable Bitplane Check")
-        self.enable_bitplane_check_cb.setStyleSheet("font-weight: bold;")
-        bitplane_desc = QLabel(
+        self.detect_clamped_levels_cb = self._make_checkbox("Detect Clamped Levels")
+        self._add_option(layout, self.detect_clamped_levels_cb, self._desc_label(
+            "Detect broadcast-range level clamping from the analog-to-digital converter"))
+
+        self.detect_chroma_phase_errors_cb = self._make_checkbox("Detect Chroma Phase Errors")
+        self._add_option(layout, self.detect_chroma_phase_errors_cb, self._desc_label(
+            "Detect tape tracking artifacts where chroma collapses toward cyan or magenta"))
+
+        self.enable_duplicate_frame_cb = self._make_checkbox("Duplicate Frame Detection")
+        self._add_option(layout, self.enable_duplicate_frame_cb, self._desc_label(
+            "Detect runs of repeated frames likely caused by TBC or framesync "
+            "errors, using QCTools YDIF/UDIF/VDIF to find candidate freezes "
+            "and OpenCV to verify them"))
+
+        self.enable_bitplane_check_cb = self._make_checkbox("Bitplane Check")
+        self._add_option(layout, self.enable_bitplane_check_cb, self._desc_label(
             "Verify that the 9th and 10th bits of 10-bit video contain data. "
-            "Some TBC/framesync devices truncate these bits, producing effectively 8-bit video."
-        )
-        bitplane_desc.setWordWrap(True)
-        bitplane_desc.setIndent(20)
+            "Some TBC/framesync devices truncate these bits, producing "
+            "effectively 8-bit video."))
 
-        bitplane_layout.addWidget(self.enable_bitplane_check_cb)
-        bitplane_layout.addWidget(bitplane_desc)
-
-        self.bitplane_check_group.setLayout(bitplane_layout)
-        main_layout.addWidget(self.bitplane_check_group)
-
-    def setup_analysis_periods_section(self, main_layout):
-        """Set up the analysis periods section (shared by signalstats and BRNG analysis)"""
-        theme_manager = ThemeManager.instance()
-
-        self.analysis_periods_group = QGroupBox("Frame Analysis Periods")
-        theme_manager.style_groupbox(self.analysis_periods_group, "top left")
-        self.themed_group_boxes['analysis_periods'] = self.analysis_periods_group
-
-        periods_main_layout = QVBoxLayout()
-
-        periods_overview = QLabel("Controls how many time windows are sampled across the video for signalstats and BRNG analysis")
-        periods_overview.setWordWrap(True)
-        periods_overview.setIndent(5)
-        periods_main_layout.addWidget(periods_overview)
-        periods_main_layout.addSpacing(10)
-
-        # Number of periods
-        count_layout = QHBoxLayout()
-        count_label = QLabel("Number of Periods:")
-        count_label.setStyleSheet("font-weight: bold;")
-        self.analysis_period_count_input = QLineEdit("3")
-        self.analysis_period_count_input.setMaximumWidth(60)
-        count_layout.addWidget(count_label)
-        count_layout.addWidget(self.analysis_period_count_input)
-        count_layout.addStretch()
-
-        count_desc = QLabel("Number of analysis periods to spread across video")
-        count_desc.setIndent(20)
-
-        # Period duration
-        duration_layout = QHBoxLayout()
-        duration_label = QLabel("Period Duration (s):")
-        duration_label.setStyleSheet("font-weight: bold;")
-        self.analysis_period_duration_input = QLineEdit("60")
-        self.analysis_period_duration_input.setMaximumWidth(60)
-        duration_layout.addWidget(duration_label)
-        duration_layout.addWidget(self.analysis_period_duration_input)
-        duration_layout.addStretch()
-
-        duration_desc = QLabel("Length of each analysis period in seconds")
-        duration_desc.setIndent(20)
-
-        periods_main_layout.addLayout(count_layout)
-        periods_main_layout.addWidget(count_desc)
-        periods_main_layout.addLayout(duration_layout)
-        periods_main_layout.addWidget(duration_desc)
-
-        self.analysis_periods_group.setLayout(periods_main_layout)
-        main_layout.addWidget(self.analysis_periods_group)
-
-    def setup_border_detection_section(self, main_layout):
-        """Set up the border detection section with enable checkbox"""
-        theme_manager = ThemeManager.instance()
-        
-        # Border Detection Group Box
-        self.border_detection_group = QGroupBox("Border Detection Settings")
-        theme_manager.style_groupbox(self.border_detection_group, "top left")
-        self.themed_group_boxes['border_detection'] = self.border_detection_group
-        
-        border_detection_layout = QVBoxLayout()
-        
-        # Enable Border Detection checkbox (moved from substeps)
-        self.enable_border_detection_cb = QCheckBox("Enable Border Detection")
-        self.enable_border_detection_cb.setStyleSheet("font-weight: bold;")
-        border_det_desc = QLabel("Detect and crop blanking borders from the video")
-        border_det_desc.setIndent(20)
-        
-        border_detection_layout.addWidget(self.enable_border_detection_cb)
-        border_detection_layout.addWidget(border_det_desc)
-        border_detection_layout.addSpacing(10)
-        
-        # Border Detection Mode selector
-        border_mode_widget = QWidget()
-        border_mode_layout = QHBoxLayout(border_mode_widget)
-        border_mode_layout.setContentsMargins(0, 0, 0, 0)
-        
-        border_mode_label = QLabel("Detection Mode:")
+        # Border detection: checkbox + mode on one row, params below
+        border_row = QHBoxLayout()
+        border_row.setSpacing(6)
+        self.enable_border_detection_cb = self._make_checkbox("Border Detection")
+        border_mode_label = QLabel("Mode:")
         border_mode_label.setStyleSheet("font-weight: bold;")
         self.border_mode_combo = QComboBox()
         self.border_mode_combo.addItem("Simple", "simple")
         self.border_mode_combo.addItem("Sophisticated", "sophisticated")
-        
-        border_mode_layout.addWidget(border_mode_label)
-        border_mode_layout.addWidget(self.border_mode_combo)
-        border_mode_layout.addStretch()
-        
-        border_detection_layout.addWidget(border_mode_widget)
-        
-        # Simple Border Parameters
+        border_row.addWidget(self.enable_border_detection_cb)
+        border_row.addSpacing(12)
+        border_row.addWidget(border_mode_label)
+        border_row.addWidget(self.border_mode_combo)
+        border_row.addStretch()
+        # The combo box pads the row's height, so pull this description up
+        # to look even with the plain checkbox options
+        self._add_option(layout, border_row, self._desc_label(
+            "Detect and crop blanking borders from the video. Simple mode "
+            "crops a fixed number of pixels; Sophisticated mode detects "
+            "borders via edge analysis. Required for Signalstats."),
+            spacing=-3)
+
+        # Simple border parameters
         self.simple_params_widget = QWidget()
         simple_params_layout = QVBoxLayout(self.simple_params_widget)
         simple_params_layout.setContentsMargins(0, 0, 0, 0)
-        
-        simple_border_layout = QHBoxLayout()
-        simple_border_label = QLabel("Border Pixels:")
-        simple_border_label.setStyleSheet("font-weight: bold;")
-        self.simple_border_pixels_input = QLineEdit()
-        self.simple_border_pixels_input.setMaximumWidth(60)
-        self.simple_border_pixels_input.setText("25")
-        simple_border_layout.addWidget(simple_border_label)
-        simple_border_layout.addWidget(self.simple_border_pixels_input)
-        simple_border_layout.addStretch()
-        
-        simple_params_layout.addLayout(simple_border_layout)
-        simple_params_desc = QLabel("Fixed number of pixels to crop from each edge")
-        simple_params_desc.setIndent(20)
-        simple_params_layout.addWidget(simple_params_desc)
-        
-        # Sophisticated Border Parameters
+        self.simple_border_pixels_input = QLineEdit("25")
+        self._add_option(simple_params_layout, self._param_row(
+            "Border Pixels:", self.simple_border_pixels_input),
+            self._desc_label(
+                "Fixed number of pixels to crop from each edge",
+                extra_indent=self.INDENT))
+        layout.addWidget(self.simple_params_widget)
+
+        # Sophisticated border parameters
         self.sophisticated_params_widget = QWidget()
-        sophisticated_params_layout = QVBoxLayout(self.sophisticated_params_widget)
-        sophisticated_params_layout.setContentsMargins(0, 0, 0, 0)
-        
-        # Detection Parameters Group
-        detection_params_group = QGroupBox("Detection Parameters")
-        theme_manager.style_groupbox(detection_params_group, "top center")
-        self.themed_group_boxes['detection_params'] = detection_params_group
-        
-        detection_params_layout = QVBoxLayout()
-        
-        # Border Brightness Threshold
-        threshold_layout = QHBoxLayout()
-        threshold_label = QLabel("Brightness Threshold:")
-        threshold_label.setStyleSheet("font-weight: bold;")
+        soph_layout = QVBoxLayout(self.sophisticated_params_widget)
+        soph_layout.setContentsMargins(0, 0, 0, 0)
+
         self.soph_threshold_input = QLineEdit("10")
-        self.soph_threshold_input.setMaximumWidth(60)
-        threshold_layout.addWidget(threshold_label)
-        threshold_layout.addWidget(self.soph_threshold_input)
-        threshold_layout.addStretch()
-        
-        threshold_desc = QLabel("0 = pure black, 255 = pure white")
-        threshold_desc.setIndent(20)
-        
-        # Edge Sample Width
-        edge_width_layout = QHBoxLayout()
-        edge_width_label = QLabel("Edge Sample Width:")
-        edge_width_label.setStyleSheet("font-weight: bold;")
+        self._add_option(soph_layout, self._param_row(
+            "Brightness Threshold:", self.soph_threshold_input),
+            self._desc_label(
+                "0 = pure black, 255 = pure white", extra_indent=self.INDENT))
+
         self.soph_edge_width_input = QLineEdit("100")
-        self.soph_edge_width_input.setMaximumWidth(60)
-        edge_width_layout.addWidget(edge_width_label)
-        edge_width_layout.addWidget(self.soph_edge_width_input)
-        edge_width_layout.addStretch()
-        
-        edge_width_desc = QLabel("Pixels to examine from each edge")
-        edge_width_desc.setIndent(20)
-        
-        # Sample Frames
-        sample_frames_layout = QHBoxLayout()
-        sample_frames_label = QLabel("Sample Frames:")
-        sample_frames_label.setStyleSheet("font-weight: bold;")
+        self._add_option(soph_layout, self._param_row(
+            "Edge Sample Width:", self.soph_edge_width_input),
+            self._desc_label(
+                "Pixels to examine from each edge", extra_indent=self.INDENT))
+
         self.soph_sample_frames_input = QLineEdit("30")
-        self.soph_sample_frames_input.setMaximumWidth(60)
-        sample_frames_layout.addWidget(sample_frames_label)
-        sample_frames_layout.addWidget(self.soph_sample_frames_input)
-        sample_frames_layout.addStretch()
-        
-        sample_frames_desc = QLabel("Number of frames to sample across the video")
-        sample_frames_desc.setIndent(20)
-        
-        # Padding
-        padding_layout = QHBoxLayout()
-        padding_label = QLabel("Padding:")
-        padding_label.setStyleSheet("font-weight: bold;")
+        self._add_option(soph_layout, self._param_row(
+            "Sample Frames:", self.soph_sample_frames_input),
+            self._desc_label(
+                "Number of frames to sample across the video",
+                extra_indent=self.INDENT))
+
         self.soph_padding_input = QLineEdit("5")
-        self.soph_padding_input.setMaximumWidth(60)
-        padding_layout.addWidget(padding_label)
-        padding_layout.addWidget(self.soph_padding_input)
-        padding_layout.addStretch()
-        
-        padding_desc = QLabel("Extra margin around detected borders")
-        padding_desc.setIndent(20)
-        
-        detection_params_layout.addLayout(threshold_layout)
-        detection_params_layout.addWidget(threshold_desc)
-        detection_params_layout.addLayout(edge_width_layout)
-        detection_params_layout.addWidget(edge_width_desc)
-        detection_params_layout.addLayout(sample_frames_layout)
-        detection_params_layout.addWidget(sample_frames_desc)
-        detection_params_layout.addLayout(padding_layout)
-        detection_params_layout.addWidget(padding_desc)
-        
-        detection_params_group.setLayout(detection_params_layout)
-        
-        # Auto Retry checkbox
-        self.auto_retry_borders_cb = QCheckBox("Auto-retry border detection if BRNG detects edge artifacts")
-        self.auto_retry_borders_cb.setStyleSheet("font-weight: bold;")
-        auto_retry_desc = QLabel("Automatically adjusts borders if edge artifacts are found")
-        auto_retry_desc.setIndent(20)
-        
-        # Max Border Retries
-        max_retries_layout = QHBoxLayout()
-        max_retries_label = QLabel("Max Retries:")
-        max_retries_label.setStyleSheet("font-weight: bold;")
+        self._add_option(soph_layout, self._param_row(
+            "Padding:", self.soph_padding_input),
+            self._desc_label(
+                "Extra margin around detected borders",
+                extra_indent=self.INDENT))
+
+        self.auto_retry_borders_cb = self._make_checkbox(
+            "Auto-retry if BRNG finds edge artifacts")
+        self._add_option(soph_layout, self._indent_row(self.auto_retry_borders_cb),
+            self._desc_label(
+                "Automatically adjusts borders if edge artifacts are found",
+                extra_indent=self.INDENT))
+
         self.max_border_retries_input = QLineEdit("5")
-        self.max_border_retries_input.setMaximumWidth(60)
-        max_retries_layout.addWidget(max_retries_label)
-        max_retries_layout.addWidget(self.max_border_retries_input)
-        max_retries_layout.addStretch()
-        
-        max_retries_desc = QLabel("Maximum number of border adjustment attempts")
-        max_retries_desc.setIndent(20)
-        
-        # Add sophisticated mode components
-        sophisticated_params_layout.addWidget(detection_params_group)
-        sophisticated_params_layout.addWidget(self.auto_retry_borders_cb)
-        sophisticated_params_layout.addWidget(auto_retry_desc)
-        sophisticated_params_layout.addLayout(max_retries_layout)
-        sophisticated_params_layout.addWidget(max_retries_desc)
-        
-        # Add both parameter widgets to border detection layout
-        border_detection_layout.addWidget(self.simple_params_widget)
-        border_detection_layout.addWidget(self.sophisticated_params_widget)
-        
-        # Initially hide sophisticated params
+        self._add_option(soph_layout, self._param_row(
+            "Max Retries:", self.max_border_retries_input),
+            self._desc_label(
+                "Maximum number of border adjustment attempts",
+                extra_indent=self.INDENT))
+
+        layout.addWidget(self.sophisticated_params_widget)
         self.sophisticated_params_widget.setVisible(False)
-        
-        self.border_detection_group.setLayout(border_detection_layout)
-        main_layout.addWidget(self.border_detection_group)
-        
+
+        # Signalstats
+        self.enable_signalstats_cb = self._make_checkbox("Signalstats Analysis")
+        self._add_option(layout, self.enable_signalstats_cb, self._desc_label(
+            "Enhanced FFprobe signalstats over the detected active picture "
+            "area (requires Border Detection)"))
+
+        # BRNG analysis
+        self.enable_brng_analysis_cb = self._make_checkbox("BRNG Analysis")
+        self._add_option(layout, self.enable_brng_analysis_cb, self._desc_label(
+            "Analyze broadcast range violations in the active picture area"))
+
+        self.brng_duration_input = QLineEdit("300")
+        self._add_option(layout, self._param_row(
+            "Duration Limit (s):", self.brng_duration_input),
+            self._desc_label(
+                "Maximum duration to analyze for BRNG violations",
+                extra_indent=self.INDENT))
+
+        self.brng_skip_colorbars_cb = self._make_checkbox("Skip Color Bars")
+        self._add_option(layout, self._indent_row(self.brng_skip_colorbars_cb),
+            self._desc_label(
+                "Exclude color bar sections from BRNG analysis",
+                extra_indent=self.INDENT))
+
+        # Shared analysis periods (signalstats + BRNG)
+        periods_row = QHBoxLayout()
+        periods_row.setSpacing(6)
+        periods_label = QLabel("Analysis Periods:")
+        periods_label.setStyleSheet("font-weight: bold;")
+        periods_count_label = QLabel("Count:")
+        self.analysis_period_count_input = QLineEdit("3")
+        self.analysis_period_count_input.setMaximumWidth(60)
+        periods_duration_label = QLabel("Duration (s):")
+        self.analysis_period_duration_input = QLineEdit("60")
+        self.analysis_period_duration_input.setMaximumWidth(60)
+        periods_row.addWidget(periods_label)
+        periods_row.addWidget(periods_count_label)
+        periods_row.addWidget(self.analysis_period_count_input)
+        periods_row.addSpacing(8)
+        periods_row.addWidget(periods_duration_label)
+        periods_row.addWidget(self.analysis_period_duration_input)
+        periods_row.addStretch()
+        layout.addSpacing(6)
+        self._add_option(layout, periods_row, self._desc_label(
+            "Number and length of the time windows sampled across the video "
+            "for Signalstats and BRNG analysis"))
+
+        self.video_signal_group.setLayout(layout)
+        main_layout.addWidget(self.video_signal_group)
+
         # Connect enable/disable logic
         self.enable_border_detection_cb.stateChanged.connect(self.update_border_detection_visibility)
         self.border_mode_combo.currentIndexChanged.connect(self.update_border_detection_visibility)
 
-    def setup_signalstats_section(self, main_layout):
-        """Set up the signalstats section with enable checkbox"""
-        theme_manager = ThemeManager.instance()
-        
-        # Signalstats Group Box
-        self.signalstats_group = QGroupBox("Signalstats Settings")
-        theme_manager.style_groupbox(self.signalstats_group, "top left")
-        self.themed_group_boxes['signalstats'] = self.signalstats_group
-        
-        signalstats_layout = QVBoxLayout()
-        
-        # Enable Signalstats checkbox (moved from substeps)
-        self.enable_signalstats_cb = QCheckBox("Enable Signalstats Analysis")
-        self.enable_signalstats_cb.setStyleSheet("font-weight: bold;")
-        signalstats_desc = QLabel("Enhanced FFprobe signalstats")
-        signalstats_desc.setIndent(20)
-        
-        signalstats_layout.addWidget(self.enable_signalstats_cb)
-        signalstats_layout.addWidget(signalstats_desc)
-        
-        self.signalstats_group.setLayout(signalstats_layout)
-        main_layout.addWidget(self.signalstats_group)
-        
-        # Connect enable/disable logic
-        self.enable_signalstats_cb.stateChanged.connect(self.update_signalstats_visibility)
+    # --- Audio Checks section ---------------------------------------------
 
-    def setup_brng_analysis_section(self, main_layout):
-        """Set up the BRNG analysis section with enable checkbox"""
-        theme_manager = ThemeManager.instance()
-        
-        # BRNG Analysis Group Box
-        self.brng_group = QGroupBox("BRNG Analysis Settings")
-        theme_manager.style_groupbox(self.brng_group, "top left")
-        self.themed_group_boxes['brng_analysis'] = self.brng_group
-        
-        brng_layout = QVBoxLayout()
-        
-        # Enable BRNG Analysis checkbox (moved from substeps)
-        self.enable_brng_analysis_cb = QCheckBox("Enable BRNG Analysis")
-        self.enable_brng_analysis_cb.setStyleSheet("font-weight: bold;")
-        brng_desc = QLabel("Analyze broadcast range violations in the active area")
-        brng_desc.setIndent(20)
-        
-        brng_layout.addWidget(self.enable_brng_analysis_cb)
-        brng_layout.addWidget(brng_desc)
-        brng_layout.addSpacing(10)
-        
-        # Duration Limit
-        duration_layout = QHBoxLayout()
-        duration_label = QLabel("Duration Limit (s):")
-        duration_label.setStyleSheet("font-weight: bold;")
-        self.brng_duration_input = QLineEdit("300")
-        self.brng_duration_input.setMaximumWidth(60)
-        duration_layout.addWidget(duration_label)
-        duration_layout.addWidget(self.brng_duration_input)
-        duration_layout.addStretch()
-        
-        duration_desc = QLabel("Maximum duration to analyze for BRNG violations")
-        duration_desc.setIndent(20)
-        
-        # Skip Color Bars
-        self.brng_skip_colorbars_cb = QCheckBox("Skip Color Bars")
-        self.brng_skip_colorbars_cb.setStyleSheet("font-weight: bold;")
-        skip_bars_desc = QLabel("Exclude color bar sections from BRNG analysis")
-        skip_bars_desc.setIndent(20)
-        
-        brng_layout.addLayout(duration_layout)
-        brng_layout.addWidget(duration_desc)
-        brng_layout.addWidget(self.brng_skip_colorbars_cb)
-        brng_layout.addWidget(skip_bars_desc)
-        
-        self.brng_group.setLayout(brng_layout)
-        main_layout.addWidget(self.brng_group)
-        
-        # Connect enable/disable logic
-        self.enable_brng_analysis_cb.stateChanged.connect(self.update_brng_analysis_visibility)
-
-    def setup_dropped_sample_detection_section(self, main_layout):
-        """Set up the dropped sample detection section with enable checkbox"""
+    def setup_audio_section(self, main_layout):
+        """Audio checks: qct-parse audio analysis and dropped sample detection."""
         theme_manager = ThemeManager.instance()
 
-        self.dropped_sample_group = QGroupBox("Dropped Sample Detection")
-        theme_manager.style_groupbox(self.dropped_sample_group, "top left")
-        self.themed_group_boxes['dropped_sample'] = self.dropped_sample_group
+        self.audio_group = QGroupBox("Audio Checks")
+        theme_manager.style_groupbox(self.audio_group, "top center")
+        self.themed_group_boxes['audio'] = self.audio_group
 
-        ds_layout = QVBoxLayout()
+        layout = QVBoxLayout()
 
-        self.enable_dropped_sample_cb = QCheckBox("Enable Dropped Sample Detection")
-        self.enable_dropped_sample_cb.setStyleSheet("font-weight: bold;")
-        ds_desc = QLabel(
-            "Detect potential audio sample drops from TBC/framesync or ADC devices. "
-            "Generates a spectrogram to identify audible pops and compares audio/video durations."
-        )
-        ds_desc.setWordWrap(True)
-        ds_desc.setIndent(20)
+        self.audio_analysis_cb = self._make_checkbox("Audio Analysis")
+        self._add_option(layout, self.audio_analysis_cb, self._desc_label(
+            "Detect audio clipping, channel imbalance, audible timecode "
+            "(LTC), and audio dropout"))
 
-        ds_layout.addWidget(self.enable_dropped_sample_cb)
-        ds_layout.addWidget(ds_desc)
+        self.enable_dropped_sample_cb = self._make_checkbox("Dropped Sample Detection")
+        self._add_option(layout, self.enable_dropped_sample_cb, self._desc_label(
+            "Detect potential audio sample drops from TBC/framesync or ADC "
+            "devices. Generates a spectrogram to identify audible pops and "
+            "compares audio/video durations."))
 
-        self.dropped_sample_group.setLayout(ds_layout)
-        main_layout.addWidget(self.dropped_sample_group)
+        self.audio_group.setLayout(layout)
+        main_layout.addWidget(self.audio_group)
 
-    def setup_duplicate_frame_detection_section(self, main_layout):
-        """Set up the duplicate frame detection section with enable checkbox"""
-        theme_manager = ThemeManager.instance()
-
-        self.duplicate_frame_group = QGroupBox("Duplicate Frame Detection")
-        theme_manager.style_groupbox(self.duplicate_frame_group, "top left")
-        self.themed_group_boxes['duplicate_frame'] = self.duplicate_frame_group
-
-        df_layout = QVBoxLayout()
-
-        self.enable_duplicate_frame_cb = QCheckBox("Enable Duplicate Frame Detection")
-        self.enable_duplicate_frame_cb.setStyleSheet("font-weight: bold;")
-        df_desc = QLabel(
-            "Detect runs of repeated frames likely caused by TBC or framesync errors. "
-            "Uses QCTools YDIF/UDIF/VDIF to find candidate freezes (excluding color bars "
-            "and black segments), then verifies each candidate with OpenCV."
-        )
-        df_desc.setWordWrap(True)
-        df_desc.setIndent(20)
-
-        df_layout.addWidget(self.enable_duplicate_frame_cb)
-        df_layout.addWidget(df_desc)
-
-        self.duplicate_frame_group.setLayout(df_layout)
-        main_layout.addWidget(self.duplicate_frame_group)
+    # --- visibility / dependency logic --------------------------------------
 
     def update_border_detection_visibility(self):
         """Update visibility of border detection components"""
         enabled = self.enable_border_detection_cb.isChecked()
         is_sophisticated = self.border_mode_combo.currentData() == "sophisticated"
-        
+
         # Show/hide mode-specific parameters
+        self.border_mode_combo.setEnabled(enabled)
         self.simple_params_widget.setVisible(enabled and not is_sophisticated)
         self.sophisticated_params_widget.setVisible(enabled and is_sophisticated)
-        
+
         # Update signalstats availability
         self.update_signalstats_dependency()
 
-    def update_brng_analysis_visibility(self):
-        """Update visibility of BRNG analysis components based on checkbox"""
-        # BRNG section is always visible, but could be used for future logic
-        pass
-
-    def update_signalstats_visibility(self):
-        """Update visibility of signalstats components based on dependencies"""
-        self.update_signalstats_dependency()
-
     def update_signalstats_dependency(self):
-        """Update signalstats checkbox tooltip based on dependencies"""
+        """Update signalstats checkbox availability based on border detection"""
         border_enabled = self.enable_border_detection_cb.isChecked()
-        
+
         if not border_enabled:
             self.enable_signalstats_cb.setChecked(False)
-            self.enable_signalstats_cb.setToolTip("Requires border detection to be enabled")
             self.enable_signalstats_cb.setEnabled(False)
         else:
-            # Signalstats now works with both simple and sophisticated modes
-            self.enable_signalstats_cb.setToolTip("")
             self.enable_signalstats_cb.setEnabled(True)
+
+    def _apply_bars_dependencies(self):
+        """Evaluate Bars and Export Thumbnails depend on Detect Color Bars."""
+        bars_on = self.bars_detection_cb.isChecked()
+        for cb in (self.evaluate_bars_cb, self.thumb_export_cb):
+            if not bars_on:
+                cb.blockSignals(True)
+                cb.setChecked(False)
+                cb.blockSignals(False)
+            cb.setEnabled(bars_on)
 
     def on_theme_changed(self, palette):
         """Handle theme changes for ComplexWindow"""
         # Apply the palette directly
         self.setPalette(palette)
-        
+
         # Get the theme manager
         theme_manager = ThemeManager.instance()
-        
+
         # Update all tracked group boxes with their specific title positions
         for key, group_box in self.themed_group_boxes.items():
             # Preserve the title position if set
             position = group_box.property("title_position") or "top left"
             theme_manager.style_groupbox(group_box, position)
-        
+
         # Style all buttons
         theme_manager.style_buttons(self)
-            
+
         # Force repaint
         self.update()
 
+    # --- signal wiring -------------------------------------------------------
+
     def connect_signals(self):
         """Connect all widget signals to their handlers"""
-        # QCTools section
+        # QCTools report section
         self.run_qctools_cb.stateChanged.connect(
             lambda state: self.on_boolean_changed(state, ['tools', 'qctools', 'run_tool'])
         )
         self.qctools_ext_combo.currentTextChanged.connect(self.on_qctools_ext_changed)
 
-        # Sub-step enable checkboxes
+        # qct-parse-backed checks: any change rewrites the full flag set and
+        # derives run_tool implicitly
+        for cb in (self.bars_detection_cb, self.evaluate_bars_cb,
+                   self.thumb_export_cb, self.audio_analysis_cb,
+                   self.detect_clamped_levels_cb, self.detect_chroma_phase_errors_cb):
+            cb.stateChanged.connect(self.on_qct_parse_flag_changed)
+
+        # CLAMS detection — single toggle runs both bars and tone detectors.
+        # Numeric tuning is JSON-only.
+        self.run_clams_detection_cb.stateChanged.connect(
+            lambda state: self.on_boolean_changed(state, ['tools', 'clams_detection', 'run_tool'])
+        )
+
+        # Frame analysis enable checkboxes
         self.enable_bitplane_check_cb.stateChanged.connect(
             lambda state: self.on_boolean_changed(state, ['outputs', 'frame_analysis', 'enable_bitplane_check'])
         )
@@ -644,7 +501,7 @@ class ComplexWindow(QWidget, ThemeableMixin):
         self.enable_duplicate_frame_cb.stateChanged.connect(
             lambda state: self.on_boolean_changed(state, ['outputs', 'frame_analysis', 'enable_duplicate_frame_detection'])
         )
-        
+
         # Border mode combo
         self.border_mode_combo.currentIndexChanged.connect(self.on_frame_analysis_mode_changed)
 
@@ -669,6 +526,9 @@ class ComplexWindow(QWidget, ThemeableMixin):
         self.auto_retry_borders_cb.stateChanged.connect(
             lambda state: self.on_boolean_changed(state, ['outputs', 'frame_analysis', 'auto_retry_borders'])
         )
+        self.max_border_retries_input.textChanged.connect(
+            lambda text: self.on_frame_analysis_param_changed('max_border_retries', text)
+        )
 
         # BRNG parameters
         self.brng_duration_input.textChanged.connect(
@@ -676,9 +536,6 @@ class ComplexWindow(QWidget, ThemeableMixin):
         )
         self.brng_skip_colorbars_cb.stateChanged.connect(
             lambda state: self.on_boolean_changed(state, ['outputs', 'frame_analysis', 'brng_skip_color_bars'])
-        )
-        self.max_border_retries_input.textChanged.connect(
-            lambda text: self.on_frame_analysis_param_changed('max_border_retries', text)
         )
 
         # Analysis period parameters
@@ -688,23 +545,8 @@ class ComplexWindow(QWidget, ThemeableMixin):
         self.analysis_period_count_input.textChanged.connect(
             lambda text: self.on_frame_analysis_param_changed('analysis_period_count', text)
         )
-        
-        # QCT Parse - Run Tool turns all dependent checks on/off
-        self.run_qctparse_cb.stateChanged.connect(self.on_run_qctparse_changed)
-        self.bars_detection_cb.stateChanged.connect(self.on_bars_detection_changed)
-        self.evaluate_bars_cb.stateChanged.connect(self.on_evaluate_bars_changed)
-        self.thumb_export_cb.stateChanged.connect(
-            lambda state: self.on_boolean_changed(state, ['tools', 'qct_parse', 'thumbExport'])
-        )
-        self.audio_analysis_cb.stateChanged.connect(self.on_audio_analysis_changed)
-        self.detect_clamped_levels_cb.stateChanged.connect(self.on_detect_clamped_levels_changed)
-        self.detect_chroma_phase_errors_cb.stateChanged.connect(self.on_detect_chroma_phase_errors_changed)
 
-        # CLAMS detection — single Run Tool checkbox runs both bars and tone
-        # detectors. Numeric tuning is JSON-only.
-        self.run_clams_detection_cb.stateChanged.connect(
-            lambda state: self.on_boolean_changed(state, ['tools', 'clams_detection', 'run_tool'])
-        )
+    # --- config loading -------------------------------------------------------
 
     def load_config_values(self):
         """Load current config values into UI elements"""
@@ -724,11 +566,27 @@ class ComplexWindow(QWidget, ThemeableMixin):
         else:
             self.qctools_ext_combo.setCurrentText('qctools.xml.gz')
         self.qctools_ext_combo.blockSignals(False)
-        
+
+        # qct-parse: run_tool is implicit, so each check displays what will
+        # actually run (flag AND run_tool)
+        qct = checks_config.tools.qct_parse
+        run_tool = bool(qct.run_tool)
+        self.bars_detection_cb.setChecked(run_tool and qct.barsDetection)
+        self.evaluate_bars_cb.setChecked(run_tool and qct.evaluateBars)
+        self.thumb_export_cb.setChecked(run_tool and qct.thumbExport)
+        self.audio_analysis_cb.setChecked(run_tool and getattr(qct, 'audio_analysis', False))
+        self.detect_clamped_levels_cb.setChecked(run_tool and getattr(qct, 'detect_clamped_levels', False))
+        self.detect_chroma_phase_errors_cb.setChecked(run_tool and getattr(qct, 'detect_chroma_phase_errors', False))
+        self._apply_bars_dependencies()
+
+        # CLAMS detection — single toggle runs both bars and tone detectors.
+        clams = getattr(checks_config.tools, 'clams_detection', None)
+        self.run_clams_detection_cb.setChecked(bool(getattr(clams, 'run_tool', False)))
+
         # Frame Analysis
         if hasattr(checks_config.outputs, 'frame_analysis'):
             frame_config = checks_config.outputs.frame_analysis
-            
+
             # Load sub-step enable states
             self.enable_bitplane_check_cb.setChecked(bool(frame_config.enable_bitplane_check))
             self.enable_border_detection_cb.setChecked(bool(frame_config.enable_border_detection))
@@ -741,7 +599,7 @@ class ComplexWindow(QWidget, ThemeableMixin):
             mode_index = self.border_mode_combo.findData(frame_config.border_detection_mode)
             if mode_index >= 0:
                 self.border_mode_combo.setCurrentIndex(mode_index)
-            
+
             # Load parameter values
             self.simple_border_pixels_input.setText(str(frame_config.simple_border_pixels))
             self.soph_threshold_input.setText(str(frame_config.sophisticated_threshold))
@@ -754,85 +612,24 @@ class ComplexWindow(QWidget, ThemeableMixin):
             self.max_border_retries_input.setText(str(getattr(frame_config, 'max_border_retries', 3)))
             self.analysis_period_duration_input.setText(str(frame_config.analysis_period_duration))
             self.analysis_period_count_input.setText(str(getattr(frame_config, 'analysis_period_count', 3)))
-            
+
             # Update visibility based on loaded state
             self.update_border_detection_visibility()
-            self.update_brng_analysis_visibility()
-            self.update_signalstats_visibility()
-        
-        # QCT Parse
-        qct = checks_config.tools.qct_parse
-        self.run_qctparse_cb.setChecked(bool(qct.run_tool))
-        self.bars_detection_cb.setChecked(qct.barsDetection)
-        self.evaluate_bars_cb.setChecked(qct.evaluateBars)
-        self.thumb_export_cb.setChecked(qct.thumbExport)
-        self.audio_analysis_cb.setChecked(getattr(qct, 'audio_analysis', False))
-        self.detect_clamped_levels_cb.setChecked(getattr(qct, 'detect_clamped_levels', False))
-        self.detect_chroma_phase_errors_cb.setChecked(getattr(qct, 'detect_chroma_phase_errors', False))
-
-        # Set initial enabled state for QCT Parse dependent checkboxes
-        dependent_checkboxes = [
-            self.bars_detection_cb,
-            self.evaluate_bars_cb,
-            self.thumb_export_cb,
-            self.audio_analysis_cb,
-            self.detect_clamped_levels_cb,
-            self.detect_chroma_phase_errors_cb
-        ]
-
-        # Enable/disable dependent checkboxes based on run_tool state
-        for checkbox in dependent_checkboxes:
-            checkbox.setEnabled(qct.run_tool)
-
-        # Additional logic for thumbnail dependency
-        if qct.run_tool:
-            # Thumbnail is only enabled if at least one of bars detection or evaluate bars is checked
-            thumbnail_should_be_enabled = qct.barsDetection or qct.evaluateBars
-            self.thumb_export_cb.setEnabled(thumbnail_should_be_enabled)
-
-        # CLAMS detection — single toggle runs both bars and tone detectors.
-        clams = getattr(checks_config.tools, 'clams_detection', None)
-        self.run_clams_detection_cb.setChecked(bool(getattr(clams, 'run_tool', False)))
 
         # Set loading flag back to False after everything is loaded
         self.is_loading = False
 
-    def on_checkbox_changed(self, state, path):
-        """Handle changes in yes/no checkboxes"""
-        # Skip updates while loading
-        if self.is_loading:
-            return
-
-        new_value = 'yes' if Qt.CheckState(state) == Qt.CheckState.Checked else 'no'
-        
-        if path[0] == "tools" and len(path) > 2:
-            tool_name = path[1]
-            field = path[2]
-            updates = {'tools': {tool_name: {field: new_value}}}
-        elif len(path) == 3:  # Handle nested structures like outputs.frame_analysis.field
-            section = path[0]
-            subsection = path[1]
-            field = path[2]
-            updates = {section: {subsection: {field: new_value}}}
-        else:
-            section = path[0]
-            field = path[1]
-            updates = {section: {field: new_value}}
-            
-        config_mgr.update_config('checks', updates)
+    # --- config write handlers -------------------------------------------------
 
     def on_boolean_changed(self, state, path):
         """Handle changes in boolean checkboxes"""
         # Skip updates while loading
         if self.is_loading:
             return
-        
+
         new_value = Qt.CheckState(state) == Qt.CheckState.Checked
-        
-        if path[0] == "tools" and path[1] == "qct_parse":
-            updates = {'tools': {'qct_parse': {path[2]: new_value}}}
-            config_mgr.update_config('checks', updates)
-        elif path[0] == "tools" and path[1] == "qctools":
+
+        if path[0] == "tools" and path[1] == "qctools":
             updates = {'tools': {'qctools': {path[2]: new_value}}}
             config_mgr.update_config('checks', updates)
         elif path[0] == "tools" and path[1] == "clams_detection":
@@ -842,16 +639,46 @@ class ComplexWindow(QWidget, ThemeableMixin):
             updates = {'outputs': {'frame_analysis': {path[2]: new_value}}}
             config_mgr.update_config('checks', updates)
 
+    def on_qct_parse_flag_changed(self, _state=None):
+        """Handle changes to any qct-parse-backed check.
+
+        Applies the bars-detection dependency, then rewrites the full
+        qct_parse flag set with run_tool derived from the checkbox states so
+        the saved config always matches what the GUI displays.
+        """
+        if self.is_loading:
+            return
+
+        self._apply_bars_dependencies()
+
+        run_tool = any([
+            self.bars_detection_cb.isChecked(),
+            self.evaluate_bars_cb.isChecked(),
+            self.audio_analysis_cb.isChecked(),
+            self.detect_clamped_levels_cb.isChecked(),
+            self.detect_chroma_phase_errors_cb.isChecked(),
+        ])
+        updates = {'tools': {'qct_parse': {
+            'run_tool': run_tool,
+            'barsDetection': self.bars_detection_cb.isChecked(),
+            'evaluateBars': self.evaluate_bars_cb.isChecked(),
+            'thumbExport': self.thumb_export_cb.isChecked(),
+            'audio_analysis': self.audio_analysis_cb.isChecked(),
+            'detect_clamped_levels': self.detect_clamped_levels_cb.isChecked(),
+            'detect_chroma_phase_errors': self.detect_chroma_phase_errors_cb.isChecked(),
+        }}}
+        config_mgr.update_config('checks', updates)
+
     def on_frame_analysis_mode_changed(self, index):
         """Handle border detection mode changes"""
         if self.is_loading:
             return
-        
+
         mode = self.border_mode_combo.itemData(index)
-        
+
         # Update visibility
         self.update_border_detection_visibility()
-        
+
         # Update config
         updates = {'outputs': {'frame_analysis': {'border_detection_mode': mode}}}
         config_mgr.update_config('checks', updates)
@@ -860,7 +687,7 @@ class ComplexWindow(QWidget, ThemeableMixin):
         """Handle frame analysis parameter changes"""
         if self.is_loading:
             return
-        
+
         # Convert to appropriate type
         if param_name in ['simple_border_pixels', 'sophisticated_threshold', 'sophisticated_edge_sample_width',
                         'sophisticated_sample_frames', 'sophisticated_padding', 'sophisticated_viz_time',
@@ -871,196 +698,14 @@ class ComplexWindow(QWidget, ThemeableMixin):
                 value = int(value) if value.strip() else 0
             except ValueError:
                 return  # Don't update config if conversion fails
-        
+
         updates = {'outputs': {'frame_analysis': {param_name: value}}}
-        config_mgr.update_config('checks', updates)
-
-    def on_qct_combo_changed(self, value, field):
-        """Handle changes in QCT Parse combo boxes"""
-        # Skip updates while loading
-        if self.is_loading:
-            return
-
-        values = [value] if value is not None else []
-        updates = {'tools': {'qct_parse': {field: values}}}
         config_mgr.update_config('checks', updates)
 
     def on_qctools_ext_changed(self, ext):
         """Handle changes in QCTools file extension dropdown"""
         if self.is_loading:
             return
-        
+
         updates = {'outputs': {'qctools_ext': ext}}
         config_mgr.update_config('checks', updates)
-
-    def on_run_qctparse_changed(self, state):
-        """Handle changes in run qct-parse checkbox with dependency logic"""
-        # Skip updates while loading to avoid issues during initialization
-        if self.is_loading:
-            return
-        
-        # Handle the normal config update for run_tool (using boolean)
-        new_value = Qt.CheckState(state) == Qt.CheckState.Checked
-        updates = {'tools': {'qct_parse': {'run_tool': new_value}}}
-        config_mgr.update_config('checks', updates)
-        
-        # Get list of dependent checkboxes
-        dependent_checkboxes = [
-            self.bars_detection_cb,
-            self.evaluate_bars_cb,
-            self.thumb_export_cb,
-            self.audio_analysis_cb,
-            self.detect_clamped_levels_cb,
-            self.detect_chroma_phase_errors_cb
-        ]
-
-        if Qt.CheckState(state) == Qt.CheckState.Checked:
-            # If run_tool is checked, enable and check all dependent checkboxes
-            for cb in dependent_checkboxes:
-                cb.setEnabled(True)
-                cb.blockSignals(True)
-                cb.setChecked(True)
-                cb.blockSignals(False)
-
-            # Update the config for all dependent options
-            dependent_updates = {
-                'tools': {
-                    'qct_parse': {
-                        'barsDetection': True,
-                        'evaluateBars': True,
-                        'thumbExport': True,
-                        'audio_analysis': True,
-                        'detect_clamped_levels': True,
-                        'detect_chroma_phase_errors': True
-                    }
-                }
-            }
-            config_mgr.update_config('checks', dependent_updates)
-        else:
-            # If run_tool is unchecked, disable (grey out) all dependent checkboxes
-            for checkbox in dependent_checkboxes:
-                checkbox.setEnabled(False)
-
-    def on_bars_detection_changed(self, state):
-        """Handle changes in bars detection checkbox with dependency logic"""
-        # Skip updates while loading
-        if self.is_loading:
-            return
-        
-        # Update the config normally
-        new_value = Qt.CheckState(state) == Qt.CheckState.Checked
-        updates = {'tools': {'qct_parse': {'barsDetection': new_value}}}
-        config_mgr.update_config('checks', updates)
-        
-        if Qt.CheckState(state) == Qt.CheckState.Checked:
-            # If bars detection is checked, enable evaluate bars and thumbnail export
-            self.evaluate_bars_cb.setEnabled(True)
-            self.thumb_export_cb.setEnabled(True)
-        else:
-            # If bars detection is unchecked, disable and uncheck evaluate bars and thumbnail export
-            self.evaluate_bars_cb.blockSignals(True)
-            self.evaluate_bars_cb.setChecked(False)
-            self.evaluate_bars_cb.setEnabled(False)
-            self.evaluate_bars_cb.blockSignals(False)
-            
-            self.thumb_export_cb.blockSignals(True)
-            self.thumb_export_cb.setChecked(False)
-            self.thumb_export_cb.setEnabled(False)
-            self.thumb_export_cb.blockSignals(False)
-            
-            # Update config for the dependent options that got unchecked
-            dependent_updates = {
-                'tools': {
-                    'qct_parse': {
-                        'evaluateBars': False,
-                        'thumbExport': False
-                    }
-                }
-            }
-            config_mgr.update_config('checks', dependent_updates)
-        
-        # Check overall dependencies
-        self.check_qct_dependencies()
-
-    def on_evaluate_bars_changed(self, state):
-        """Handle changes in evaluate bars checkbox with dependency logic"""
-        # Skip updates while loading
-        if self.is_loading:
-            return
-        
-        # Update the config normally
-        new_value = Qt.CheckState(state) == Qt.CheckState.Checked
-        updates = {'tools': {'qct_parse': {'evaluateBars': new_value}}}
-        config_mgr.update_config('checks', updates)
-        
-        # Check overall dependencies
-        self.check_qct_dependencies()
-
-    def on_audio_analysis_changed(self, state):
-        """Handle changes in audio analysis checkbox with dependency logic"""
-        if self.is_loading:
-            return
-
-        new_value = Qt.CheckState(state) == Qt.CheckState.Checked
-        updates = {'tools': {'qct_parse': {'audio_analysis': new_value}}}
-        config_mgr.update_config('checks', updates)
-
-        # Check overall dependencies
-        self.check_qct_dependencies()
-
-    def on_detect_clamped_levels_changed(self, state):
-        """Handle changes in clamped levels detection checkbox with dependency logic"""
-        if self.is_loading:
-            return
-
-        new_value = Qt.CheckState(state) == Qt.CheckState.Checked
-        updates = {'tools': {'qct_parse': {'detect_clamped_levels': new_value}}}
-        config_mgr.update_config('checks', updates)
-
-        # Check overall dependencies
-        self.check_qct_dependencies()
-
-    def on_detect_chroma_phase_errors_changed(self, state):
-        """Handle changes in chroma phase error detection checkbox with dependency logic"""
-        if self.is_loading:
-            return
-
-        new_value = Qt.CheckState(state) == Qt.CheckState.Checked
-        updates = {'tools': {'qct_parse': {'detect_chroma_phase_errors': new_value}}}
-        config_mgr.update_config('checks', updates)
-
-        # Check overall dependencies
-        self.check_qct_dependencies()
-
-    def check_qct_dependencies(self):
-        """Check and enforce QCT Parse dependencies"""
-        # If bars detection is off, then evaluate bars and thumbnail should already be disabled
-        # This check is for the case where both bars detection and evaluate bars are unchecked
-        # Audio clipping, clamped levels, and chroma phase are independent, so only auto-uncheck run_tool if nothing is active
-        if (not self.bars_detection_cb.isChecked() and
-            not self.evaluate_bars_cb.isChecked() and
-            not self.audio_analysis_cb.isChecked() and
-            not self.detect_clamped_levels_cb.isChecked() and
-            not self.detect_chroma_phase_errors_cb.isChecked()):
-            # Uncheck run tool since no detection methods are active
-            self.run_qctparse_cb.blockSignals(True)
-            self.run_qctparse_cb.setChecked(False)
-            self.run_qctparse_cb.blockSignals(False)
-
-            # Disable all dependent options since run tool is now off
-            self.bars_detection_cb.setEnabled(False)
-            self.evaluate_bars_cb.setEnabled(False)
-            self.thumb_export_cb.setEnabled(False)
-            self.audio_analysis_cb.setEnabled(False)
-            self.detect_clamped_levels_cb.setEnabled(False)
-            self.detect_chroma_phase_errors_cb.setEnabled(False)
-
-            # Update config for run_tool change
-            run_tool_updates = {
-                'tools': {
-                    'qct_parse': {
-                        'run_tool': False
-                    }
-                }
-            }
-            config_mgr.update_config('checks', run_tool_updates)
