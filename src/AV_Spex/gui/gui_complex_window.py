@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QCheckBox, QLineEdit,
-    QLabel, QComboBox
+    QLabel, QComboBox, QStyle, QStyleOptionButton
 )
 from PyQt6.QtCore import Qt
 
@@ -108,11 +108,24 @@ class ComplexWindow(QWidget, ThemeableMixin):
         row.addStretch()
         return row
 
+    def _checkbox_text_offset(self):
+        """Width of a checkbox indicator + its label spacing, so text-only
+        rows can line up with the text of indented checkboxes. The style
+        must be queried with a checkbox option/widget — without that
+        context it reports smaller metrics."""
+        cb = QCheckBox()
+        opt = QStyleOptionButton()
+        opt.initFrom(cb)
+        style = cb.style()
+        return (style.pixelMetric(QStyle.PixelMetric.PM_IndicatorWidth, opt, cb)
+                + style.pixelMetric(QStyle.PixelMetric.PM_CheckBoxLabelSpacing, opt, cb))
+
     def _param_row(self, label_text, line_edit):
-        """Return an indented label + input row for a numeric parameter."""
+        """Return an indented label + input row for a numeric parameter.
+        The label is aligned with the text of indented checkboxes."""
         row = QHBoxLayout()
         row.setSpacing(6)  # explicit: nested rows inherit _add_option's 0 spacing
-        row.addSpacing(self.INDENT)
+        row.addSpacing(self.INDENT + self._checkbox_text_offset())
         label = QLabel(label_text)
         label.setStyleSheet("font-weight: bold;")
         line_edit.setMaximumWidth(60)
