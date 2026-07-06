@@ -164,18 +164,26 @@ The Spex tab displays the expected metadata values that AV Spex validates agains
   <img src="https://github.com/JPC-AV/JPC_AV_videoQC/blob/main/images_for_readme/avspex_complex_tab.png?raw=true" alt="AV Spex Complex Tab"/>
 </p>
 
-The Complex tab provides configuration for QCTools, qct-parse, CLAMS detection, and frame analysis — the more advanced processing steps that are typically run during Step 2 or configured independently.
+The Complex tab configures the advanced analysis steps — typically run during Step 2 or configured independently. Options are grouped by what they check, rather than by the tool that implements them:
 
-- **QCTools**: Toggle QCTools analysis on or off and set the output file extension (`qctools.xml.gz` or `qctools.mkv`)
-- **qct-parse**: Enable or disable qct-parse sub-steps including bars detection, bar evaluation, thumbnail export, **audio analysis** (clipping / channel imbalance / audible timecode / dropout), and **clamped levels detection** (broadcast-range level clamping)
-- **CLAMS Detection**: Run the CLAMS SSIM-based SMPTE bars detector and cross-correlation tone detector together as one step, alongside qct-parse for side-by-side comparison (see [Audio Analysis & CLAMS Detection](#audio-analysis--clams-detection) below)
-- **Frame Analysis**: Configure the frame analysis sub-steps (see [Frame Analysis](#frame-analysis) below for details):
+- **QCTools Report**: Run QCTools on the input video to generate the per-frame report that many of the checks below read, and set the report's file extension (`qctools.xml.gz` or `qctools.mkv`). If a report already exists in the `_qc_metadata` or `_vrecord_metadata` directory, it is reused instead of re-running.
+- **Color Bars & Tone**:
+  - **Detect Color Bars**: Find SMPTE color bars in the video content (via qct-parse). The detected section is used downstream to skip bars in BRNG analysis and trim them from the access file. Its sub-options **Evaluate Color Bars** (compare program content against the detected bars) and **Export Thumbnails** (save thumbnails of failing frames) become available when detection is on.
+  - **CLAMS Bars + Tone Detection**: Run the CLAMS SSIM-based SMPTE bars detector and cross-correlation tone detector together as one step, alongside qct-parse for side-by-side comparison (see [Audio Analysis & CLAMS Detection](#audio-analysis--clams-detection) below)
+- **Video Signal Checks** (see [Frame Analysis](#frame-analysis) below for details on the frame analysis sub-steps):
+  - **Detect Clamped Levels**: Broadcast-range level clamping from the analog-to-digital converter (via qct-parse)
+  - **Detect Chroma Phase Errors**: Tape tracking artifacts where chroma collapses toward cyan or magenta (via qct-parse)
+  - **Duplicate Frame Detection**: Runs of repeated frames likely caused by TBC or framesync errors
   - **Bitplane Check**: Verify that the 9th and 10th bits of 10-bit video contain data
-  - **Border Detection**: Toggle on/off, select mode (simple or sophisticated), and set pixel crop width
+  - **Border Detection**: Toggle on/off and select mode — simple (fixed pixel crop) or sophisticated (edge detection, with tunable parameters)
+  - **Signalstats Analysis**: Enhanced FFprobe signalstats over the detected active area (requires Border Detection)
   - **BRNG Analysis**: Toggle on/off, set maximum analysis duration, and enable or disable automatic color bar skipping
-  - **Signalstats**: Toggle on/off
-  - **Dropped Sample Detection**: Detect potential audio sample drops from TBC/framesync or ADC devices
-  - **Duplicate Frame Detection**: Detect runs of repeated frames likely caused by TBC or framesync errors
+  - **Analysis Periods**: The number and length of the time windows sampled across the video, shared by Signalstats and BRNG analysis
+- **Audio Checks**:
+  - **Audio Analysis**: Clipping, channel imbalance, audible timecode (LTC), and audio dropout (via qct-parse)
+  - **Dropped Sample Detection**: Potential audio sample drops from TBC/framesync or ADC devices
+
+Checks marked "via qct-parse" read the QCTools report through the qct-parse tool, and enabling any of them turns qct-parse on automatically — there is no separate qct-parse "Run Tool" checkbox on this tab (the Checks tab still exposes one). Turning off all qct-parse-backed checks turns the tool off.
 
 Once your Spex selections are complete, navigate to the Checks tab and click **Check Spex!**.
 
@@ -216,11 +224,11 @@ av-spex -pp ffprobe
 
 ## Audio Analysis & CLAMS Detection
 
-AV Spex includes detection features for audio quality and SMPTE bars-and-tones segments. Both can be toggled in the **Complex** tab (qct-parse and CLAMS Detection sections) or from the CLI.
+AV Spex includes detection features for audio quality and SMPTE bars-and-tones segments. Both can be toggled in the **Complex** tab (the Audio Checks and Color Bars & Tone sections, respectively) or from the CLI.
 
 ### qct-parse Audio Analysis
 
-When **Perform Audio Analysis** is enabled in qct-parse, AV Spex analyzes the audio track for:
+When **Audio Analysis** is enabled (Audio Checks section of the Complex tab), AV Spex analyzes the audio track for:
 
 - **Clipping** — samples at or near 0 dBFS that indicate the signal exceeded the digital ceiling
 - **Channel imbalance** — significant level differences between left and right channels
@@ -229,7 +237,7 @@ When **Perform Audio Analysis** is enabled in qct-parse, AV Spex analyzes the au
 
 Results are written to the per-file log and included in the HTML report.
 
-Audio analysis runs inside qct-parse, so `qct_parse.run_tool` must be on. The CLI auto-enables it when `--enable-audio-analysis on` is passed.
+Audio analysis runs inside qct-parse, so `qct_parse.run_tool` must be on. Both the GUI and the CLI auto-enable it — the Complex tab when the Audio Analysis box is checked, the CLI when `--enable-audio-analysis on` is passed.
 
 ```bash
 av-spex --enable-audio-analysis on
@@ -237,7 +245,7 @@ av-spex --enable-audio-analysis on
 
 ### Clamped Levels Detection
 
-The qct-parse **Detect Clamped Levels** option detects broadcast-range level clamping introduced by some analog-to-digital converters, where signal that exceeded broadcast-legal range was hard-limited rather than preserved.
+The **Detect Clamped Levels** option (Video Signal Checks section of the Complex tab) detects broadcast-range level clamping introduced by some analog-to-digital converters, where signal that exceeded broadcast-legal range was hard-limited rather than preserved. It runs via qct-parse.
 
 ```bash
 av-spex --enable-clamped-levels on
