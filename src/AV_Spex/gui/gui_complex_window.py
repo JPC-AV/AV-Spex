@@ -15,7 +15,8 @@ class ComplexWindow(QWidget, ThemeableMixin):
 
     Sections are grouped by what is being checked (report generation,
     color bars & tone, video signal, audio) rather than by which tool
-    implements the check. Full descriptions live in tooltips.
+    implements the check. Each option carries a short description label
+    beneath it, matching the other tabs.
 
     qct-parse's run_tool is implicit here: turning on any qct-parse-backed
     check enables it, turning off all of them disables it (mirrors the
@@ -25,6 +26,7 @@ class ComplexWindow(QWidget, ThemeableMixin):
     """
 
     INDENT = 24
+    DESC_INDENT = 20
 
     def __init__(self):
         super().__init__()
@@ -44,10 +46,6 @@ class ComplexWindow(QWidget, ThemeableMixin):
         """Create fixed layout structure"""
         main_layout = QVBoxLayout(self)
 
-        hint = QLabel("Hover over any option for a description.")
-        hint.setStyleSheet("font-style: italic;")
-        main_layout.addWidget(hint)
-
         self.setup_report_generation_section(main_layout)
         self.setup_colorbars_section(main_layout)
         self.setup_video_signal_section(main_layout)
@@ -57,11 +55,17 @@ class ComplexWindow(QWidget, ThemeableMixin):
 
     # --- small layout helpers -------------------------------------------
 
-    def _make_checkbox(self, text, tooltip):
+    def _make_checkbox(self, text):
         cb = QCheckBox(text)
         cb.setStyleSheet("font-weight: bold;")
-        cb.setToolTip(tooltip)
         return cb
+
+    def _desc_label(self, text, extra_indent=0):
+        """Return a wrapped description label indented under its option."""
+        label = QLabel(text)
+        label.setIndent(self.DESC_INDENT + extra_indent)
+        label.setWordWrap(True)
+        return label
 
     def _indent_row(self, widget):
         """Return an HBox with the widget indented under its parent option."""
@@ -71,15 +75,12 @@ class ComplexWindow(QWidget, ThemeableMixin):
         row.addStretch()
         return row
 
-    def _param_row(self, label_text, line_edit, tooltip=None):
+    def _param_row(self, label_text, line_edit):
         """Return an indented label + input row for a numeric parameter."""
         row = QHBoxLayout()
         row.addSpacing(self.INDENT)
         label = QLabel(label_text)
         label.setStyleSheet("font-weight: bold;")
-        if tooltip:
-            label.setToolTip(tooltip)
-            line_edit.setToolTip(tooltip)
         line_edit.setMaximumWidth(60)
         row.addWidget(label)
         row.addWidget(line_edit)
@@ -98,14 +99,12 @@ class ComplexWindow(QWidget, ThemeableMixin):
 
         layout = QVBoxLayout()
 
-        self.run_qctools_cb = self._make_checkbox(
-            "Run QCTools",
-            "Run QCTools on the input video file to generate the per-frame report "
-            "that the color bars, video signal, and audio checks read. An existing "
-            "report in the _qc_metadata or _vrecord_metadata directory is reused "
-            "instead of re-running."
-        )
+        self.run_qctools_cb = self._make_checkbox("Run QCTools")
         layout.addWidget(self.run_qctools_cb)
+        layout.addWidget(self._desc_label(
+            "Run QCTools on the input video file to generate the per-frame "
+            "report that the color bars, video signal, and audio checks read. "
+            "An existing report is reused instead of re-running."))
 
         ext_row = QHBoxLayout()
         ext_label = QLabel("File Extension:")
@@ -113,13 +112,13 @@ class ComplexWindow(QWidget, ThemeableMixin):
         self.qctools_ext_combo = QComboBox()
         self.qctools_ext_combo.addItems(["qctools.xml.gz", "qctools.mkv"])
         self.qctools_ext_combo.setMinimumWidth(160)
-        ext_tooltip = "Set the extension for QCTools output files"
-        ext_label.setToolTip(ext_tooltip)
-        self.qctools_ext_combo.setToolTip(ext_tooltip)
         ext_row.addWidget(ext_label)
         ext_row.addWidget(self.qctools_ext_combo)
         ext_row.addStretch()
+        layout.addSpacing(6)
         layout.addLayout(ext_row)
+        layout.addWidget(self._desc_label(
+            "Set the extension for QCTools output files"))
 
         self.qctools_group.setLayout(layout)
         main_layout.addWidget(self.qctools_group)
@@ -136,37 +135,32 @@ class ComplexWindow(QWidget, ThemeableMixin):
 
         layout = QVBoxLayout()
 
-        self.bars_detection_cb = self._make_checkbox(
-            "Detect Color Bars",
-            "Find SMPTE color bars in the video content by reading the QCTools "
-            "report (runs via qct-parse). The detected bars section is used "
-            "downstream to skip bars in BRNG analysis and trim them from the "
-            "access file."
-        )
+        self.bars_detection_cb = self._make_checkbox("Detect Color Bars")
         layout.addWidget(self.bars_detection_cb)
+        layout.addWidget(self._desc_label(
+            "Detect color bars in the video content (via qct-parse). The "
+            "detected section is used to skip bars in BRNG analysis and trim "
+            "them from the access file."))
 
-        self.evaluate_bars_cb = self._make_checkbox(
-            "Evaluate Color Bars",
-            "Compare program content against the detected color bars for validation"
-        )
+        self.evaluate_bars_cb = self._make_checkbox("Evaluate Color Bars")
         layout.addLayout(self._indent_row(self.evaluate_bars_cb))
+        layout.addWidget(self._desc_label(
+            "Compare content to color bars for validation",
+            extra_indent=self.INDENT))
 
-        self.thumb_export_cb = self._make_checkbox(
-            "Export Thumbnails",
-            "Export thumbnails of failed frames for review"
-        )
+        self.thumb_export_cb = self._make_checkbox("Export Thumbnails")
         layout.addLayout(self._indent_row(self.thumb_export_cb))
+        layout.addWidget(self._desc_label(
+            "Export thumbnails of failed frames for review",
+            extra_indent=self.INDENT))
 
-        self.run_clams_detection_cb = self._make_checkbox(
-            "CLAMS Bars + Tone Detection",
-            "Run the CLAMS SSIM-based SMPTE bars detector and the cross-correlation "
-            "tone detector together. The bars detector runs in parallel with "
-            "qct-parse for side-by-side comparison; the tone detector identifies "
-            "spans of monotonic audio (e.g. the tones in SMPTE bars-and-tones). "
-            "qct-parse remains authoritative for downstream BRNG-skip and "
-            "access-file trim."
-        )
+        self.run_clams_detection_cb = self._make_checkbox("CLAMS Bars + Tone Detection")
         layout.addWidget(self.run_clams_detection_cb)
+        layout.addWidget(self._desc_label(
+            "Run the CLAMS SSIM-based SMPTE bars detector and the "
+            "cross-correlation tone detector together, in parallel with "
+            "qct-parse for side-by-side comparison. qct-parse remains "
+            "authoritative for BRNG-skip and access-file trim."))
 
         self.colorbars_group.setLayout(layout)
         main_layout.addWidget(self.colorbars_group)
@@ -183,59 +177,48 @@ class ComplexWindow(QWidget, ThemeableMixin):
 
         layout = QVBoxLayout()
 
-        self.detect_clamped_levels_cb = self._make_checkbox(
-            "Detect Clamped Levels",
-            "Detect broadcast-range level clamping from the analog-to-digital "
-            "converter (runs via qct-parse on the QCTools report)"
-        )
+        self.detect_clamped_levels_cb = self._make_checkbox("Detect Clamped Levels")
         layout.addWidget(self.detect_clamped_levels_cb)
+        layout.addWidget(self._desc_label(
+            "Detect broadcast-range level clamping from the analog-to-digital converter"))
 
-        self.detect_chroma_phase_errors_cb = self._make_checkbox(
-            "Detect Chroma Phase Errors",
-            "Detect tape tracking artifacts where chroma collapses toward cyan "
-            "or magenta (runs via qct-parse on the QCTools report)"
-        )
+        self.detect_chroma_phase_errors_cb = self._make_checkbox("Detect Chroma Phase Errors")
         layout.addWidget(self.detect_chroma_phase_errors_cb)
+        layout.addWidget(self._desc_label(
+            "Detect tape tracking artifacts where chroma collapses toward cyan or magenta"))
 
-        self.enable_duplicate_frame_cb = self._make_checkbox(
-            "Duplicate Frame Detection",
-            "Detect runs of repeated frames likely caused by TBC or framesync "
-            "errors. Uses QCTools YDIF/UDIF/VDIF to find candidate freezes "
-            "(excluding color bars and black segments), then verifies each "
-            "candidate with OpenCV."
-        )
+        self.enable_duplicate_frame_cb = self._make_checkbox("Duplicate Frame Detection")
         layout.addWidget(self.enable_duplicate_frame_cb)
+        layout.addWidget(self._desc_label(
+            "Detect runs of repeated frames likely caused by TBC or framesync "
+            "errors, using QCTools YDIF/UDIF/VDIF to find candidate freezes "
+            "and OpenCV to verify them"))
 
-        self.enable_bitplane_check_cb = self._make_checkbox(
-            "Bitplane Check",
+        self.enable_bitplane_check_cb = self._make_checkbox("Bitplane Check")
+        layout.addWidget(self.enable_bitplane_check_cb)
+        layout.addWidget(self._desc_label(
             "Verify that the 9th and 10th bits of 10-bit video contain data. "
             "Some TBC/framesync devices truncate these bits, producing "
-            "effectively 8-bit video. Reads the video file directly."
-        )
-        layout.addWidget(self.enable_bitplane_check_cb)
+            "effectively 8-bit video."))
 
         # Border detection: checkbox + mode on one row, params below
         border_row = QHBoxLayout()
-        self.enable_border_detection_cb = self._make_checkbox(
-            "Border Detection",
-            "Detect and crop blanking borders from the video. Required for "
-            "Signalstats Analysis."
-        )
+        self.enable_border_detection_cb = self._make_checkbox("Border Detection")
         border_mode_label = QLabel("Mode:")
         border_mode_label.setStyleSheet("font-weight: bold;")
         self.border_mode_combo = QComboBox()
         self.border_mode_combo.addItem("Simple", "simple")
         self.border_mode_combo.addItem("Sophisticated", "sophisticated")
-        mode_tooltip = ("Simple crops a fixed number of pixels from each edge; "
-                        "Sophisticated detects borders via edge analysis")
-        border_mode_label.setToolTip(mode_tooltip)
-        self.border_mode_combo.setToolTip(mode_tooltip)
         border_row.addWidget(self.enable_border_detection_cb)
         border_row.addSpacing(12)
         border_row.addWidget(border_mode_label)
         border_row.addWidget(self.border_mode_combo)
         border_row.addStretch()
         layout.addLayout(border_row)
+        layout.addWidget(self._desc_label(
+            "Detect and crop blanking borders from the video. Simple mode "
+            "crops a fixed number of pixels; Sophisticated mode detects "
+            "borders via edge analysis. Required for Signalstats."))
 
         # Simple border parameters
         self.simple_params_widget = QWidget()
@@ -243,8 +226,10 @@ class ComplexWindow(QWidget, ThemeableMixin):
         simple_params_layout.setContentsMargins(0, 0, 0, 0)
         self.simple_border_pixels_input = QLineEdit("25")
         simple_params_layout.addLayout(self._param_row(
-            "Border Pixels:", self.simple_border_pixels_input,
-            "Fixed number of pixels to crop from each edge"))
+            "Border Pixels:", self.simple_border_pixels_input))
+        simple_params_layout.addWidget(self._desc_label(
+            "Fixed number of pixels to crop from each edge",
+            extra_indent=self.INDENT))
         layout.addWidget(self.simple_params_widget)
 
         # Sophisticated border parameters
@@ -254,63 +239,71 @@ class ComplexWindow(QWidget, ThemeableMixin):
 
         self.soph_threshold_input = QLineEdit("10")
         soph_layout.addLayout(self._param_row(
-            "Brightness Threshold:", self.soph_threshold_input,
-            "Border brightness threshold: 0 = pure black, 255 = pure white"))
+            "Brightness Threshold:", self.soph_threshold_input))
+        soph_layout.addWidget(self._desc_label(
+            "0 = pure black, 255 = pure white", extra_indent=self.INDENT))
 
         self.soph_edge_width_input = QLineEdit("100")
         soph_layout.addLayout(self._param_row(
-            "Edge Sample Width:", self.soph_edge_width_input,
-            "Pixels to examine from each edge"))
+            "Edge Sample Width:", self.soph_edge_width_input))
+        soph_layout.addWidget(self._desc_label(
+            "Pixels to examine from each edge", extra_indent=self.INDENT))
 
         self.soph_sample_frames_input = QLineEdit("30")
         soph_layout.addLayout(self._param_row(
-            "Sample Frames:", self.soph_sample_frames_input,
-            "Number of frames to sample across the video"))
+            "Sample Frames:", self.soph_sample_frames_input))
+        soph_layout.addWidget(self._desc_label(
+            "Number of frames to sample across the video",
+            extra_indent=self.INDENT))
 
         self.soph_padding_input = QLineEdit("5")
         soph_layout.addLayout(self._param_row(
-            "Padding:", self.soph_padding_input,
-            "Extra margin around detected borders"))
+            "Padding:", self.soph_padding_input))
+        soph_layout.addWidget(self._desc_label(
+            "Extra margin around detected borders", extra_indent=self.INDENT))
 
         self.auto_retry_borders_cb = self._make_checkbox(
-            "Auto-retry if BRNG finds edge artifacts",
-            "Automatically adjusts borders if BRNG analysis detects edge artifacts"
-        )
+            "Auto-retry if BRNG finds edge artifacts")
         soph_layout.addLayout(self._indent_row(self.auto_retry_borders_cb))
+        soph_layout.addWidget(self._desc_label(
+            "Automatically adjusts borders if edge artifacts are found",
+            extra_indent=self.INDENT))
 
         self.max_border_retries_input = QLineEdit("5")
         soph_layout.addLayout(self._param_row(
-            "Max Retries:", self.max_border_retries_input,
-            "Maximum number of border adjustment attempts"))
+            "Max Retries:", self.max_border_retries_input))
+        soph_layout.addWidget(self._desc_label(
+            "Maximum number of border adjustment attempts",
+            extra_indent=self.INDENT))
 
         layout.addWidget(self.sophisticated_params_widget)
         self.sophisticated_params_widget.setVisible(False)
 
         # Signalstats
-        self.enable_signalstats_cb = self._make_checkbox(
-            "Signalstats Analysis",
-            "Enhanced FFprobe signalstats over the detected active picture area. "
-            "Requires Border Detection."
-        )
+        self.enable_signalstats_cb = self._make_checkbox("Signalstats Analysis")
         layout.addWidget(self.enable_signalstats_cb)
+        layout.addWidget(self._desc_label(
+            "Enhanced FFprobe signalstats over the detected active picture "
+            "area (requires Border Detection)"))
 
         # BRNG analysis
-        self.enable_brng_analysis_cb = self._make_checkbox(
-            "BRNG Analysis",
-            "Analyze broadcast range violations in the active picture area"
-        )
+        self.enable_brng_analysis_cb = self._make_checkbox("BRNG Analysis")
         layout.addWidget(self.enable_brng_analysis_cb)
+        layout.addWidget(self._desc_label(
+            "Analyze broadcast range violations in the active picture area"))
 
         self.brng_duration_input = QLineEdit("300")
         layout.addLayout(self._param_row(
-            "Duration Limit (s):", self.brng_duration_input,
-            "Maximum duration to analyze for BRNG violations"))
+            "Duration Limit (s):", self.brng_duration_input))
+        layout.addWidget(self._desc_label(
+            "Maximum duration to analyze for BRNG violations",
+            extra_indent=self.INDENT))
 
-        self.brng_skip_colorbars_cb = self._make_checkbox(
-            "Skip Color Bars",
-            "Exclude color bar sections from BRNG analysis"
-        )
+        self.brng_skip_colorbars_cb = self._make_checkbox("Skip Color Bars")
         layout.addLayout(self._indent_row(self.brng_skip_colorbars_cb))
+        layout.addWidget(self._desc_label(
+            "Exclude color bar sections from BRNG analysis",
+            extra_indent=self.INDENT))
 
         # Shared analysis periods (signalstats + BRNG)
         periods_row = QHBoxLayout()
@@ -322,11 +315,6 @@ class ComplexWindow(QWidget, ThemeableMixin):
         periods_duration_label = QLabel("Duration (s):")
         self.analysis_period_duration_input = QLineEdit("60")
         self.analysis_period_duration_input.setMaximumWidth(60)
-        periods_tooltip = ("Number and length of the time windows sampled across "
-                           "the video for Signalstats and BRNG analysis")
-        for w in (periods_label, periods_count_label, self.analysis_period_count_input,
-                  periods_duration_label, self.analysis_period_duration_input):
-            w.setToolTip(periods_tooltip)
         periods_row.addWidget(periods_label)
         periods_row.addWidget(periods_count_label)
         periods_row.addWidget(self.analysis_period_count_input)
@@ -334,7 +322,11 @@ class ComplexWindow(QWidget, ThemeableMixin):
         periods_row.addWidget(periods_duration_label)
         periods_row.addWidget(self.analysis_period_duration_input)
         periods_row.addStretch()
+        layout.addSpacing(6)
         layout.addLayout(periods_row)
+        layout.addWidget(self._desc_label(
+            "Number and length of the time windows sampled across the video "
+            "for Signalstats and BRNG analysis"))
 
         self.video_signal_group.setLayout(layout)
         main_layout.addWidget(self.video_signal_group)
@@ -355,20 +347,18 @@ class ComplexWindow(QWidget, ThemeableMixin):
 
         layout = QVBoxLayout()
 
-        self.audio_analysis_cb = self._make_checkbox(
-            "Audio Analysis",
-            "Detect audio clipping, channel imbalance, audible timecode (LTC), "
-            "and audio dropout (runs via qct-parse on the QCTools report)"
-        )
+        self.audio_analysis_cb = self._make_checkbox("Audio Analysis")
         layout.addWidget(self.audio_analysis_cb)
+        layout.addWidget(self._desc_label(
+            "Detect audio clipping, channel imbalance, audible timecode "
+            "(LTC), and audio dropout"))
 
-        self.enable_dropped_sample_cb = self._make_checkbox(
-            "Dropped Sample Detection",
+        self.enable_dropped_sample_cb = self._make_checkbox("Dropped Sample Detection")
+        layout.addWidget(self.enable_dropped_sample_cb)
+        layout.addWidget(self._desc_label(
             "Detect potential audio sample drops from TBC/framesync or ADC "
             "devices. Generates a spectrogram to identify audible pops and "
-            "compares audio/video durations. Reads the video file directly."
-        )
-        layout.addWidget(self.enable_dropped_sample_cb)
+            "compares audio/video durations."))
 
         self.audio_group.setLayout(layout)
         main_layout.addWidget(self.audio_group)
@@ -394,12 +384,8 @@ class ComplexWindow(QWidget, ThemeableMixin):
 
         if not border_enabled:
             self.enable_signalstats_cb.setChecked(False)
-            self.enable_signalstats_cb.setToolTip("Requires Border Detection to be enabled")
             self.enable_signalstats_cb.setEnabled(False)
         else:
-            self.enable_signalstats_cb.setToolTip(
-                "Enhanced FFprobe signalstats over the detected active picture area. "
-                "Requires Border Detection.")
             self.enable_signalstats_cb.setEnabled(True)
 
     def _apply_bars_dependencies(self):
