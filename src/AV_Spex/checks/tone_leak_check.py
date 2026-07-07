@@ -195,11 +195,13 @@ def _flagged_events(metrics, window_sec=TONE_LEAK_WINDOW_SEC):
     return out
 
 
-def _analyze_stream(video_path, stream_index, num_channels, check_cancelled=None):
+def _analyze_stream(video_path, stream_index, num_channels, check_cancelled=None,
+                    progress_cb=None):
     """Decode one audio stream via ffmpeg and return per-channel metrics lists.
 
-    Returns {channel: [(rms_db, comb_db, tone_level_db), ...]} or None on
-    decode failure / cancellation.
+    `progress_cb`, when given, is called with the number of windows analyzed
+    so far after each window. Returns {channel: [(rms_db, comb_db,
+    tone_level_db), ...]} or None on decode failure / cancellation.
     """
     n = TONE_LEAK_WINDOW_SEC * TONE_LEAK_ANALYSIS_SR
     window = np.hanning(n)
@@ -229,6 +231,8 @@ def _analyze_stream(video_path, stream_index, num_channels, check_cancelled=None
             for ch in range(num_channels):
                 seg = block[:, ch].astype(np.float64)
                 metrics[ch].append(_window_metrics(seg, window=window))
+            if progress_cb:
+                progress_cb(len(metrics[0]))
     finally:
         proc.stdout.close()
         stderr = proc.stderr.read().decode('utf-8', 'replace').strip()
@@ -298,7 +302,8 @@ def _write_tone_leak_results(report_directory, stream_results, fps=None,
 
 
 def analyzeToneLeak(video_path, report_directory, fps=None, tc_start_frames=0,
-                    tc_drop_frame=False, check_cancelled=None, signals=None):
+                    tc_drop_frame=False, check_cancelled=None, signals=None,
+                    total_duration=None):
     """
     Detect reference-tone leak on every audio stream/channel of `video_path`.
 
@@ -309,7 +314,10 @@ def analyzeToneLeak(video_path, report_directory, fps=None, tc_start_frames=0,
         tc_start_frames (int): Stream start timecode offset in frames.
         tc_drop_frame (bool): Whether the file's timecode is drop-frame.
         check_cancelled (callable): Optional cancellation check.
-        signals: Optional signals object (unused; accepted for call-site symmetry).
+        signals: Optional signals object; when it has tone_leak_progress, the
+            detection emits its own 0-100 pass on the detail progress bar.
+        total_duration (float or None): File duration in seconds, used to
+            scale progress emission.
 
     Returns:
         dict: {'tone_leak_detected', 'flagged_channels', 'channels'} or None if
@@ -320,11 +328,33 @@ def analyzeToneLeak(video_path, report_directory, fps=None, tc_start_frames=0,
         logger.warning("Tone-leak detection: no audio streams found\n")
         return None
 
+    emit_progress = signals is not None and hasattr(signals, 'tone_leak_progress')
+    n_streams = sum(1 for nch in channel_counts if nch > 0)
+    expected_windows = int(total_duration // TONE_LEAK_WINDOW_SEC) if total_duration else 0
+    last_pct = -1
+
+    def _emit(pct):
+        nonlocal last_pct
+        if emit_progress and pct != last_pct:
+            signals.tone_leak_progress.emit(pct)
+            last_pct = pct
+
+    _emit(0)
+
     stream_results = {}
+    stream_num = 0
     for si, nch in enumerate(channel_counts):
         if nch <= 0:
             continue
-        metrics = _analyze_stream(video_path, si, nch, check_cancelled=check_cancelled)
+
+        def _stream_progress(windows_done, _base=stream_num):
+            if expected_windows and n_streams:
+                frac = (_base + min(1.0, windows_done / expected_windows)) / n_streams
+                _emit(min(99, int(round(100 * frac))))
+
+        metrics = _analyze_stream(video_path, si, nch, check_cancelled=check_cancelled,
+                                  progress_cb=_stream_progress if emit_progress else None)
+        stream_num += 1
         if metrics is None:
             if check_cancelled and check_cancelled():
                 return None
@@ -345,6 +375,8 @@ def analyzeToneLeak(video_path, report_directory, fps=None, tc_start_frames=0,
         report_directory, stream_results, fps=fps,
         tc_start_frames=tc_start_frames, tc_drop_frame=tc_drop_frame,
     )
+
+    _emit(100)
 
     flagged = [(si, ch) for (si, ch), res in sorted(stream_results.items())
                if res['verdict']['tone_leak_detected']]

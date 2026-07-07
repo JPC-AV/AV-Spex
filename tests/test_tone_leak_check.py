@@ -185,6 +185,40 @@ def test_analyze_tone_leak_flags_leaky_channel_only(tmp_path):
     assert ev_rows[1][2] == "0" and ev_rows[1][3] == "0"
 
 
+class _FakeSignals:
+    """Stands in for ProcessingSignals: captures tone_leak_progress emits."""
+
+    class _Sig:
+        def __init__(self):
+            self.values = []
+
+        def emit(self, value):
+            self.values.append(value)
+
+    def __init__(self):
+        self.tone_leak_progress = self._Sig()
+
+
+@needs_ffmpeg
+def test_analyze_tone_leak_emits_own_progress_pass(tmp_path):
+    n = 5 * WIN
+    wav_path = tmp_path / "progress.wav"
+    _write_stereo_wav(wav_path, _noise(-60, n), _noise(-60, n))
+
+    signals = _FakeSignals()
+    results = tlc.analyzeToneLeak(str(wav_path), str(tmp_path), signals=signals,
+                                  total_duration=n / SR)
+    assert results is not None
+
+    values = signals.tone_leak_progress.values
+    # A dedicated 0-100 pass: starts at 0, ends at 100, never goes backwards.
+    assert values[0] == 0
+    assert values[-1] == 100
+    assert values == sorted(values)
+    # Intermediate per-window updates were emitted, not just the endpoints.
+    assert len(values) > 2
+
+
 @needs_ffmpeg
 def test_analyze_tone_leak_clean_file_writes_empty_events(tmp_path):
     n = 5 * WIN

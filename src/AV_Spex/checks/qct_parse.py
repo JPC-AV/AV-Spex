@@ -4037,6 +4037,7 @@ def run_qctparse(video_path, qctools_output_path, report_directory, check_cancel
             fps=video_fps, tc_start_frames=tc_start_frames,
             tc_drop_frame=tc_drop_frame,
             check_cancelled=check_cancelled, signals=signals,
+            total_duration=total_duration,
         )
         if tone_leak_results is None and not check_cancelled():
             logger.warning("Tone-leak detection could not be performed\n")
