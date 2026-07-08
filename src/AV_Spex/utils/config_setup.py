@@ -335,6 +335,7 @@ class QCTParseToolConfig:
     audio_analysis: bool = False
     detect_clamped_levels: bool = False
     detect_chroma_phase_errors: bool = False
+    detect_tone_leak: bool = False
 
 @dataclass
 class ClamsBarsParams:

@@ -395,6 +395,11 @@ class ComplexWindow(QWidget, ThemeableMixin):
             "Detect audio clipping, channel imbalance, audible timecode "
             "(LTC), and audio dropout"))
 
+        self.detect_tone_leak_cb = self._make_checkbox("Tone Leak Detection")
+        self._add_option(layout, self.detect_tone_leak_cb, self._desc_label(
+            "Detect a 1 kHz reference tone leaking from the transfer chain, "
+            "heard as a faint high-pitched whine or squeak in quiet passages"))
+
         self.enable_dropped_sample_cb = self._make_checkbox("Dropped Sample Detection")
         self._add_option(layout, self.enable_dropped_sample_cb, self._desc_label(
             "Detect potential audio sample drops from TBC/framesync or ADC "
@@ -473,7 +478,8 @@ class ComplexWindow(QWidget, ThemeableMixin):
         # derives run_tool implicitly
         for cb in (self.bars_detection_cb, self.evaluate_bars_cb,
                    self.thumb_export_cb, self.audio_analysis_cb,
-                   self.detect_clamped_levels_cb, self.detect_chroma_phase_errors_cb):
+                   self.detect_clamped_levels_cb, self.detect_chroma_phase_errors_cb,
+                   self.detect_tone_leak_cb):
             cb.stateChanged.connect(self.on_qct_parse_flag_changed)
 
         # CLAMS detection — single toggle runs both bars and tone detectors.
@@ -577,6 +583,7 @@ class ComplexWindow(QWidget, ThemeableMixin):
         self.audio_analysis_cb.setChecked(run_tool and getattr(qct, 'audio_analysis', False))
         self.detect_clamped_levels_cb.setChecked(run_tool and getattr(qct, 'detect_clamped_levels', False))
         self.detect_chroma_phase_errors_cb.setChecked(run_tool and getattr(qct, 'detect_chroma_phase_errors', False))
+        self.detect_tone_leak_cb.setChecked(run_tool and getattr(qct, 'detect_tone_leak', False))
         self._apply_bars_dependencies()
 
         # CLAMS detection — single toggle runs both bars and tone detectors.
@@ -657,6 +664,7 @@ class ComplexWindow(QWidget, ThemeableMixin):
             self.audio_analysis_cb.isChecked(),
             self.detect_clamped_levels_cb.isChecked(),
             self.detect_chroma_phase_errors_cb.isChecked(),
+            self.detect_tone_leak_cb.isChecked(),
         ])
         updates = {'tools': {'qct_parse': {
             'run_tool': run_tool,
@@ -666,6 +674,7 @@ class ComplexWindow(QWidget, ThemeableMixin):
             'audio_analysis': self.audio_analysis_cb.isChecked(),
             'detect_clamped_levels': self.detect_clamped_levels_cb.isChecked(),
             'detect_chroma_phase_errors': self.detect_chroma_phase_errors_cb.isChecked(),
+            'detect_tone_leak': self.detect_tone_leak_cb.isChecked(),
         }}}
         config_mgr.update_config('checks', updates)
 

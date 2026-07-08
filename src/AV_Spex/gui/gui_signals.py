@@ -27,6 +27,7 @@ class ProcessingSignals(QObject):
     qctools_progress = pyqtSignal(int)       # Signal for qctools xml creation progress percentage
     qctparse_progress = pyqtSignal(int)      # Signal for qct-parse analysis progress percentage
     clams_detection_progress = pyqtSignal(int)  # Signal for CLAMS detection (bars + tone) progress percentage
+    tone_leak_progress = pyqtSignal(int)        # Signal for tone leak detection progress percentage
     mkvalidator_progress = pyqtSignal(int)     # Signal for mkvalidator validation progress percentage (time-estimated)
     frame_analysis_progress = pyqtSignal(int)  # Signal for frame analysis progress percentage
     report_progress = pyqtSignal(int)          # Signal for HTML report generation progress percentage

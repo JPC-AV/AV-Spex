@@ -26,6 +26,7 @@ from collections import defaultdict
 from AV_Spex.utils.log_setup import logger, report_ffmpeg_stderr
 from AV_Spex.utils.config_setup import ChecksConfig, SpexConfig
 from AV_Spex.utils.config_manager import ConfigManager
+from AV_Spex.checks.tone_leak_check import analyzeToneLeak
 
 config_mgr = ConfigManager()
 
@@ -4022,6 +4023,24 @@ def run_qctparse(video_path, qctools_output_path, report_directory, check_cancel
             logger.warning("Audible timecode detection could not be performed\n")
         if dropout_results is None:
             logger.warning("Audio dropout detection could not be performed\n")
+
+    if check_cancelled():
+        return None
+
+    ######## Reference-Tone Leak Detection ########
+    # Reads decoded PCM from the video file itself (not the QCTools sidecar),
+    # so it supports multi-stream sources and is not gated like audio_analysis.
+    if qct_parse.get('detect_tone_leak', False):
+        logger.debug(f"Starting tone-leak detection on {baseName}\n")
+        tone_leak_results = analyzeToneLeak(
+            video_path, report_directory,
+            fps=video_fps, tc_start_frames=tc_start_frames,
+            tc_drop_frame=tc_drop_frame,
+            check_cancelled=check_cancelled, signals=signals,
+            total_duration=total_duration,
+        )
+        if tone_leak_results is None and not check_cancelled():
+            logger.warning("Tone-leak detection could not be performed\n")
 
     if check_cancelled():
         return None
