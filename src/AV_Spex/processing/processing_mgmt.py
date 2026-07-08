@@ -550,7 +550,7 @@ def find_qctools_report(source_directory, video_id):
     for folder in search_folders:
         if folder.exists() and folder.is_dir():
             for pattern in qctools_patterns:
-                matches = list(folder.glob(pattern))
+                matches = [f for f in folder.glob(pattern) if not dir_setup.is_hidden_file(f.name)]
                 if matches:
                     return str(matches[0])  # Return the first match
     

@@ -33,6 +33,15 @@ def validate_input_paths(input_paths, is_file_mode):
     return source_directories
 
 
+def is_hidden_file(filename):
+    """Return True for hidden files that must never be treated as content.
+
+    Covers AppleDouble sidecars ('._JPC_AV_03656.mkv') that macOS creates on
+    non-native volumes (SMB shares, FAT/exFAT drives), plus '.DS_Store' etc.
+    """
+    return os.path.basename(filename).startswith('.')
+
+
 def move_vrec_files(directory, video_id):
     # Define expected file extensions once
     vrecord_extensions = (
@@ -51,6 +60,8 @@ def move_vrec_files(directory, video_id):
     # Collect matching files from the main directory
     files_to_move = []
     for filename in os.listdir(directory):
+        if is_hidden_file(filename):
+            continue
         file_path = os.path.join(directory, filename)
         if os.path.isfile(file_path) and filename.endswith(vrecord_extensions):
             files_to_move.append((file_path, filename))
@@ -59,7 +70,7 @@ def move_vrec_files(directory, video_id):
     if not files_to_move:
         if os.path.exists(vrecord_directory):
             existing_files = os.listdir(vrecord_directory)
-            if any(f.endswith(vrecord_extensions) for f in existing_files):
+            if any(f.endswith(vrecord_extensions) for f in existing_files if not is_hidden_file(f)):
                 logger.debug(f"Existing vrecord files found in {os.path.basename(directory)}/{os.path.basename(vrecord_directory)}\n")
                 return
         logger.debug("No vrecord files found.\n")
@@ -89,6 +100,8 @@ def find_video_file(source_directory, extension=None):
     # Create empty list to store any found video files
     found_videos = []
     for filename in os.listdir(source_directory):
+        if is_hidden_file(filename):
+            continue
         if filename.lower().endswith(suffix):
             if 'qctools' not in filename.lower():
                 found_videos.append(filename)
@@ -244,7 +257,7 @@ def initialize_directory(source_directory):
     # Iterate through files in the directory to identify access file
     access_file_found = None
     for filename in os.listdir(source_directory):
-        if filename.lower().endswith('mp4'):
+        if not is_hidden_file(filename) and filename.lower().endswith('mp4'):
             access_file_found = filename
             logger.info("Existing access file found!\n")
             break
