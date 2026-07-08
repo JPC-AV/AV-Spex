@@ -17,6 +17,12 @@ Drop the result into `<video_id>_qc_metadata/` (this script does that by default
 and a normal AV Spex run will discover it via `find_qctools_report()`, skip
 `qcli`, and run qct-parse on it.
 
+The audio pass of this script now has an in-app counterpart:
+`src/AV_Spex/checks/audio_stream_stats.py` generates a per-stream audio stats
+sidecar (`<video_id>.audio_stats.xml.gz`) for multi-stream inputs, where qcli
+downmixes the streams. Keep the two in sync if the filter chain or the
+QCTools-compat handling below changes.
+
 Two QCTools-compat details this script handles:
   1. `ffprobe -of xml` nests tags inside a `<tags>...</tags>` element, but real
      QCTools (and qct-parse's `for t in list(frame)` readers) expect `<tag>` as
