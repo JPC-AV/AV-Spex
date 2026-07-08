@@ -2350,12 +2350,19 @@ def make_tone_leak_html(tone_leak_summary_csv, tone_leak_events_csv):
             it leaves a harmonic comb at exact multiples of 1 kHz ({harmonics} Hz) that stands far
             above the surrounding spectral floor even when the tone is well below program level.
         </p>
-        <p style="margin: 0;">
+        <p style="margin: 0 0 10px 0;">
             Audio is decoded directly from the video file and analyzed per channel in
             {window_sec}-second FFT windows. Each window's <strong>comb score</strong> is the average
             level of the harmonics above their local spectral floor; a channel is flagged when enough
             windows score at or above {comb_threshold} dB. Digitally silent stretches are excluded.
             The flagged regions below use the file's own timecode.
+        </p>
+        <p style="margin: 0;">
+            In the tables, <strong>Stream</strong> is the audio stream (track) within the video
+            container, numbered from 0, and <strong>Channel</strong> is the channel within that
+            stream &mdash; e.g. a file with one 4-channel stream shows Stream 0, Channels 0&ndash;3,
+            while a file with two stereo streams shows Streams 0&ndash;1, each with Channels
+            0&ndash;1. Every stream and channel is analyzed independently.
         </p>
     </div>
     <div style="background-color: {status_bg}; padding: 15px; border: 1px solid {status_border}; margin: 10px 0; border-radius: 5px;">
