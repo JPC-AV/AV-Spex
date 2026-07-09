@@ -144,8 +144,8 @@ jobs:
           include Language::Python::Virtualenv
         
           desc "Python project for NMAAHC media conservation lab"
-          homepage "https://github.com/JPC-AV/video_qc_jpc_av"
-          url "https://github.com/JPC-AV/video_qc_jpc_av/archive/refs/tags/${{ steps.get_version.outputs.tag_name }}.tar.gz"
+          homepage "https://github.com/${{ github.repository }}"
+          url "https://github.com/${{ github.repository }}/archive/refs/tags/${{ steps.get_version.outputs.tag_name }}.tar.gz"
           sha256 "${{ steps.get_sha.outputs.sha256 }}"
           license "GPL-3.0-only"
         
