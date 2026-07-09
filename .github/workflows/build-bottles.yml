@@ -129,7 +129,7 @@ jobs:
           brew install --build-bottle --verbose JPC-AV/AV-Spex/av-spex
           
           echo "Creating bottle..."
-          brew bottle --verbose --json --root-url=https://github.com/JPC-AV/video_qc_jpc_av/releases/download/${{ steps.version.outputs.tag_name }} JPC-AV/AV-Spex/av-spex
+          brew bottle --verbose --json --root-url=https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag_name }} JPC-AV/AV-Spex/av-spex
           
           # Create Homebrew-compatible copies
           for bottle_file in av-spex--*.bottle.tar.gz; do
