@@ -23,10 +23,19 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     timeout-minutes: 240
-    
+
+    # Homebrew 6.0 made tap trust a hard gate. This env var is the official
+    # transition switch (read by BOTH the parent process and the sandboxed
+    # build.rb child, so no git remote resolution is attempted) and is the
+    # reliable fallback for the swallowed UntrustedTapError in source builds
+    # (Homebrew/brew#22719). It is explicitly temporary and slated for removal
+    # in a later release — the long-term path is explicit `brew trust` below.
+    env:
+      HOMEBREW_NO_REQUIRE_TAP_TRUST: 1
+
     steps:
       - name: Set up Homebrew
-        uses: Homebrew/actions/setup-homebrew@master
+        uses: Homebrew/actions/setup-homebrew@main
         with:
           core: false
           cask: false
@@ -40,19 +49,19 @@ jobs:
         id: version
         run: |
           VERSION="${{ github.event.inputs.tag_name }}"
-          
+
           echo "📥 Input version: $VERSION"
-          
+
           if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
             echo "❌ Invalid version format: $VERSION"
             echo "Expected format: v1.2.3"
             exit 1
           fi
-          
+
           VERSION_CLEAN=${VERSION#v}
           echo "version=${VERSION_CLEAN}" >> $GITHUB_OUTPUT
           echo "tag_name=${VERSION}" >> $GITHUB_OUTPUT
-          
+
           echo "✅ Building bottles for version: $VERSION_CLEAN"
 
       - name: Setup environment
@@ -61,12 +70,12 @@ jobs:
           export HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1
           export HOMEBREW_NO_INSTALL_UPGRADE=1
           export HOMEBREW_NO_INSTALL_FROM_API=1
-          
+
           echo "=== Initial Python State ==="
           which python3 || echo "No python3 found"
           python3 --version || echo "python3 not working"
           echo "==========================="
-          
+
           brew cleanup || true
 
       - name: Install Python 3.13
@@ -74,24 +83,24 @@ jobs:
           export HOMEBREW_NO_AUTO_UPDATE=1
           export HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1
           export HOMEBREW_NO_INSTALL_UPGRADE=1
-          
+
           # Install or use existing python@3.13
           brew list python@3.13 &>/dev/null || brew install python@3.13
-          
+
           # Force link python@3.13
           brew unlink python@3.13 2>/dev/null || true
           brew link --force --overwrite python@3.13
-          
+
           # Set up paths
           if [[ "${{ matrix.os }}" == "macos-14" ]]; then
             HOMEBREW_PREFIX="/opt/homebrew"
           else
             HOMEBREW_PREFIX="/usr/local"
           fi
-          
+
           export PATH="${HOMEBREW_PREFIX}/opt/python@3.13/bin:$PATH"
           echo "${HOMEBREW_PREFIX}/opt/python@3.13/bin" >> $GITHUB_PATH
-          
+
           echo "=== Python Verification ==="
           python3.13 --version
           pip3.13 --version
@@ -100,49 +109,44 @@ jobs:
       - name: Build bottle
         id: build
         timeout-minutes: 180
-        env:
-          # Workaround for Homebrew/brew#22719: for source builds (--build-bottle),
-          # the sandboxed build.rb child raises an UntrustedTapError that gets
-          # swallowed into an opaque "build.rb ... exited with 1". This var is read
-          # by both the parent and the sandbox child, so no trust check is attempted.
-          HOMEBREW_NO_REQUIRE_TAP_TRUST: 1
         run: |
           export HOMEBREW_NO_AUTO_UPDATE=1
           export HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1
           export HOMEBREW_NO_INSTALL_UPGRADE=1
-          
-          # Tap the repository
-          brew tap JPC-AV/AV-Spex https://github.com/JPC-AV/homebrew-AV-Spex
+
+          # Tap WITHOUT an explicit remote URL. JPC-AV/homebrew-AV-Spex is a
+          # standard GitHub tap, so brew infers https://github.com/... on its
+          # own. Passing the URL makes brew treat it as a "custom remote",
+          # which both breaks `brew trust --formula` (Homebrew/brew#22685) and
+          # is the trigger for the source-build UntrustedTapError in #22719.
+          brew tap JPC-AV/AV-Spex
           brew tap --repair
-          
-          # Trust the formula explicitly (long-term fix; the env var above is the
-          # reliable fallback and will be needed if trust resolution misbehaves,
-          # e.g. Homebrew/brew#22603). Don't fail the build if this errors.
-          brew trust JPC-AV/AV-Spex/av-spex || echo "⚠️ brew trust unavailable or failed; relying on HOMEBREW_NO_REQUIRE_TAP_TRUST"
-          
+
+          # Whole-tap trust is appropriate for a tap you administer, and avoids
+          # the per-formula custom-remote trust bug. Best-effort: the job-wide
+          # HOMEBREW_NO_REQUIRE_TAP_TRUST=1 is the reliable fallback.
+          brew trust --tap JPC-AV/AV-Spex \
+            || echo "⚠️ brew trust unavailable or failed; relying on HOMEBREW_NO_REQUIRE_TAP_TRUST"
+
           echo "=== Final Python Check ==="
           python3.13 --version || python3 --version
           echo "=========================="
-          
-          # Build the bottle
+
+          # Build from source so we can bottle the result.
           echo "Building bottle..."
           brew install --build-bottle --verbose JPC-AV/AV-Spex/av-spex
-          
+
+          # Produce the bottle tarball + JSON metadata. --root-url points at the
+          # GitHub release in the main repo, which is where the asset is poured
+          # from once the bottle block is written into the formula.
           echo "Creating bottle..."
-          brew bottle --verbose --json --root-url=https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag_name }} JPC-AV/AV-Spex/av-spex
-          
-          # Create Homebrew-compatible copies
-          for bottle_file in av-spex--*.bottle.tar.gz; do
-            if [[ -f "$bottle_file" ]]; then
-              new_name=$(echo "$bottle_file" | sed 's/av-spex--/av-spex-/')
-              cp "$bottle_file" "$new_name"
-              echo "Created copy: $bottle_file → $new_name"
-            fi
-          done
-          
+
+          brew bottle --verbose --json \
+            --root-url=https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag_name }} \
+            JPC-AV/AV-Spex/av-spex
+
           BOTTLE_FILE=$(ls av-spex--*.bottle.tar.gz | head -1)
           echo "bottle_file=${BOTTLE_FILE}" >> $GITHUB_OUTPUT
-          
           echo "Created bottle: $BOTTLE_FILE"
 
       - name: Show Homebrew logs on failure
@@ -158,20 +162,80 @@ jobs:
           done
           [ "$found" -eq 1 ] || echo "No per-formula logs found (failure likely occurred at formula load time, before any build step ran)."
 
-      - name: Test bottle installation
+      - name: Publish bottle to release and write block back to formula
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}             # release lives in this repo
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
-          echo "Testing bottle installation..."
-          brew uninstall JPC-AV/AV-Spex/av-spex
-          
-          cp av-spex--*.bottle.tar.gz $(brew --cache)/
-          
-          HOMEBREW_NO_AUTO_UPDATE=1 brew install JPC-AV/AV-Spex/av-spex
-          
+          set -euo pipefail
+          TAG="${{ steps.version.outputs.tag_name }}"
+
+          # 1) Publish assets FIRST, with the canonical single-dash name.
+          #    The local "av-spex--<ver>" double dash is a build-only marker;
+          #    Homebrew pours from "av-spex-<ver>" (single dash). Stage the
+          #    renamed tarball + the JSON into a clean dir so the glob can't
+          #    accidentally re-upload the double-dash original.
+          mkdir -p dist
+          for f in av-spex--*.bottle.tar.gz; do
+            cp "$f" "dist/$(basename "${f/av-spex--/av-spex-}")"
+          done
+          cp av-spex--*.bottle.json dist/ 2>/dev/null || true
+
+          echo "=== Files to publish ==="
+          ls -lah dist/
+          echo "========================"
+
+          gh release upload "$TAG" dist/* --clobber
+
+          # 2) Now that the asset exists, merge the bottle block into the
+          #    tapped formula (in place). --write edits the file, --no-commit
+          #    leaves the commit to us.
+          brew bottle --merge --write --no-commit ./av-spex--*.bottle.json
+
+          # 3) Commit + push the updated formula to the tap.
+          TAP_DIR="$(brew --repository JPC-AV/AV-Spex)"
+          cd "$TAP_DIR"
+          git config user.email "action@github.com"
+          git config user.name  "GitHub Action"
+          git remote set-url origin \
+            "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/JPC-AV/homebrew-AV-Spex.git"
+
+          if git diff --quiet -- Formula/AV-Spex.rb; then
+            echo "ℹ️ No bottle changes to commit — formula already references this bottle"
+          else
+            git add Formula/AV-Spex.rb
+            echo "=== Formula bottle block ==="
+            git --no-pager diff --staged -- Formula/AV-Spex.rb
+            echo "============================"
+            git commit -m "Add ${{ matrix.arch }}_${{ matrix.version }} bottle for av-spex ${TAG}"
+            git push origin HEAD:main
+            echo "✅ Formula updated with bottle block"
+          fi
+
+      - name: Test the published bottle
+        run: |
+          set -euo pipefail
+          # Homebrew 6.x no longer allows `brew install ./file.bottle.tar.gz`
+          # from a path (Homebrew/brew#20414), so test the real user path:
+          # the formula now carries the bottle block and the asset is live on
+          # the release, so a by-name install POURS the bottle from the release.
+          #
+          # Uninstall the source build first, but keep its dependencies
+          # (mkvtoolnix, qtbase, ...) so the pour test stays fast and doesn't
+          # trip autoremove.
+          HOMEBREW_NO_AUTOREMOVE=1 brew uninstall --ignore-dependencies \
+            JPC-AV/AV-Spex/av-spex || true
+
+          # --force-bottle makes this fail loudly if the bottle can't be poured,
+          # rather than silently falling back to a source rebuild.
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install --force-bottle JPC-AV/AV-Spex/av-spex
+
           echo "Testing av-spex commands..."
           av-spex --version
           av-spex --help
 
-      - name: Upload bottle
+      - name: Upload bottle artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: bottle-${{ matrix.version }}-${{ steps.version.outputs.tag_name }}
@@ -179,61 +243,3 @@ jobs:
             av-spex--*.bottle.tar.gz
             av-spex--*.bottle.json
           retention-days: 30
-
-  upload-bottles-to-release:
-    name: Upload bottles to GitHub release
-    needs: build
-    runs-on: ubuntu-latest
-    if: success()
-    
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Get version
-        id: version
-        run: |
-          VERSION="${{ github.event.inputs.tag_name }}"
-          VERSION_CLEAN=${VERSION#v}
-          echo "version=${VERSION_CLEAN}" >> $GITHUB_OUTPUT
-          echo "tag_name=${VERSION}" >> $GITHUB_OUTPUT
-          echo "✅ Uploading bottles for version: $VERSION_CLEAN"
-
-      - name: Download all bottle artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: bottles/
-
-      - name: List downloaded bottles
-        run: |
-          echo "=== Downloaded bottle artifacts ==="
-          ls -laR bottles/
-          echo "=================================="
-
-      - name: Prepare bottles for upload
-        run: |
-          mkdir -p upload
-          
-          # Copy all bottle files to upload directory
-          find bottles/ -name "*.bottle.tar.gz" -exec cp {} upload/ \;
-          find bottles/ -name "*.bottle.json" -exec cp {} upload/ \;
-          
-          echo "=== Files to upload ==="
-          ls -lah upload/
-          echo "======================="
-
-      - name: Upload bottles to release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: ${{ steps.version.outputs.tag_name }}
-          files: upload/*
-          fail_on_unmatched_files: true
-          body: |
-            ## AV-Spex ${{ steps.version.outputs.tag_name }}
-            
-            Pre-built bottles are available for:
-            - macOS ARM64 (Apple Silicon)
-            
-            Install with: `brew install JPC-AV/AV-Spex/av-spex`
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
