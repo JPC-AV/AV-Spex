@@ -26,6 +26,8 @@ from collections import defaultdict
 from AV_Spex.utils.log_setup import logger, report_ffmpeg_stderr
 from AV_Spex.utils.config_setup import ChecksConfig, SpexConfig
 from AV_Spex.utils.config_manager import ConfigManager
+from AV_Spex.checks.tone_leak_check import analyzeToneLeak
+from AV_Spex.checks.audio_stream_stats import audio_stats_path, generate_audio_stats_sidecar
 
 config_mgr = ConfigManager()
 
@@ -3284,8 +3286,10 @@ def _get_audio_stream_count(video_path):
 
     Used to detect the multi-stream layout (e.g. broadcast MXF, where each audio
     channel is its own discrete mono stream). A count greater than 1 means the
-    QCTools-based audio analysis cannot see the real per-stream audio, because
-    qcli downmixes multiple streams into a single analysis signal.
+    QCTools report's audio frames cannot describe the real per-stream audio
+    (qcli downmixes multiple streams into a single analysis signal), so audio
+    analysis reads a per-stream stats sidecar generated from the file instead
+    (checks/audio_stream_stats.py).
 
     Returns:
         int or None: Number of audio streams, or None if it can't be determined.
@@ -3305,6 +3309,26 @@ def _get_audio_stream_count(video_path):
     except Exception:
         pass
     return None
+
+
+def _detect_audio_pkt(stats_path):
+    """Determine the timestamp attribute (pkt_dts_time or pkt_pts_time) used by
+    the frames of an audio stats sidecar (checks/audio_stream_stats.py output).
+
+    Mirrors the video-frame detection at the top of run_qctparse(), but scans
+    audio frames since the sidecar contains no video frames. Defaults to
+    pkt_dts_time if no match is found.
+    """
+    try:
+        with gzip.open(stats_path, 'rt', encoding='utf-8') as f:
+            for line in f:
+                if '<frame ' in line:
+                    match = re.search(r'pkt_.ts_time', line)
+                    if match:
+                        return match.group()
+    except OSError:
+        pass
+    return 'pkt_dts_time'
 
 
 def _get_video_frame_rate(video_path):
@@ -3984,28 +4008,50 @@ def run_qctparse(video_path, qctools_output_path, report_directory, check_cancel
     imbalance_results = None
     timecode_results = None
 
-    # Gate audio analysis off for multi-stream inputs (e.g. broadcast MXF, where
-    # each audio channel is a discrete mono stream). The audio checks read the
-    # QCTools sidecar, but qcli downmixes multiple audio streams into a single
-    # analysis signal — so per-channel clipping, channel imbalance, dropout, and
-    # audible-timecode results would describe the downmix, not the real streams.
-    # These checks only support a single multi-channel stream (e.g. MKV).
+    # Multi-stream inputs (e.g. broadcast MXF, where each audio channel is a
+    # discrete mono stream): the QCTools report's audio frames describe a qcli
+    # downmix of all streams, not the real per-stream audio. Instead of reading
+    # the report, generate (or reuse) an audio stats sidecar that decodes the
+    # streams and merges them into one N-channel analysis signal — astats
+    # channel N is audio stream N, the same 1-based channel <-> stream mapping
+    # make_access.py's multi-mono handling assumes — and run the audio checks
+    # on that file. Single-stream inputs still read the QCTools report.
+    audio_stats_obj = None
+    audio_pkt = pkt
     if do_audio_analysis:
         audio_stream_count = _get_audio_stream_count(video_path)
         if audio_stream_count and audio_stream_count > 1:
-            logger.warning(
-                f"Audio analysis skipped: input has {audio_stream_count} separate audio streams "
-                "(discrete mono tracks, typical of broadcast MXF). QCTools/qcli downmixes multiple "
-                "streams into one analysis signal, so audio clipping, channel imbalance, audio "
-                "dropout, and audible-timecode results would not reflect the real per-stream audio. "
-                "These checks support a single multi-channel stream (e.g. MKV) only.\n"
+            logger.info(
+                f"Input has {audio_stream_count} separate audio streams (discrete mono tracks, "
+                "typical of broadcast MXF); the QCTools report only carries a downmix of them. "
+                "Audio analysis will run on per-stream stats generated from the file instead.\n"
             )
-            do_audio_analysis = False
+            audio_stats_obj = audio_stats_path(parentDir, baseName)
+            if os.path.isfile(audio_stats_obj):
+                logger.info(
+                    f"Found existing audio stats sidecar {os.path.basename(audio_stats_obj)} — "
+                    "reusing it (delete the file to force regeneration)\n"
+                )
+            else:
+                audio_stats_obj = generate_audio_stats_sidecar(
+                    video_path, parentDir, baseName, check_cancelled=check_cancelled
+                )
+            if check_cancelled():
+                return None
+            if audio_stats_obj is None:
+                logger.warning(
+                    "Per-stream audio stats could not be generated; audio analysis skipped. "
+                    "(Falling back to the QCTools report would describe the downmix, not the "
+                    "real streams.)\n"
+                )
+                do_audio_analysis = False
+            else:
+                audio_pkt = _detect_audio_pkt(audio_stats_obj)
 
     if do_audio_analysis:
         logger.debug(f"Starting audio analysis on {baseName}\n")
         clipping_results, imbalance_results, timecode_results, dropout_results = analyzeAudio(
-            startObj, pkt, report_directory,
+            audio_stats_obj or startObj, audio_pkt, report_directory,
             detect_clipping=True,
             detect_imbalance=True,
             detect_timecode=True,
@@ -4022,6 +4068,24 @@ def run_qctparse(video_path, qctools_output_path, report_directory, check_cancel
             logger.warning("Audible timecode detection could not be performed\n")
         if dropout_results is None:
             logger.warning("Audio dropout detection could not be performed\n")
+
+    if check_cancelled():
+        return None
+
+    ######## Reference-Tone Leak Detection ########
+    # Reads decoded PCM from the video file itself (not the QCTools sidecar),
+    # so it supports multi-stream sources and is not gated like audio_analysis.
+    if qct_parse.get('detect_tone_leak', False):
+        logger.debug(f"Starting tone-leak detection on {baseName}\n")
+        tone_leak_results = analyzeToneLeak(
+            video_path, report_directory,
+            fps=video_fps, tc_start_frames=tc_start_frames,
+            tc_drop_frame=tc_drop_frame,
+            check_cancelled=check_cancelled, signals=signals,
+            total_duration=total_duration,
+        )
+        if tone_leak_results is None and not check_cancelled():
+            logger.warning("Tone-leak detection could not be performed\n")
 
     if check_cancelled():
         return None

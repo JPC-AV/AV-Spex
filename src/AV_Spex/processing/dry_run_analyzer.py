@@ -17,6 +17,7 @@ from AV_Spex.utils.log_setup import logger
 from AV_Spex.utils.config_setup import ChecksConfig, SpexConfig, VALID_QCTOOLS_EXTENSIONS
 from AV_Spex.utils.config_manager import ConfigManager
 from AV_Spex.utils.filename_validate import is_valid_filename
+from AV_Spex.utils.dir_setup import is_hidden_file
 
 # Import MessageType for color-coded console output
 try:
@@ -155,7 +156,7 @@ class DryRunAnalyzer:
         suffix = f'.{ext}'
         found_videos = [
             f for f in os.listdir(source_directory)
-            if f.lower().endswith(suffix) and 'qctools' not in f.lower()
+            if not is_hidden_file(f) and f.lower().endswith(suffix) and 'qctools' not in f.lower()
         ]
 
         if not found_videos:
@@ -181,7 +182,7 @@ class DryRunAnalyzer:
         
         # Check for existing access file
         access_file_found = next(
-            (f for f in os.listdir(source_directory) if f.lower().endswith('.mp4')),
+            (f for f in os.listdir(source_directory) if not is_hidden_file(f) and f.lower().endswith('.mp4')),
             None
         )
         
@@ -320,7 +321,7 @@ class DryRunAnalyzer:
         # Check for fixity_check.txt in metadata folder
         metadata_dir = source_path / f"{video_id}_qc_metadata"
         if metadata_dir.exists():
-            fixity_files = list(metadata_dir.glob("*_fixity_check.txt"))
+            fixity_files = [f for f in metadata_dir.glob("*_fixity_check.txt") if not is_hidden_file(f.name)]
             if fixity_files:
                 return str(fixity_files[0])
         
@@ -647,7 +648,7 @@ class DryRunAnalyzer:
         for folder in search_folders:
             if folder.exists():
                 for pattern in patterns:
-                    matches = list(folder.glob(pattern))
+                    matches = [f for f in folder.glob(pattern) if not is_hidden_file(f.name)]
                     if matches:
                         return str(matches[0])
         return None

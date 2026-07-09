@@ -140,8 +140,9 @@ jobs:
           # GitHub release in the main repo, which is where the asset is poured
           # from once the bottle block is written into the formula.
           echo "Creating bottle..."
+
           brew bottle --verbose --json \
-            --root-url=https://github.com/JPC-AV/video_qc_jpc_av/releases/download/${{ steps.version.outputs.tag_name }} \
+            --root-url=https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag_name }} \
             JPC-AV/AV-Spex/av-spex
 
           BOTTLE_FILE=$(ls av-spex--*.bottle.tar.gz | head -1)

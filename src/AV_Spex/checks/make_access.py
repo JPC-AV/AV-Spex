@@ -4,6 +4,7 @@ import sys
 from AV_Spex.utils.log_setup import logger, report_ffmpeg_stderr
 from AV_Spex.utils.config_setup import ChecksConfig
 from AV_Spex.utils.config_manager import ConfigManager
+from AV_Spex.utils.dir_setup import is_hidden_file
 
 # Fraction of the file duration that channel-specific audible-timecode (LTC)
 # regions must cover before the channel is excluded from the access copy. A
@@ -394,7 +395,7 @@ def process_access_file(video_path, source_directory, video_id, check_cancelled=
     try:
         # Check if access file already exists
         for filename in os.listdir(source_directory):
-            if filename.lower().endswith('mp4'):
+            if not is_hidden_file(filename) and filename.lower().endswith('mp4'):
                 logger.critical(f"Access file already exists, not running ffmpeg\n")
                 if signals:
                     signals.step_completed.emit("Generate Access File")

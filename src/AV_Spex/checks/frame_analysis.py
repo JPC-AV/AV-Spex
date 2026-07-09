@@ -4853,7 +4853,7 @@ class EnhancedFrameAnalysis:
             if signals and frame_config.enable_signalstats:
                 signals.step_completed.emit("Frame Analysis - Signalstats")
         else:
-            logger.warning("Skipping signalstats analysis (disabled in config)")
+            logger.warning(f"Skipping signalstats analysis (disabled in config)\n")
         
         # Build upstream context from border detection + signalstats for BRNG analyzer
         upstream_context = None

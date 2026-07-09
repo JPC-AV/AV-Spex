@@ -414,12 +414,12 @@ def test_find_qct_thumbs_sorts_by_timestamp_when_tag_names_unknown(tmp_path):
 
 def test_find_report_csvs_empty_directory_returns_all_none(tmp_path):
     out = gr.find_report_csvs(str(tmp_path))
-    # 19-tuple: all None except 2 list fields (content_check_outputs, windowed_colorbars_values)
+    # 21-tuple: all None except 2 list fields (content_check_outputs, windowed_colorbars_values)
     assert isinstance(out, tuple)
-    assert len(out) == 19
+    assert len(out) == 21
     none_count = sum(1 for x in out if x is None)
     list_count = sum(1 for x in out if x == [])
-    assert none_count == 17
+    assert none_count == 19
     assert list_count == 2
 
 
@@ -441,20 +441,23 @@ def test_find_report_csvs_picks_up_known_filenames(tmp_path):
         "qct-parse_clamped_traces.csv":         "clamped_traces_csv",
         "qct-parse_chroma_phase_summary.csv":   "chroma_phase_summary_csv",
         "qct-parse_chroma_phase_events.csv":    "chroma_phase_events_csv",
+        "qct-parse_tone_leak_summary.csv":      "tone_leak_summary_csv",
+        "qct-parse_tone_leak_events.csv":       "tone_leak_events_csv",
         "JPC_AV_metadata_difference.csv":       "difference_csv",
     }
     for name in files:
         (tmp_path / name).write_text("")
 
     out = gr.find_report_csvs(str(tmp_path))
-    # Unpack the 19-tuple in the order the function returns it
+    # Unpack the 21-tuple in the order the function returns it
     (
         colorbars_duration_output, bars_eval_check_output, colorbars_values_output,
         windowed_colorbars_values, content_check_outputs, profile_check_output,
         profile_fails_csv, tags_check_output, tag_fails_csv, colorbars_eval_fails_csv,
         audio_clipping_csv, channel_imbalance_csv, audible_timecode_csv,
         audio_dropout_csv, clamped_levels_csv, clamped_traces_csv,
-        chroma_phase_summary_csv, chroma_phase_events_csv, difference_csv,
+        chroma_phase_summary_csv, chroma_phase_events_csv,
+        tone_leak_summary_csv, tone_leak_events_csv, difference_csv,
     ) = out
     assert colorbars_duration_output.endswith("qct-parse_colorbars_durations.csv")
     assert bars_eval_check_output.endswith("qct-parse_colorbars_eval_summary.csv")
@@ -471,6 +474,8 @@ def test_find_report_csvs_picks_up_known_filenames(tmp_path):
     assert clamped_traces_csv.endswith("qct-parse_clamped_traces.csv")
     assert chroma_phase_summary_csv.endswith("qct-parse_chroma_phase_summary.csv")
     assert chroma_phase_events_csv.endswith("qct-parse_chroma_phase_events.csv")
+    assert tone_leak_summary_csv.endswith("qct-parse_tone_leak_summary.csv")
+    assert tone_leak_events_csv.endswith("qct-parse_tone_leak_events.csv")
     assert difference_csv.endswith("metadata_difference.csv")
 
 
@@ -846,3 +851,69 @@ def test_make_audible_timecode_html_hides_per_method_details(tmp_path):
     assert "secret-detail-A" not in html
     assert "secret-detail-B" not in html
     assert "stable mix at TC level" not in html
+
+
+# ===========================================================================
+# make_tone_leak_html
+# ===========================================================================
+
+def _write_tone_leak_csvs(dirpath, flagged):
+    """Write a summary (+ events, when flagged) CSV pair like tone_leak_check does."""
+    summary = os.path.join(dirpath, "qct-parse_tone_leak_summary.csv")
+    header = ["Stream", "Channel", "Total Windows", "Active Windows",
+              "Flagged Windows", "Flagged %", "Median Comb (dB)",
+              "Median Flagged Comb (dB)", "Median 1kHz Level (dBFS)",
+              "Tone Leak Detected"]
+    rows = [
+        ["Tone Leak Detection Results"],
+        ["Harmonics Scored (Hz)", "1000 2000 3000 4000 6000"],
+        ["Window Size (seconds)", "8"],
+        ["Comb Score Threshold (dB)", "12.0"],
+        ["Min Flagged Fraction", "0.05"],
+        ["Min Flagged Windows", "4"],
+        ["Silence Floor (dBFS)", "-85.0"],
+        [],
+        header,
+        ["0", "0", "375", "370", "365" if flagged else "0",
+         "98.6" if flagged else "0.0", "22.3" if flagged else "4.6",
+         "22.4" if flagged else "n/a", "-91.3" if flagged else "n/a",
+         "Yes" if flagged else "No"],
+        ["0", "1", "375", "370", "0", "0.0", "3.8", "n/a", "n/a", "No"],
+    ]
+    with open(summary, "w", newline="") as f:
+        csv.writer(f).writerows(rows)
+
+    events = os.path.join(dirpath, "qct-parse_tone_leak_events.csv")
+    ev_rows = [["Timestamp Start", "Timestamp End", "Stream", "Channel",
+                "Duration (s)", "Mean Comb (dB)", "Peak Comb (dB)",
+                "Median 1kHz Level (dBFS)"]]
+    if flagged:
+        ev_rows.append(["00:00:00:00", "00:48:40:12", "0", "0", "2920", "22.3", "28.2", "-91.3"])
+    with open(events, "w", newline="") as f:
+        csv.writer(f).writerows(ev_rows)
+    return summary, events
+
+
+def test_make_tone_leak_html_flags_detected_channel(tmp_path):
+    summary, events = _write_tone_leak_csvs(str(tmp_path), flagged=True)
+    html = gr.make_tone_leak_html(summary, events)
+    assert html is not None
+    assert "Reference-Tone Leak Detected: stream 0 channel 0" in html
+    # Per-channel table renders both channels with their verdicts.
+    assert "98.6" in html and "22.3" in html
+    # Events table renders the flagged region with file timecode.
+    assert "00:48:40:12" in html
+    assert "Show tone leak regions (1)" in html
+
+
+def test_make_tone_leak_html_clean_shows_green_status(tmp_path):
+    summary, events = _write_tone_leak_csvs(str(tmp_path), flagged=False)
+    html = gr.make_tone_leak_html(summary, events)
+    assert html is not None
+    assert "No Reference-Tone Leak Detected" in html
+    # No events -> no collapsible regions table.
+    assert "Show tone leak regions" not in html
+
+
+def test_make_tone_leak_html_missing_summary_returns_none(tmp_path):
+    assert gr.make_tone_leak_html(str(tmp_path / "nope.csv"), None) is None

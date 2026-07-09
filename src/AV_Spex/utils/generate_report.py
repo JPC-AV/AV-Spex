@@ -387,6 +387,8 @@ def find_report_csvs(report_directory):
     clamped_traces_csv = None
     chroma_phase_summary_csv = None
     chroma_phase_events_csv = None
+    tone_leak_summary_csv = None
+    tone_leak_events_csv = None
     difference_csv = None
 
     if os.path.isdir(report_directory):
@@ -431,10 +433,14 @@ def find_report_csvs(report_directory):
                         chroma_phase_summary_csv = file_path
                     elif "qct-parse_chroma_phase_events" in file:
                         chroma_phase_events_csv = file_path
+                    elif "qct-parse_tone_leak_summary" in file:
+                        tone_leak_summary_csv = file_path
+                    elif "qct-parse_tone_leak_events" in file:
+                        tone_leak_events_csv = file_path
                 elif "metadata_difference" in file:
                     difference_csv = file_path
 
-    return qctools_colorbars_duration_output, qctools_bars_eval_check_output, colorbars_values_output, windowed_colorbars_values, qctools_content_check_outputs, qctools_profile_check_output, profile_fails_csv, tags_check_output, tag_fails_csv, colorbars_eval_fails_csv, audio_clipping_csv, channel_imbalance_csv, audible_timecode_csv, audio_dropout_csv, clamped_levels_csv, clamped_traces_csv, chroma_phase_summary_csv, chroma_phase_events_csv, difference_csv
+    return qctools_colorbars_duration_output, qctools_bars_eval_check_output, colorbars_values_output, windowed_colorbars_values, qctools_content_check_outputs, qctools_profile_check_output, profile_fails_csv, tags_check_output, tag_fails_csv, colorbars_eval_fails_csv, audio_clipping_csv, channel_imbalance_csv, audible_timecode_csv, audio_dropout_csv, clamped_levels_csv, clamped_traces_csv, chroma_phase_summary_csv, chroma_phase_events_csv, tone_leak_summary_csv, tone_leak_events_csv, difference_csv
 
 
 def read_xml_file(xml_file_path):
@@ -2201,6 +2207,171 @@ def _make_chroma_phase_thumbs_html(chroma_phase_summary_csv, events):
     <div style="display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0;">
         {items_html}
     </div>'''
+
+
+def make_tone_leak_html(tone_leak_summary_csv, tone_leak_events_csv):
+    """
+    Generates an HTML section summarizing reference-tone leak detection results.
+    Always renders when the summary CSV is present, including when no channel
+    was flagged - so the report shows that the check was run.
+
+    Args:
+        tone_leak_summary_csv (str): Path to the per-channel summary CSV.
+        tone_leak_events_csv (str): Path to the events CSV (flagged regions).
+
+    Returns:
+        str: HTML string, or None if the summary CSV cannot be read.
+    """
+    if not tone_leak_summary_csv or not os.path.isfile(tone_leak_summary_csv):
+        return None
+
+    try:
+        with open(tone_leak_summary_csv, 'r') as f:
+            summary_rows = list(csv.reader(f))
+    except Exception as e:
+        logger.error(f"Error reading tone leak summary CSV: {e}")
+        return None
+
+    # The summary CSV is parameter rows (2 columns), a blank row, then the
+    # per-channel table whose header row starts with "Stream".
+    params = {}
+    channel_header = None
+    channel_rows = []
+    for r in summary_rows:
+        if not r:
+            continue
+        if channel_header is None:
+            if r[0] == "Stream":
+                channel_header = r
+            elif len(r) >= 2:
+                params[r[0]] = r[1]
+        else:
+            channel_rows.append(r)
+
+    harmonics = params.get("Harmonics Scored (Hz)", "")
+    comb_threshold = params.get("Comb Score Threshold (dB)", "")
+    window_sec = params.get("Window Size (seconds)", "")
+
+    flagged_rows = [r for r in channel_rows if r and r[-1] == "Yes"]
+    if flagged_rows:
+        flagged_desc = ", ".join(f"stream {r[0]} channel {r[1]}" for r in flagged_rows)
+        status_color = "#dc3545"
+        status_bg = "#f8d7da"
+        status_border = "#f5c6cb"
+        status_text = f"Reference-Tone Leak Detected: {flagged_desc}"
+    else:
+        status_color = "#155724"
+        status_bg = "#d4edda"
+        status_border = "#c3e6cb"
+        status_text = "No Reference-Tone Leak Detected"
+
+    channel_table = ""
+    if channel_header and channel_rows:
+        header_html = "".join(
+            f'<th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">{h}</th>'
+            for h in channel_header
+        )
+        rows_html = ""
+        for r in channel_rows:
+            detected = r and r[-1] == "Yes"
+            row_style = ' background-color: #f8d7da;' if detected else ''
+            rows_html += (
+                '<tr>'
+                + "".join(
+                    f'<td style="padding: 4px 12px; border: 1px solid #ddd;{row_style}">{v}</td>'
+                    for v in r
+                )
+                + '</tr>\n'
+            )
+        channel_table = f'''
+    <table style="border-collapse: collapse; margin: 10px 0;">
+        <tr>{header_html}</tr>
+        {rows_html}
+    </table>'''
+
+    events = []
+    if tone_leak_events_csv and os.path.isfile(tone_leak_events_csv):
+        try:
+            with open(tone_leak_events_csv, 'r') as f:
+                reader = csv.reader(f)
+                header = next(reader, None)
+                for row in reader:
+                    if len(row) >= 8:
+                        events.append(row[:8])
+        except Exception as e:
+            logger.error(f"Error reading tone leak events CSV: {e}")
+
+    events_table = ""
+    if events:
+        event_rows_html = ""
+        for r in events:
+            start, end, stream, channel, dur, mean_comb, peak_comb, level = r
+            event_rows_html += (
+                f'<tr>'
+                f'<td style="padding: 4px 12px; border: 1px solid #ddd; font-family: monospace;">{start}</td>'
+                f'<td style="padding: 4px 12px; border: 1px solid #ddd; font-family: monospace;">{end}</td>'
+                f'<td style="padding: 4px 12px; border: 1px solid #ddd; text-align: right;">{stream}</td>'
+                f'<td style="padding: 4px 12px; border: 1px solid #ddd; text-align: right;">{channel}</td>'
+                f'<td style="padding: 4px 12px; border: 1px solid #ddd; text-align: right;">{dur}</td>'
+                f'<td style="padding: 4px 12px; border: 1px solid #ddd; text-align: right;">{mean_comb}</td>'
+                f'<td style="padding: 4px 12px; border: 1px solid #ddd; text-align: right;">{peak_comb}</td>'
+                f'<td style="padding: 4px 12px; border: 1px solid #ddd; text-align: right;">{level}</td>'
+                f'</tr>\n'
+            )
+        events_table = f'''
+    <a href="javascript:void(0);" onclick="toggleContent('tone_leak_events', 'Show tone leak regions ({len(events)}) ▼', 'Hide tone leak regions ▲')" style="color: #378d6a; text-decoration: underline; margin: 10px 0; display: block;">Show tone leak regions ({len(events)}) ▼</a>
+    <div id="tone_leak_events" style="display: none;">
+    <table style="border-collapse: collapse; margin: 10px 0;">
+        <tr>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Start</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">End</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Stream</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Channel</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Duration (s)</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Mean Comb (dB)</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Peak Comb (dB)</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Median 1kHz Level (dBFS)</th>
+        </tr>
+        {event_rows_html}
+    </table>
+    </div>'''
+
+    html = f'''
+    <a id="link_tone_leak_methodology" href="javascript:void(0);"
+       onclick="toggleContent('tone_leak_methodology', 'What is tone leak detection? ▼', 'What is tone leak detection? ▲')"
+       style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+       What is tone leak detection? ▼</a>
+    <div id="tone_leak_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px;
+         margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+        <p style="margin: 0 0 10px 0;">
+            <strong>Tone leak detection</strong> flags a continuous ~1 kHz calibration/reference tone
+            leaking from the transfer chain into the recorded audio &mdash; heard as a faint
+            high-pitched whine or squeak during quiet passages. Because the leaked tone is distorted,
+            it leaves a harmonic comb at exact multiples of 1 kHz ({harmonics} Hz) that stands far
+            above the surrounding spectral floor even when the tone is well below program level.
+        </p>
+        <p style="margin: 0 0 10px 0;">
+            Audio is decoded directly from the video file and analyzed per channel in
+            {window_sec}-second FFT windows. Each window's <strong>comb score</strong> is the average
+            level of the harmonics above their local spectral floor; a channel is flagged when enough
+            windows score at or above {comb_threshold} dB. Digitally silent stretches are excluded.
+            The flagged regions below use the file's own timecode.
+        </p>
+        <p style="margin: 0;">
+            In the tables, <strong>Stream</strong> is the audio stream (track) within the video
+            container, numbered from 0, and <strong>Channel</strong> is the channel within that
+            stream &mdash; e.g. a file with one 4-channel stream shows Stream 0, Channels 0&ndash;3,
+            while a file with two stereo streams shows Streams 0&ndash;1, each with Channels
+            0&ndash;1. Every stream and channel is analyzed independently.
+        </p>
+    </div>
+    <div style="background-color: {status_bg}; padding: 15px; border: 1px solid {status_border}; margin: 10px 0; border-radius: 5px;">
+        <p style="margin: 0; color: {status_color};"><strong>{status_text}</strong></p>
+    </div>
+    {channel_table}
+    {events_table}
+    '''
+    return html
 
 
 def make_color_bars_graphs(video_id, qctools_colorbars_duration_output, colorbars_values_output, sorted_thumbs_dict, duration_override=None, bars_label=None, thumb_profile_filter=None):
@@ -5071,7 +5242,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     if signals:
         signals.report_progress.emit(0)
 
-    qctools_colorbars_duration_output, qctools_bars_eval_check_output, colorbars_values_output, windowed_colorbars_values, qctools_content_check_outputs, qctools_profile_check_output, profile_fails_csv, tags_check_output, tag_fails_csv, colorbars_eval_fails_csv, audio_clipping_csv, channel_imbalance_csv, audible_timecode_csv, audio_dropout_csv, clamped_levels_csv, clamped_traces_csv, chroma_phase_summary_csv, chroma_phase_events_csv, difference_csv = find_report_csvs(report_directory)
+    qctools_colorbars_duration_output, qctools_bars_eval_check_output, colorbars_values_output, windowed_colorbars_values, qctools_content_check_outputs, qctools_profile_check_output, profile_fails_csv, tags_check_output, tag_fails_csv, colorbars_eval_fails_csv, audio_clipping_csv, channel_imbalance_csv, audible_timecode_csv, audio_dropout_csv, clamped_levels_csv, clamped_traces_csv, chroma_phase_summary_csv, chroma_phase_events_csv, tone_leak_summary_csv, tone_leak_events_csv, difference_csv = find_report_csvs(report_directory)
 
     # CLAMS bars-detection durations CSV (filename matches the writer in
     # checks/bars_detection_clams.py); present only when the parallel detector ran.
@@ -5319,6 +5490,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     audio_dropout_html = make_audio_dropout_html(audio_dropout_csv) if audio_dropout_csv else None
     clamped_levels_html = make_clamped_levels_html(clamped_levels_csv, clamped_traces_csv) if clamped_levels_csv else None
     chroma_phase_html = make_chroma_phase_html(chroma_phase_summary_csv, chroma_phase_events_csv) if chroma_phase_summary_csv else None
+    tone_leak_html = make_tone_leak_html(tone_leak_summary_csv, tone_leak_events_csv) if tone_leak_summary_csv else None
     dropped_sample_html = generate_dropped_sample_html(frame_outputs) if frame_outputs else ""
     duplicate_frame_html = generate_duplicate_frame_html(frame_outputs) if frame_outputs else ""
     bitplane_html = generate_bitplane_html(frame_outputs) if frame_outputs else ""
@@ -5334,6 +5506,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         not audio_dropout_csv and
         not clamped_levels_csv and
         not chroma_phase_summary_csv and
+        not tone_leak_summary_csv and
         not existing_thumbs
     )
 
@@ -5425,6 +5598,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     _has_audio_results = bool(
         audio_clipping_html or channel_imbalance_html
         or audible_timecode_html or audio_dropout_html
+        or tone_leak_html
     )
     toc_entries = []
     if mediaconch_csv:
@@ -5844,6 +6018,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     has_audio_results = bool(
         audio_clipping_html or channel_imbalance_html
         or audible_timecode_html or audio_dropout_html
+        or tone_leak_html
     )
 
     if has_audio_results:
@@ -5897,6 +6072,15 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
                 </div>
                 """
             html_template += '</div>'
+
+        # Tone Leak Detection (full width - the per-channel table is wide)
+        if tone_leak_html:
+            html_template += f"""
+            <div id="section-tone-leak" style="margin: 16px 0;">
+                <h3>Tone Leak Detection</h3>
+                {tone_leak_html}
+            </div>
+            """
 
         html_template += waveform_divider
 

@@ -175,6 +175,8 @@ Examples of supported CLI flags:
 * `--frame-no-colorbar-skip`: disable automatic color bar skipping in frame analysis
 * `--enable-audio-analysis`: toggle qct-parse audio analysis (clipping / channel imbalance / audible-timecode / dropout). Auto-enables `qct_parse.run_tool` if currently off.
 * `--enable-clamped-levels`: toggle qct-parse's broadcast-range level-clamping detector. Auto-enables `qct_parse.run_tool` if currently off. Writes to `tools.qct_parse.detect_clamped_levels`, **not** `outputs.frame_analysis`.
+* `--enable-chroma-phase-detection`: toggle qct-parse's chroma phase error detector (tape tracking artifacts where chroma collapses toward cyan/magenta). Auto-enables `qct_parse.run_tool` if currently off.
+* `--enable-tone-leak-detection`: toggle reference-tone leak detection (a ~1 kHz calibration tone leaking from the transfer chain, heard as a faint whine/squeak in quiet passages). Analyzes decoded PCM directly from the video file — per stream and channel — rather than the QCTools report. Auto-enables `qct_parse.run_tool` if currently off.
 * `--enable-clams-detection`: toggle CLAMS detection (SSIM bars + cross-correlation tone). Writes to `tools.clams_detection.run_tool`. Independent of qct-parse.
 * `--access-trim-color-bars` / `--access-crop-borders` / `--access-crop-to-480`: access-file sub-options. `crop-borders` requires `crop-to-480`; the CLI enforces this with a warning.
 * `--access-exclude-flagged-audio`: if qct-parse audio analysis flags a stereo channel as silent or carrying audible timecode (LTC over ≥75% of the file), exclude it from the access file and output the good channel as dual-mono. Default off. Requires audio analysis findings from the same run; if `qct_parse.audio_analysis` is off the CLI warns but does not force it on.
@@ -430,17 +432,19 @@ Color bar skipping relies on the `color_bars_end_time` value from qct-parse bein
 
 ### qct-parse / CLAMS Feature Flags
 
-Three flags toggle features that live in `tools.qct_parse` or `tools.clams_detection`:
+These flags toggle features that live in `tools.qct_parse` or `tools.clams_detection`:
 
 | Flag | Config field | Effect |
 |------|--------------|--------|
 | `--enable-audio-analysis {on,off}` | `tools.qct_parse.audio_analysis` | Toggle clipping / channel imbalance / audible-timecode / dropout detection |
 | `--enable-clamped-levels {on,off}` | `tools.qct_parse.detect_clamped_levels` | Toggle broadcast-range level clamping detection |
+| `--enable-chroma-phase-detection {on,off}` | `tools.qct_parse.detect_chroma_phase_errors` | Toggle chroma phase error detection |
+| `--enable-tone-leak-detection {on,off}` | `tools.qct_parse.detect_tone_leak` | Toggle reference-tone leak detection (1 kHz calibration-tone crosstalk; reads decoded PCM per stream/channel) |
 | `--enable-clams-detection {on,off}` | `tools.clams_detection.run_tool` | Toggle CLAMS SSIM bars detector + cross-correlation tone detector (runs in parallel with qct-parse) |
 
-All three are applied as a single deep-merge `update_config('checks', ...)` call sharing the `tools` section.
+All are applied as a single deep-merge `update_config('checks', ...)` call sharing the `tools` section.
 
-**Auto-enable guardrail**: Both `audio_analysis` and `detect_clamped_levels` only run inside `run_qctparse()`, so they are no-ops when `tools.qct_parse.run_tool` is off. When the user passes `--enable-audio-analysis on` or `--enable-clamped-levels on` and `qct_parse.run_tool` is currently off, the CLI auto-enables `qct_parse.run_tool` and emits a `logger.warning`. CLAMS detection runs independently and has no such gating.
+**Auto-enable guardrail**: The qct-parse sub-features (`audio_analysis`, `detect_clamped_levels`, `detect_chroma_phase_errors`, `detect_tone_leak`) only run inside `run_qctparse()`, so they are no-ops when `tools.qct_parse.run_tool` is off. When the user turns any of them on and `qct_parse.run_tool` is currently off, the CLI auto-enables `qct_parse.run_tool` and emits a `logger.warning`. CLAMS detection runs independently and has no such gating.
 
 CLAMS bars/tone numeric tuning (thresholds, durations, etc.) is JSON-only — `--enable-clams-detection` toggles `run_tool` but the `bars` and `tone` sub-dicts are not exposed via individual flags. See `ClamsDetectionConfig` in `utils/config_setup.py`.
 
