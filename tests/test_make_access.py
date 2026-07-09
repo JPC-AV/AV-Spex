@@ -485,7 +485,10 @@ def test_determine_both_channels_ltc_safety_keeps_all_audio():
     regions = [_region(0.0, 100.0, "Both channels")]
     excluded, reasons = ma.determine_excluded_audio_channels(_findings(regions=regions))
     assert excluded == []
-    assert len(reasons) == 2  # both channels flagged, reasons preserved
+    # Both flagged-channel reasons preserved, plus the trailing explanation of
+    # why nothing was excluded.
+    assert len(reasons) == 3
+    assert "no channel to rebuild" in reasons[-1]
 
 
 def test_determine_silent_ch1_plus_ltc_ch2_safety_keeps_all_audio():
@@ -494,7 +497,8 @@ def test_determine_silent_ch1_plus_ltc_ch2_safety_keeps_all_audio():
         _findings(silent=[1], regions=regions)
     )
     assert excluded == []
-    assert len(reasons) == 2
+    assert len(reasons) == 3
+    assert "no channel to rebuild" in reasons[-1]
 
 
 def test_determine_mono_source_not_excluded():
@@ -503,23 +507,46 @@ def test_determine_mono_source_not_excluded():
 
 
 def test_determine_four_channel_source_silent_pair_channel_excluded():
-    # The analysis only reports a stereo pair on this source; a silent analyzed
-    # channel is still excluded even though the file has 4 channels.
+    # 4-channel source with a silent pair channel: exclusion is allowed only
+    # because the extra channels (3, 4) were also verified silent.
+    findings = _findings(silent=[2, 3, 4], num_channels=4)
+    excluded, reasons = ma.determine_excluded_audio_channels(findings)
+    assert excluded == [2, 3, 4]
+    assert "channel 2" in reasons[0]
+
+
+def test_determine_four_channel_source_unverified_extras_keeps_all_audio():
+    # A flagged pair channel on a 4-channel source, but channels 3/4 were not
+    # verified silent — the exclusion would drop them, so keep all audio.
     findings = _findings(silent=[2], num_channels=4)
     excluded, reasons = ma.determine_excluded_audio_channels(findings)
-    assert excluded == [2]
+    assert excluded == []
     assert "channel 2" in reasons[0]
+    assert "3, 4" in reasons[-1]
+    assert "not verified silent" in reasons[-1]
 
 
 def test_determine_four_channel_source_ltc_ch1_excluded():
     # Mirrors the real 21463704 case: 4-channel source, ch1 carries audible
-    # timecode over the whole file, ch2 is the (quiet) program channel.
+    # timecode over the whole file, ch2 is the (quiet) program channel, and
+    # the extra channels (3, 4) are verified silent.
+    regions = [_region(0.0, 100.0, "Channel 1")]
+    excluded, reasons = ma.determine_excluded_audio_channels(
+        _findings(silent=[3, 4], regions=regions, num_channels=4)
+    )
+    assert excluded == [1, 3, 4]
+    assert any("audible timecode" in r for r in reasons)
+
+
+def test_determine_four_channel_source_ltc_ch1_unverified_extras_keeps_all_audio():
+    # Same LTC-on-ch1 case, but channels 3/4 were not flagged silent — the
+    # exclusion may not drop them, so nothing is excluded.
     regions = [_region(0.0, 100.0, "Channel 1")]
     excluded, reasons = ma.determine_excluded_audio_channels(
         _findings(regions=regions, num_channels=4)
     )
-    assert excluded == [1]
-    assert "audible timecode" in reasons[0]
+    assert excluded == []
+    assert "not verified silent" in reasons[-1]
 
 
 def test_determine_silent_non_pair_channels_excluded():
