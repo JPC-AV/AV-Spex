@@ -216,8 +216,8 @@ def make_stream_hash(video_path, check_cancelled=None, signals=None):
 
 
 def extract_tags(video_path):
-    command = f"mkvextract tags {video_path}"
-    result = subprocess.run(command, capture_output=True, text=True, shell=True)
+    command = ["mkvextract", "tags", str(video_path)]
+    result = subprocess.run(command, capture_output=True, text=True)
     # mkvextract returns non-zero on non-Matroska input (and may still write
     # non-XML text to stdout). Treat that as "no tags" so downstream parsing
     # is skipped gracefully instead of raising a ParseError.
