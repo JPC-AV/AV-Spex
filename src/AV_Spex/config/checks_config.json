@@ -49,7 +49,7 @@
       "run_tool": true
     },
     "mediaconch": {
-      "mediaconch_policy": "JPC_FFV1-MKV_Preservation_Policy_20260112.xml",
+      "mediaconch_policy": "JPC_FFV1-MKV_Preservation_Policy_20260709.xml",
       "run_mediaconch": true
     },
     "mediainfo": {

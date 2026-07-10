@@ -333,8 +333,8 @@ class ProcessingManager:
                     )
                 elif exclusion_reasons:
                     logger.warning(
-                        f"All audio channels were flagged ({'; '.join(exclusion_reasons)}); "
-                        f"keeping all audio in the access copy\n"
+                        f"Flagged audio was not excluded from the access copy "
+                        f"({'; '.join(exclusion_reasons)}); keeping all audio\n"
                     )
             else:
                 logger.warning(

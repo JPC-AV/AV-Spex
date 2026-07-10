@@ -34,11 +34,18 @@ def determine_excluded_audio_channels(audio_findings):
     Findings from audio analysis run in a previous pass (CSV reuse) are not
     consulted; the caller falls back to including all audio.
 
+    On a source with more than 2 channels, any exclusion rebuilds the access
+    audio from the stereo pair alone, dropping every channel beyond the pair.
+    That is only allowed when the analysis positively verified each extra
+    channel (3+) as silent; if any extra channel was not flagged silent,
+    nothing is excluded and all audio is kept (the caller warns).
+
     Returns:
         tuple: (excluded_channels, reasons) — excluded_channels is a sorted
         list of 1-based ints, empty when nothing should be excluded; reasons
-        describe every flagged channel (still populated when the both-flagged
-        safety empties excluded_channels).
+        describe every flagged channel and, when a safety empties
+        excluded_channels, end with an explanation of why exclusion was
+        skipped.
     """
     if not audio_findings:
         return [], []
@@ -84,7 +91,27 @@ def determine_excluded_audio_channels(audio_findings):
     # Both analyzed program channels flagged → no surviving pair channel to
     # build the access audio from; keep all audio (the caller warns).
     if {1, 2}.issubset(flagged):
+        reasons.append(
+            'both analyzed program channels are flagged, leaving no channel '
+            'to rebuild the access audio from'
+        )
         return [], reasons
+
+    # Any exclusion rebuilds the access audio from the stereo pair alone,
+    # dropping every channel beyond the pair. Only allow that when each extra
+    # channel was positively verified silent by the analysis; otherwise keep
+    # all audio (the caller warns).
+    if flagged and num_channels and num_channels > 2:
+        silent = set(audio_findings.get('silent_channels') or [])
+        unverified = [ch for ch in range(3, num_channels + 1) if ch not in silent]
+        if unverified:
+            unverified_str = ', '.join(str(ch) for ch in unverified)
+            reasons.append(
+                f'channel(s) {unverified_str} beyond the analyzed stereo pair '
+                f'were not verified silent and would be dropped by the exclusion'
+            )
+            return [], reasons
+
     return sorted(flagged), reasons
 
 
@@ -168,8 +195,10 @@ def make_access_file(video_path, output_path, check_cancelled=None, signals=None
     the analyzed stereo pair (channels 1-2) via the pan filter: a single
     surviving pair channel is output as dual-mono stereo, two surviving pair
     channels as straight stereo. The pan reads the wanted channels by index, so
-    sources with extra (unanalyzed) channels — e.g. a 4-channel stream — are
-    handled correctly; the extra channels are dropped.
+    sources with extra channels — e.g. a 4-channel stream — are handled
+    correctly; the extra channels are dropped. determine_excluded_audio_channels()
+    only produces exclusions for a >2-channel source when every extra channel
+    was verified silent, so a caller using it never drops program audio here.
 
     Output dimensions for NTSC sources are controlled by crop_to_480:
       * crop_to_480=True (default): NTSC (720x486 input) → 720x480 by trimming
