@@ -1,0 +1,49 @@
+<?xml version="1.0"?>
+<policy type="and" name="JPC FFV1/MKV Preservation Policy" license="CC-BY-4.0">
+  <description>Policy for JPC Archive FFV1/MKV preservation files. Accepts both PCM and FLAC audio.</description>
+  <tag/>
+  <rule name="Container is Matroska" value="Format" tracktype="General" occurrence="*" operator="=">Matroska</rule>
+  <rule name="Format version is 4" value="Format_Version" tracktype="General" occurrence="*" operator="=">4</rule>
+  <rule name="Overall bitrate mode is VBR" value="OverallBitRate_Mode" tracktype="General" occurrence="*" operator="=">VBR</rule>
+  <rule name="Video format is FFV1" value="Format" tracktype="Video" occurrence="*" operator="=">FFV1</rule>
+  <rule name="FFV1 version is 3.4" value="Format_Version" tracktype="Video" occurrence="*" operator="=">3.4</rule>
+  <rule name="Video is lossless" value="Compression_Mode" tracktype="Video" occurrence="*" operator="=">Lossless</rule>
+  <rule name="GOP is intra-frame only" value="Format_Settings_GOP" tracktype="Video" occurrence="*" operator="=">N=1</rule>
+  <rule name="Width is 720" value="Width" tracktype="Video" occurrence="*" operator="=">720</rule>
+  <rule name="Height is 486" value="Height" tracktype="Video" occurrence="*" operator="=">486</rule>
+  <policy type="or" name="Pixel aspect ratio is 0.900 or 0.909">
+    <rule name="PAR is 0.900" value="PixelAspectRatio" tracktype="Video" occurrence="*" operator="=">0.900</rule>
+    <rule name="PAR is 0.909" value="PixelAspectRatio" tracktype="Video" occurrence="*" operator="=">0.909</rule>
+  </policy>
+  <policy type="or" name="Display aspect ratio is 1.333 or 1.347">
+    <rule name="DAR is 1.333" value="DisplayAspectRatio" tracktype="Video" occurrence="*" operator="=">1.333</rule>
+    <rule name="DAR is 1.347" value="DisplayAspectRatio" tracktype="Video" occurrence="*" operator="=">1.347</rule>
+  </policy>
+  <rule name="Frame rate is 29.970" value="FrameRate" tracktype="Video" occurrence="*" operator="=">29.970</rule>
+  <rule name="Frame rate mode is constant" value="FrameRate_Mode" tracktype="Video" occurrence="*" operator="=">CFR</rule>
+  <rule name="Chroma subsampling is 4:2:2" value="ChromaSubsampling" tracktype="Video" occurrence="*" operator="=">4:2:2</rule>
+  <rule name="Bit depth is 10" value="BitDepth" tracktype="Video" occurrence="*" operator="=">10</rule>
+  <rule name="Color space is YUV" value="ColorSpace" tracktype="Video" occurrence="*" operator="=">YUV</rule>
+  <rule name="Scan type is interlaced" value="ScanType" tracktype="Video" occurrence="*" operator="=">Interlaced</rule>
+  <rule name="Scan order is BFF" value="ScanOrder" tracktype="Video" occurrence="*" operator="=">BFF</rule>
+  <rule name="Color range is limited" value="colour_range" tracktype="Video" occurrence="*" operator="=">Limited</rule>
+  <rule name="Color primaries are BT.601 NTSC" value="colour_primaries" tracktype="Video" occurrence="*" operator="=">BT.601 NTSC</rule>
+  <rule name="Transfer characteristics are BT.709" value="transfer_characteristics" tracktype="Video" occurrence="*" operator="=">BT.709</rule>
+  <rule name="Matrix coefficients are BT.601" value="matrix_coefficients" tracktype="Video" occurrence="*" operator="=">BT.601</rule>
+  <policy type="or" name="Audio format is PCM or FLAC">
+    <rule name="Audio is PCM" value="Format" tracktype="Audio" occurrence="*" operator="=">PCM</rule>
+    <rule name="Audio is FLAC" value="Format" tracktype="Audio" occurrence="*" operator="=">FLAC</rule>
+  </policy>
+  <policy type="or" name="Audio bitrate mode is CBR or VBR">
+    <rule name="Audio bitrate is CBR" value="BitRate_Mode" tracktype="Audio" occurrence="*" operator="=">CBR</rule>
+    <rule name="Audio bitrate is VBR" value="BitRate_Mode" tracktype="Audio" occurrence="*" operator="=">VBR</rule>
+  </policy>
+  <rule name="Audio channels is 2" value="Channels" tracktype="Audio" occurrence="*" operator="=">2</rule>
+  <rule name="Audio sample rate is 48000" value="SamplingRate" tracktype="Audio" occurrence="*" operator="=">48000</rule>
+  <rule name="Audio bit depth is 24" value="BitDepth" tracktype="Audio" occurrence="*" operator="=">24</rule>
+  <policy type="or" name="Slice Count is 24 or 4">
+    <tag/>
+    <rule name="Slice count is 24" value="Format_Settings_SliceCount" tracktype="Video" occurrence="*" operator="=">24</rule>
+    <rule name="Slice count is 4" value="Format_Settings_SliceCount" tracktype="Video" occurrence="*" operator="=">4</rule>
+  </policy>
+</policy>

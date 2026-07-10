@@ -19,11 +19,11 @@ permissions:
 jobs:
   update-homebrew-formula:
     runs-on: ubuntu-latest
-    
+
     outputs:
       version: ${{ steps.get_version.outputs.version }}
       tag_name: ${{ steps.get_version.outputs.tag_name }}
-    
+
     steps:
     - name: Checkout main repository
       uses: actions/checkout@v4
@@ -32,23 +32,23 @@ jobs:
 
     - name: Install dependencies
       run: sudo apt-get update && sudo apt-get install -y jq
-    
+
     - name: Determine version and download URL
       id: get_version
       run: |
         TAG_NAME="${{ github.event.inputs.tag_name }}"
         PROVIDED_VERSION="${{ github.event.inputs.version }}"
-        
+
         echo "📥 Input tag name: $TAG_NAME"
         echo "📥 Input version: $PROVIDED_VERSION"
-        
+
         # Validate that we have a version that looks like a tag
         if [[ ! "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
           echo "❌ Invalid tag format: $TAG_NAME"
           echo "Expected format: v1.2.3"
           exit 1
         fi
-        
+
         # Use provided version or derive from tag
         if [ -n "$PROVIDED_VERSION" ]; then
           VERSION_CLEAN="$PROVIDED_VERSION"
@@ -56,35 +56,35 @@ jobs:
           # Remove 'v' prefix from tag name
           VERSION_CLEAN=${TAG_NAME#v}
         fi
-        
+
         DOWNLOAD_URL="https://github.com/${{ github.repository }}/archive/refs/tags/${TAG_NAME}.tar.gz"
-        
+
         echo "version=${VERSION_CLEAN}" >> $GITHUB_OUTPUT
         echo "download_url=${DOWNLOAD_URL}" >> $GITHUB_OUTPUT
         echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
-        
+
         echo "📋 Final version: $VERSION_CLEAN"
         echo "📥 Download URL: $DOWNLOAD_URL"
         echo "🏷️ Tag name: $TAG_NAME"
-    
+
     - name: Verify release exists
       run: |
         echo "🔍 Verifying that release ${{ steps.get_version.outputs.tag_name }} exists..."
-        
+
         # Check if the release exists on GitHub
         RELEASE_CHECK=$(curl -s -o /dev/null -w "%{http_code}" \
           "https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ steps.get_version.outputs.tag_name }}")
-        
+
         if [ "$RELEASE_CHECK" = "200" ]; then
           echo "✅ Release ${{ steps.get_version.outputs.tag_name }} exists"
         else
           echo "⚠️ Release ${{ steps.get_version.outputs.tag_name }} not found (HTTP $RELEASE_CHECK)"
           echo "This might be expected if the release is still being created"
         fi
-        
+
         # Check if the archive URL is accessible
         ARCHIVE_CHECK=$(curl -s -o /dev/null -w "%{http_code}" -L "${{ steps.get_version.outputs.download_url }}")
-        
+
         if [ "$ARCHIVE_CHECK" = "200" ]; then
           echo "✅ Archive URL is accessible"
         else
@@ -92,40 +92,40 @@ jobs:
           echo "URL: ${{ steps.get_version.outputs.download_url }}"
           exit 1
         fi
-    
+
     - name: Calculate SHA256
       id: get_sha
       run: |
         echo "📦 Downloading archive to calculate SHA256..."
         curl -L "${{ steps.get_version.outputs.download_url }}" -o release.tar.gz
-        
+
         if [ ! -f release.tar.gz ]; then
           echo "❌ Failed to download release archive"
           exit 1
         fi
-        
+
         SHA256=$(sha256sum release.tar.gz | cut -d' ' -f1)
         FILE_SIZE=$(stat -f%z release.tar.gz 2>/dev/null || stat -c%s release.tar.gz)
-        
+
         echo "sha256=${SHA256}" >> $GITHUB_OUTPUT
         echo "📋 SHA256: $SHA256"
         echo "📋 File size: $FILE_SIZE bytes"
-        
+
         rm release.tar.gz
-    
+
     - name: Checkout Homebrew tap repository
       uses: actions/checkout@v4
       with:
         repository: JPC-AV/homebrew-AV-Spex
         token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         path: homebrew-tap
-    
+
     - name: Update formula
       run: |
         cd homebrew-tap
-        
+
         echo "🔄 Updating formula for version ${{ steps.get_version.outputs.version }}..."
-        
+
         # Show current formula before update
         echo "=== BEFORE UPDATE ==="
         if [ -f Formula/AV-Spex.rb ]; then
@@ -134,49 +134,53 @@ jobs:
           echo "Formula file not found!"
         fi
         echo "======================"
-        
+
         # Ensure Formula directory exists
         mkdir -p Formula
-        
-        # Create the updated formula  
+
+        # Create the updated formula. NOTE: deliberately NO `bottle do` block
+        # here — the build-bottles workflow runs `brew bottle --merge` after a
+        # successful build and writes the block (with the freshly built
+        # sha256s) back into this file. Each release rewrites the formula from
+        # this heredoc, cleanly clearing any stale bottle block.
         cat > Formula/AV-Spex.rb << 'EOF'
         class AvSpex < Formula
           include Language::Python::Virtualenv
-        
+
           desc "Python project for NMAAHC media conservation lab"
-          homepage "https://github.com/JPC-AV/video_qc_jpc_av"
-          url "https://github.com/JPC-AV/video_qc_jpc_av/archive/refs/tags/${{ steps.get_version.outputs.tag_name }}.tar.gz"
+          homepage "https://github.com/${{ github.repository }}"
+          url "https://github.com/${{ github.repository }}/archive/refs/tags/${{ steps.get_version.outputs.tag_name }}.tar.gz"
           sha256 "${{ steps.get_sha.outputs.sha256 }}"
           license "GPL-3.0-only"
-        
+
           depends_on "python@3.13"
           depends_on "mkvtoolnix"
-          
+
           resource "setuptools" do
             url "https://files.pythonhosted.org/packages/92/ec/089608b791d210aec4e7f97488e67ab0d33add3efccb83a056cbafe3a2a6/setuptools-75.8.0.tar.gz"
             sha256 "c5afc8f407c626b8313a86e10311dd3f661c6cd9c09d4bf8c15c0e11f9f2b0e6"
           end
-        
+
           resource "toml" do
             url "https://files.pythonhosted.org/packages/be/ba/1f744cdc819428fc6b5084ec34d9b30660f6f9daaf70eead706e3203ec3c/toml-0.10.2.tar.gz"
             sha256 "b3bda1d108d5dd99f4a20d24d9c348e91c4db7ab1b749200bded2f839ccbe68f"
           end
-        
+
           resource "art" do
             url "https://files.pythonhosted.org/packages/b6/15/6c4ac6bf544a01230bad5b45ce4f624051b9dc9567875da05cfdbfc2cafa/art-6.1.tar.gz"
             sha256 "6ab3031e3b7710039e73497b0e750cadfe04d4c1279ce3a123500dbafb9e1b64"
           end
-        
+
           resource "colorlog" do
             url "https://files.pythonhosted.org/packages/78/6b/4e5481ddcdb9c255b2715f54c863629f1543e97bc8c309d1c5c131ad14f2/colorlog-6.7.0.tar.gz"
             sha256 "bd94bd21c1e13fac7bd3153f4bc3a7dc0eb0974b8bc2fdf1a989e474f6e582e5"
           end
-        
+
           resource "appdirs" do
             url "https://files.pythonhosted.org/packages/d7/d8/05696357e0311f5b5c316d7b95f46c669dd9c15aaeecbb48c7d0aeb88c40/appdirs-1.4.4.tar.gz"
             sha256 "7d5d0167b2b1ba821647616af46a749d1c653740dd0d2415100fe26e27afdf41"
           end
-        
+
           resource "lxml" do
             url "https://files.pythonhosted.org/packages/ef/f6/c15ca8e5646e937c148e147244817672cf920b56ac0bf2cc1512ae674be8/lxml-5.3.1.tar.gz"
             sha256 "106b7b5d2977b339f1e97efe2778e2ab20e99994cbb0ec5e55771ed0795920c8"
@@ -206,27 +210,27 @@ jobs:
             url "https://files.pythonhosted.org/packages/49/ac/21a1f8aa3777f5658576777ea76bfb124b702c520bbe90edf4ae9915eafa/lazy_loader-0.5.tar.gz"
             sha256 "717f9179a0dbed357012ddad50a5ad3d5e4d9a0b8712680d4e687f5e6e6ed9b3"
           end
-          
+
           resource "networkx" do
             url "https://files.pythonhosted.org/packages/6a/51/63fe664f3908c97be9d2e4f1158eb633317598cfa6e1fc14af5383f17512/networkx-3.6.1.tar.gz"
             sha256 "26b7c357accc0c8cde558ad486283728b65b6a95d85ee1cd66bafab4c8168509"
           end
-          
+
           resource "pillow" do
             url "https://files.pythonhosted.org/packages/8c/21/c2bcdd5906101a30244eaffc1b6e6ce71a31bd0742a01eb89e660ebfac2d/pillow-12.2.0.tar.gz"
             sha256 "a830b1a40919539d07806aa58e1b114df53ddd43213d9c8b75847eee6c0182b5"
           end
-          
+
           resource "imageio" do
             url "https://files.pythonhosted.org/packages/b1/84/93bcd1300216ea50811cee96873b84a1bebf8d0489ffaf7f2a3756bab866/imageio-2.37.3.tar.gz"
             sha256 "bbb37efbfc4c400fcd534b367b91fcd66d5da639aaa138034431a1c5e0a41451"
           end
-          
+
           resource "tifffile" do
             url "https://files.pythonhosted.org/packages/6c/3e/695c7ab56be57814e369c1f38bc3f64b9dea0a83e867d00c0c9d613a9929/tifffile-2026.5.2.tar.gz"
             sha256 "21b10227ede8493814a34676774797f721f487e36cb0530e7c3bd882caa87f5a"
           end
-          
+
           resource "scikit-image" do
             url "https://files.pythonhosted.org/packages/a1/b4/2528bb43c67d48053a7a649a9666432dc307d66ba02e3a6d5c40f46655df/scikit_image-0.26.0.tar.gz"
             sha256 "f5f970ab04efad85c24714321fcc91613fcb64ef2a892a13167df2f3e59199fa"
@@ -250,10 +254,10 @@ jobs:
           def install
             venv = virtualenv_create(libexec, "python3.13")
 
-            venv.pip_install resources.reject { |r| 
-              r.name == "plotly" || r.name == "lxml" || r.name == "PyQt6" || 
-              r.name == "numpy" || r.name == "scipy" || r.name == "opencv-python-headless" || 
-              r.name == "matplotlib" || r.name == "scikit-image" || r.name == "pillow" 
+            venv.pip_install resources.reject { |r|
+              r.name == "plotly" || r.name == "lxml" || r.name == "PyQt6" ||
+              r.name == "numpy" || r.name == "scipy" || r.name == "opencv-python-headless" ||
+              r.name == "matplotlib" || r.name == "scikit-image" || r.name == "pillow"
             }
 
             system libexec/"bin/python", "-m", "pip", "install", "--no-deps", "--only-binary", ":all:", "plotly==5.23.0"
@@ -273,43 +277,43 @@ jobs:
             system libexec/"bin/python", "-m", "pip", "install", "--no-deps", "--only-binary", ":all:", "scikit-image==0.26.0"
 
             system libexec/"bin/python", "-m", "pip", "install", "--only-binary", ":all:", "PyQt6==6.9.1", "PyQt6-Qt6==6.9.1"
-        
+
             venv.pip_install_and_link buildpath
-            
+
             bin.install_symlink libexec/"bin/av-spex"
             bin.install_symlink libexec/"bin/av-spex-gui"
           end
-        
+
           test do
             system bin/"av-spex", "--version"
           end
         end
         EOF
-        
+
         # Show updated formula
         echo "=== AFTER UPDATE ==="
         head -20 Formula/AV-Spex.rb
         echo "====================="
-    
+
     - name: Commit and push changes
       run: |
         cd homebrew-tap
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
-        
+
         # Show git status
         echo "=== GIT STATUS ==="
         git status
         echo "=================="
-        
+
         # Show git diff
         echo "=== GIT DIFF ==="
         git diff Formula/AV-Spex.rb || echo "No existing formula to diff against"
         echo "================"
-        
+
         # Add the file
         git add Formula/AV-Spex.rb
-        
+
         # Check if there are staged changes
         if git diff --staged --quiet; then
           echo "ℹ️ No changes to commit - formula already up to date"
@@ -319,7 +323,7 @@ jobs:
                      -m "- Updated URL to tag ${{ steps.get_version.outputs.tag_name }}" \
                      -m "- Updated SHA256 to ${{ steps.get_sha.outputs.sha256 }}" \
                      -m "- Automated update from GitHub Actions"
-          
+
           echo "🚀 Pushing changes..."
           git push
           echo "✅ Formula updated successfully!"
@@ -329,7 +333,7 @@ jobs:
       if: success()
       run: |
         echo "🍺 Triggering Homebrew bottle build for version ${{ steps.get_version.outputs.version }}..."
-        
+
         # Trigger the bottle build workflow
         curl -X POST \
           -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
@@ -337,7 +341,7 @@ jobs:
           -H "X-GitHub-Api-Version: 2022-11-28" \
           https://api.github.com/repos/${{ github.repository }}/actions/workflows/build-bottles.yml/dispatches \
           -d "{\"ref\":\"main\", \"inputs\": {\"tag_name\": \"${{ steps.get_version.outputs.tag_name }}\"}}"
-        
+
         # Verify the API call
         if [ $? -eq 0 ]; then
           echo "✅ Successfully triggered bottle build workflow"

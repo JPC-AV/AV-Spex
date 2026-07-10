@@ -3,6 +3,15 @@
 
 import os
 import sys
+
+# The imports below pull in heavy dependencies (cv2, scipy, matplotlib, plotly).
+# On the first run after install none of them have cached bytecode yet, so loading
+# can take a long time — show a message before importing so it isn't a silent hang.
+_loading_message_shown = sys.stderr.isatty()
+if _loading_message_shown:
+    sys.stderr.write("Loading AV Spex... (the first run after an install can take a minute)")
+    sys.stderr.flush()
+
 import argparse
 import toml
 from art import text2art
@@ -19,6 +28,10 @@ from .utils import exiftool_import, mediainfo_import, ffprobe_import
 from .utils.config_manager import ConfigManager
 from .utils.config_io import ConfigIO
 from .utils.dependency_checker import DependencyManager, cli_deps_check
+
+if _loading_message_shown:
+    sys.stderr.write("\r\033[K")  # return to line start and clear it
+    sys.stderr.flush()
 
 # Create lazy loader for GUI components
 class LazyGUILoader:

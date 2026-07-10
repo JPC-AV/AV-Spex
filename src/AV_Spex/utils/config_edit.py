@@ -1518,7 +1518,7 @@ profile_vendor = {
             "run_tool": True
         },
         "mediaconch": {
-            "mediaconch_policy": "JPC_FFV1-MKV_Preservation_Policy_20260112.xml",
+            "mediaconch_policy": "JPC_FFV1-MKV_Preservation_Policy_20260709.xml",
             "run_mediaconch": True
         },
         "mediainfo": {
