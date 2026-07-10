@@ -14,7 +14,7 @@ spex_config = config_mgr.get_config('spex', SpexConfig)
 
 
 def convert_wildcards_to_regex(pattern):
-    '''
+    r'''
     Converts a pattern with custom wildcards to a regex pattern.
     
     Custom wildcards:
