@@ -48,6 +48,8 @@ namespaces = false
 "AV_Spex" = [
     "config/*.json",
     "config/mediaconch_policies/*.xml",
+    "config/clams_bars/*.png",
+    "config/clams_bars/LICENSE",
     "logo_image_files/*.png"
 ]
 
