@@ -1297,7 +1297,7 @@ profile_step1 = {
             "run_tool": True
         },
         "mediaconch": {
-            "mediaconch_policy": "JPC_FFV1-MKV_Preservation_Policy_20260112.xml",
+            "mediaconch_policy": "JPC_FFV1-MKV_Preservation_Policy_20260709.xml",
             "run_mediaconch": True
         },
         "mediainfo": {
@@ -1370,7 +1370,7 @@ profile_step2 = {
             "run_tool": False
         },
         "mediaconch": {
-            "mediaconch_policy": "JPC_FFV1-MKV_Preservation_Policy_20260112.xml",
+            "mediaconch_policy": "JPC_FFV1-MKV_Preservation_Policy_20260709.xml",
             "run_mediaconch": True
         },
         "mediainfo": {
@@ -1444,7 +1444,7 @@ profile_allOff = {
             "run_tool": False
         },
         "mediaconch": {
-            "mediaconch_policy": "JPC_FFV1-MKV_Preservation_Policy_20260112.xml",
+            "mediaconch_policy": "JPC_FFV1-MKV_Preservation_Policy_20260709.xml",
             "run_mediaconch": False
         },
         "mediainfo": {
