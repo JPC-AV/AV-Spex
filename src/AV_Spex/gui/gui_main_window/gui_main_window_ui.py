@@ -1,15 +1,16 @@
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, 
-    QLabel, QScrollArea, QMenuBar, QTabWidget
+    QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
+    QLabel, QScrollArea, QMenuBar, QTabWidget, QPushButton
 )
 from PyQt6.QtCore import Qt, QTimer, QSize
-from PyQt6.QtGui import QPixmap, QKeySequence
+from PyQt6.QtGui import QPixmap, QKeySequence, QAction
 
 import os
 import sys
 import platform
 
 from AV_Spex.gui.gui_theme_manager import ThemeManager
+from AV_Spex.gui.gui_help_window import HelpWindow
 from AV_Spex.utils import config_edit
 
 class MainWindowUI:
@@ -50,13 +51,22 @@ class MainWindowUI:
             self.help_menu = self.menu_bar.addMenu("Help")
             self.about_action = self.help_menu.addAction("About AV Spex")
             self.about_action.triggered.connect(self.main_window.import_tab.dialog_handlers.show_about_dialog)
+
+            # Help action — ApplicationSpecificRole moves it into the
+            # application menu (top left), alongside the About action
+            self.help_action = self.help_menu.addAction("AV Spex Help")
+            self.help_action.setMenuRole(QAction.MenuRole.ApplicationSpecificRole)
+            self.help_action.triggered.connect(self.show_help_window)
         else:
             # For Windows/Linux (if we expand support)
             # App menu 
             self.app_menu = self.menu_bar.addMenu("AV Spex")
             self.about_action = self.app_menu.addAction("About AV Spex")
             self.about_action.triggered.connect(self.main_window.import_tab.dialog_handlers.show_about_dialog)
-            
+
+            self.help_action = self.app_menu.addAction("AV Spex Help")
+            self.help_action.triggered.connect(self.show_help_window)
+
             # Add a separator
             self.app_menu.addSeparator()
             
@@ -70,10 +80,12 @@ class MainWindowUI:
             self.import_action.triggered.connect(self.main_window.import_tab.import_directories)
 
         self.setup_main_layout()
-        
+
         self.logo_setup()
 
         self.setup_tabs()
+
+        self.setup_help_button()
 
         self.setup_profiles_menu()
     
@@ -113,7 +125,27 @@ class MainWindowUI:
         self.main_window.spex_tab.setup_spex_tab()
         self.main_window.complex_tab.setup_complex_tab()
 
-        
+    def setup_help_button(self):
+        """Add the round '?' help button to the bottom right corner"""
+        help_button_layout = QHBoxLayout()
+        help_button_layout.addStretch()
+
+        self.main_window.help_button = QPushButton("?")
+        self.main_window.help_button.setFixedSize(28, 28)
+        self.main_window.help_button.setToolTip("Open AV Spex Help")
+        self.main_window.help_button.clicked.connect(self.show_help_window)
+        help_button_layout.addWidget(self.main_window.help_button)
+
+        self.main_window.main_layout.addLayout(help_button_layout)
+
+    def show_help_window(self):
+        """Show the help window, creating it on first use."""
+        if getattr(self.main_window, 'help_window', None) is None:
+            self.main_window.help_window = HelpWindow(self.main_window)
+        self.main_window.help_window.show()
+        self.main_window.help_window.raise_()
+        self.main_window.help_window.activateWindow()
+
     def setup_profiles_menu(self):
         """Set up the Profiles menu for custom profile management"""
         # Profiles menu

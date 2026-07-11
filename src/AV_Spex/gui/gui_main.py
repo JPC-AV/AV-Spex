@@ -92,7 +92,7 @@ class MainWindow(QMainWindow, ThemeableMixin):
     def closeEvent(self, event):
         """Handle application shutdown and clean up resources."""
         # Clean up any child windows first
-        for child_name in ['config_widget', 'processing_window', 'new_window', 'complex_widget']:
+        for child_name in ['config_widget', 'processing_window', 'new_window', 'complex_widget', 'help_window']:
             child = getattr(self, child_name, None)
             if child and isinstance(child, QWidget):
                 # If it has theme handling, clean it up
