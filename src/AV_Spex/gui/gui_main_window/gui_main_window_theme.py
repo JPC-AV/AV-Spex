@@ -129,10 +129,38 @@ class MainWindowTheme:
         # Style the 'Cancel Processing' button
         if hasattr(self.main_window, 'cancel_processing_button'):
             theme_manager.style_button(self.main_window.cancel_processing_button, special_style="cancel_processing")
-        
+
         # Style the progress indicator
         if hasattr(self.main_window, 'processing_indicator'):
             theme_manager.style_progress_bar(self.main_window.processing_indicator)
+
+        # Style the round '?' help button
+        if hasattr(self.main_window, 'help_button'):
+            self._style_help_button()
+
+    def _style_help_button(self):
+        """Style the '?' help button as a round, palette-aware button"""
+        button = self.main_window.help_button
+        palette = self.main_window.palette()
+        button_color = palette.color(palette.ColorRole.Button).name()
+        button_text_color = palette.color(palette.ColorRole.ButtonText).name()
+        highlight_color = palette.color(palette.ColorRole.Highlight).name()
+        highlight_text_color = palette.color(palette.ColorRole.HighlightedText).name()
+
+        button.setStyleSheet(f"""
+            QPushButton {{
+                font-weight: bold;
+                font-size: 14px;
+                border: 1px solid gray;
+                border-radius: 14px;
+                background-color: {button_color};
+                color: {button_text_color};
+            }}
+            QPushButton:hover {{
+                background-color: {highlight_color};
+                color: {highlight_text_color};
+            }}
+        """)
 
 
     def _remove_layout_item(self, layout, index):
