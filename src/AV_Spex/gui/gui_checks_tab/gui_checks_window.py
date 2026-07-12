@@ -154,6 +154,10 @@ class ChecksWindow(QWidget, ThemeableMixin):
         access_options_layout.setContentsMargins(0, 0, 0, 0)
         access_options_layout.setSpacing(5)
 
+        # "Requires:" notes name the upstream checks each sub-option depends
+        # on; without them the option is silently skipped at runtime.
+        requires_note_style = "color: gray; font-size: 10px; font-style: italic;"
+
         self.access_trim_bars_cb = QCheckBox("Trim color bars from start")
         self.access_trim_bars_cb.setStyleSheet("font-weight: bold;")
         access_trim_bars_desc = QLabel(
@@ -161,6 +165,12 @@ class ChecksWindow(QWidget, ThemeableMixin):
         )
         access_trim_bars_desc.setIndent(20)
         access_trim_bars_desc.setStyleSheet("color: gray; font-size: 10px;")
+        access_trim_bars_req = QLabel(
+            "Requires: \"Detect Color Bars\" or \"CLAMS Bars + Tone Detection\"<br>"
+            "(Complex tab → Color Bars &amp; Tone)"
+        )
+        access_trim_bars_req.setIndent(20)
+        access_trim_bars_req.setStyleSheet(requires_note_style)
 
         self.access_crop_borders_cb = QCheckBox("Crop detected borders")
         self.access_crop_borders_cb.setStyleSheet("font-weight: bold;")
@@ -169,6 +179,12 @@ class ChecksWindow(QWidget, ThemeableMixin):
         )
         access_crop_borders_desc.setIndent(20)
         access_crop_borders_desc.setStyleSheet("color: gray; font-size: 10px;")
+        access_crop_borders_req = QLabel(
+            "Requires: \"Border Detection\" in Sophisticated mode<br>"
+            "(Complex tab → Video Signal Checks), and \"Crop NTSC to 720x480\" above"
+        )
+        access_crop_borders_req.setIndent(20)
+        access_crop_borders_req.setStyleSheet(requires_note_style)
 
         self.access_crop_to_480_cb = QCheckBox("Crop NTSC to 720x480")
         self.access_crop_to_480_cb.setStyleSheet("font-weight: bold;")
@@ -185,15 +201,23 @@ class ChecksWindow(QWidget, ThemeableMixin):
         )
         access_exclude_audio_desc.setIndent(20)
         access_exclude_audio_desc.setStyleSheet("color: gray; font-size: 10px;")
+        access_exclude_audio_req = QLabel(
+            "Requires: \"Audio Analysis\" (Complex tab → Audio Checks)"
+        )
+        access_exclude_audio_req.setIndent(20)
+        access_exclude_audio_req.setStyleSheet(requires_note_style)
 
         access_options_layout.addWidget(self.access_trim_bars_cb)
         access_options_layout.addWidget(access_trim_bars_desc)
+        access_options_layout.addWidget(access_trim_bars_req)
         access_options_layout.addWidget(self.access_crop_to_480_cb)
         access_options_layout.addWidget(access_crop_to_480_desc)
         access_options_layout.addWidget(self.access_crop_borders_cb)
         access_options_layout.addWidget(access_crop_borders_desc)
+        access_options_layout.addWidget(access_crop_borders_req)
         access_options_layout.addWidget(self.access_exclude_audio_cb)
         access_options_layout.addWidget(access_exclude_audio_desc)
+        access_options_layout.addWidget(access_exclude_audio_req)
 
         access_row_layout.addWidget(access_options_widget)
         access_row_layout.addStretch()
