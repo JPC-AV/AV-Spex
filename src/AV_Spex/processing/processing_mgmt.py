@@ -319,6 +319,38 @@ class ProcessingManager:
         trim_start = color_bars_end_time if outputs_cfg.access_file_trim_color_bars else None
         crop_for_access = access_crop_area if outputs_cfg.access_file_crop_borders else None
 
+        # Warn when an access-file modifier is on but its upstream detection
+        # can't supply the data — the modifier is dropped, not an error. Only
+        # a config-level gap warrants a warning: a detection that ran and
+        # found nothing (no bars, no active area) is a normal outcome.
+        if outputs_cfg.access_file and outputs_cfg.access_file_trim_color_bars and trim_start is None:
+            qct_parse_cfg = self.checks_config.tools.qct_parse
+            bars_detection_enabled = (
+                (qct_parse_cfg.run_tool and qct_parse_cfg.barsDetection)
+                or self.checks_config.tools.clams_detection.run_tool
+            )
+            if not bars_detection_enabled:
+                logger.warning(
+                    f"Access file option 'trim color bars' is on, but color bars "
+                    f"detection is not enabled (qct-parse bars detection or CLAMS); "
+                    f"the access copy will not be trimmed\n"
+                )
+
+        if outputs_cfg.access_file and outputs_cfg.access_file_crop_borders and crop_for_access is None:
+            if not frame_config.enable_border_detection:
+                logger.warning(
+                    f"Access file option 'crop detected borders' is on, but border "
+                    f"detection is not enabled; borders will not be cropped from "
+                    f"the access copy\n"
+                )
+            elif frame_config.border_detection_mode != 'sophisticated':
+                logger.warning(
+                    f"Access file option 'crop detected borders' is on, but border "
+                    f"detection mode is '{frame_config.border_detection_mode}' "
+                    f"(needs 'sophisticated' for active-area measurement); borders "
+                    f"will not be cropped from the access copy\n"
+                )
+
         # When enabled, a stereo channel flagged by qct-parse audio analysis
         # (silent, or carrying audible timecode) is excluded from the access
         # copy and the good channel output as dual-mono.
