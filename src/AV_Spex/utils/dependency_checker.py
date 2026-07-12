@@ -162,6 +162,13 @@ class DependencyCheckDialog(QDialog):
                 version_command="mkvmerge --version",
                 description="Required for MKV container operations",
                 install_hint="Install via: brew install mkvtoolnix (macOS) or visit https://mkvtoolnix.download/"
+            ),
+            DependencyInfo(
+                name="mkvalidator",
+                command="mkvalidator",
+                version_command="mkvalidator --version",
+                description="Required for Matroska file structure validation",
+                install_hint="Install via: brew install mkvalidator (macOS) or visit https://www.matroska.org/downloads/mkvalidator.html"
             )
         ]
     
@@ -386,6 +393,11 @@ class DependencyManager:
                 name="MKVToolNix",
                 command="mkvmerge",
                 install_hint="Install via: brew install mkvtoolnix (macOS) or visit https://mkvtoolnix.download/"
+            ),
+            DependencyInfo(
+                name="mkvalidator",
+                command="mkvalidator",
+                install_hint="Install via: brew install mkvalidator (macOS) or visit https://www.matroska.org/downloads/mkvalidator.html"
             )
         ]
 
@@ -405,7 +417,7 @@ def cli_deps_check():
     
     check_py_version()
     
-    required_commands = ['ffmpeg', 'mediainfo', 'exiftool', 'mediaconch', 'qcli', 'mkvmerge']
+    required_commands = ['ffmpeg', 'mediainfo', 'exiftool', 'mediaconch', 'qcli', 'mkvmerge', 'mkvalidator']
     for command in required_commands:
         if not check_external_dependency(command):
             logger.critical(f"Error: {command} not found. Please install it.")
