@@ -297,6 +297,14 @@ Two modes are available:
 - **Simple** (default) — Applies a uniform fixed-pixel crop on all sides (default: 25 px). Also used as a fallback when sophisticated detection is not possible.
 - **Sophisticated** — Samples multiple frames across the video, selecting high-quality frames with good contrast, and analyzes luminance gradients at the frame edges to find where active picture content begins. Also detects head-switching artifacts in the bottom rows of the frame; if the average artifact height exceeds the luminance-based bottom border crop, the bottom crop is expanded to match.
 
+![Simple border detection as shown in the HTML report](border_detection_simple_example.png)
+
+*Simple border detection as shown in the HTML report: a fixed 25 px border (dashed line) is cropped from every edge, excluding blanking regions — like the black bar at the left edge of this frame — from broadcast-range analysis.*
+
+![Sophisticated border detection as shown in the HTML report](border_detection_sophisticated_example.png)
+
+*Sophisticated border detection on the same tape: edge analysis sizes each border independently (here L=36 px, R=18 px, T=7 px, B=14 px — shaded red) instead of applying a uniform crop, and the detected head-switching region at the bottom of the frame (orange, 9 px) is excluded as well.*
+
 **Iterative refinement**: After initial border detection, BRNG analysis runs on the detected active area. If a high percentage of violations occur at the edges of the active area — suggesting the borders were not cropped aggressively enough — the borders are automatically expanded and the analysis is re-run, up to the configured maximum number of retries. The goal is to separate true content violations from border artifacts.
 
 Border Detection is required for Signalstats Analysis, and the detected active area can also be used to crop the access file (**Crop Borders** output option).
