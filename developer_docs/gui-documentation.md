@@ -282,8 +282,8 @@ Controls the `checks_config.tools.qct_parse` settings. Dependency logic is enfor
 
 Controls the `checks_config.tools.clams_detection` settings (single section, runs both detectors):
 
-- **Run Tool** — runs the CLAMS SSIM-based SMPTE bars detector and the cross-correlation tone detector together. The bars detector runs in parallel with qct-parse for side-by-side comparison; the tone detector identifies spans of monotonic audio (e.g. SMPTE bars-and-tones).
-- Numeric tuning of the bars/tone parameters is **JSON-only** — only the `Run Tool` toggle is exposed in the UI. qct-parse remains authoritative for downstream BRNG-skip and access-file trim.
+- **Run Tool** — runs the CLAMS SSIM-based SMPTE bars detector and the cross-correlation tone detector together, before qct-parse. Detected regions are passed to qct-parse to guide additional windowed bars scans; the tone detector identifies spans of monotonic audio (e.g. SMPTE bars-and-tones).
+- Numeric tuning of the bars/tone parameters is **JSON-only** — only the `Run Tool` toggle is exposed in the UI. The head-bars end time used for downstream BRNG-skip and access-file trim is merged across qct-parse and CLAMS ("longest/latest wins").
 
 #### 4. Frame Analysis sections
 

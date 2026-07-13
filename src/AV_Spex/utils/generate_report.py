@@ -5964,9 +5964,11 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
                     start and stop in lockstep.</li>
             </ol>
             <p style="margin: 0 0 10px 0;">
-                Second-pass rows are highlighted in the result tables below. They are confirmation hits
-                only — qct-parse remains authoritative for downstream behavior such as the BRNG-skip
-                window and access-file trim.
+                Second-pass rows are highlighted in the result tables below. All detected regions are
+                passed to qct-parse to guide additional windowed bars scans, and the head color bars
+                end time that drives the BRNG-skip window and access-file trim is merged from both
+                detectors — the later of the qct-parse and primary-pass CLAMS end times wins.
+                Second-pass detections never set that trim point.
             </p>
             <p style="margin: 0 0 6px 0; font-weight: bold;">Fragment merging:</p>
             <p style="margin: 0 0 10px 0;">

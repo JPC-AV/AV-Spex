@@ -184,7 +184,7 @@ The Complex tab configures the advanced analysis steps — typically run during 
   - **Audio Analysis**: Clipping, channel imbalance, audible timecode (LTC), and audio dropout (via qct-parse)
   - **Dropped Sample Detection**: Potential audio sample drops from TBC/framesync or ADC devices
 
-Checks marked "via qct-parse" read the QCTools report through the qct-parse tool, and enabling any of them turns qct-parse on automatically — there is no separate qct-parse "Run Tool" checkbox on this tab (the Checks tab still exposes one). Turning off all qct-parse-backed checks turns the tool off.
+Checks marked "via qct-parse" read the QCTools report through the qct-parse tool, and enabling any of them turns qct-parse on automatically — there is no separate qct-parse "Run Tool" checkbox on this tab. Turning off all qct-parse-backed checks turns the tool off.
 
 Once your Spex selections are complete, navigate to the Checks tab and click **Check Spex!**.
 
@@ -256,12 +256,12 @@ Like audio analysis, this runs inside qct-parse and the CLI auto-enables `qct_pa
 
 ### CLAMS Detection
 
-CLAMS Detection runs two analyses together as a single step, independent of qct-parse:
+CLAMS Detection runs two analyses together as a single step, before qct-parse:
 
-- **SSIM bars detector** — uses the structural similarity index (SSIM) to identify SMPTE color bars by comparing frames against a reference pattern. Runs in parallel with qct-parse's own bars detector to provide a side-by-side comparison.
+- **SSIM bars detector** — uses the structural similarity index (SSIM) to identify SMPTE color bars by comparing frames against a reference pattern, providing a side-by-side comparison with qct-parse's own bars detector.
 - **Cross-correlation tone detector** — identifies spans of monotonic audio, such as the 1 kHz tones that accompany SMPTE bars. Useful for locating bars-and-tones segments at the head of a tape.
 
-CLAMS results complement qct-parse output, but qct-parse remains authoritative for downstream BRNG-skip and access-file color-bar trim decisions.
+Detected CLAMS regions are passed to qct-parse to guide additional windowed bars scans, and the head color-bars end time used for downstream BRNG-skip and access-file trim decisions is merged from both detectors — the later end time wins.
 
 ```bash
 av-spex --enable-clams-detection on

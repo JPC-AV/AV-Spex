@@ -140,7 +140,7 @@ The Complex tab configures the advanced analysis steps — typically run during 
 - **QCTools Report**: Run QCTools on the input video to generate the per-frame report that many of the checks below read, and set the report's file extension (`qctools.xml.gz` or `qctools.mkv`). If a report already exists in the `_qc_metadata` or `_vrecord_metadata` directory, it is reused instead of re-running.
 - **Color Bars & Tone**:
   - **Detect Color Bars**: Find SMPTE color bars in the video content (via qct-parse). The detected section is used downstream to skip bars in BRNG analysis and trim them from the access file. Its sub-options **Evaluate Color Bars** (compare program content against the detected bars) and **Export Thumbnails** (save thumbnails of failing frames) become available when detection is on.
-  - **CLAMS Bars + Tone Detection**: Run the CLAMS SSIM-based SMPTE bars detector and cross-correlation tone detector together as one step, alongside qct-parse for side-by-side comparison (described in the Color Bars & Tone section below)
+  - **CLAMS Bars + Tone Detection**: Run the CLAMS SSIM-based SMPTE bars detector and cross-correlation tone detector together as one step; results are compared side-by-side with qct-parse and merged into the head color-bars end time (described in the Color Bars & Tone section below)
 - **Video Signal Checks** (each check is described in the Video Signal Checks section below):
   - **Detect Clamped Levels**: Broadcast-range level clamping from the analog-to-digital converter (via qct-parse)
   - **Detect Chroma Phase Errors**: Tape tracking artifacts where chroma collapses toward cyan or magenta (via qct-parse)
@@ -155,7 +155,7 @@ The Complex tab configures the advanced analysis steps — typically run during 
   - **Tone Leak Detection**: A 1 kHz reference tone leaking from the transfer chain, heard as a faint high-pitched whine or squeak in quiet passages (via qct-parse)
   - **Dropped Sample Detection**: Potential audio sample drops from TBC/framesync or ADC devices
 
-Checks marked "via qct-parse" read the QCTools report through the qct-parse tool, and enabling any of them turns qct-parse on automatically — there is no separate qct-parse "Run Tool" checkbox on this tab (the Checks tab still exposes one). Turning off all qct-parse-backed checks turns the tool off.
+Checks marked "via qct-parse" read the QCTools report through the qct-parse tool, and enabling any of them turns qct-parse on automatically — there is no separate qct-parse "Run Tool" checkbox on this tab. Turning off all qct-parse-backed checks turns the tool off.
 
 Once your Spex selections are complete, navigate to the Checks tab and click **Check Spex!**.
 
@@ -211,6 +211,8 @@ Detects SMPTE color bars in the video content (via qct-parse) by scanning the QC
 - The access file can be trimmed to start after the bars (**Trim Color Bars** output option)
 - Chroma phase and duplicate frame detection exclude the bars region
 
+When CLAMS Bars + Tone Detection is also enabled, the head-bars end time used for the BRNG skip and the access-file trim is merged from both detectors — the later end time wins (see the CLAMS section below).
+
 ### Evaluate Color Bars
 
 Available when Detect Color Bars is on. Reads the signal values from the detected color bars and compares the program content against them, flagging frames that exceed the levels established by the bars. A summary and per-frame failures are written to CSVs and charted in the HTML report.
@@ -221,17 +223,19 @@ Available when Detect Color Bars is on. Exports thumbnail images of frames that 
 
 ### CLAMS Bars + Tone Detection
 
-**CLAMS** (Computational Linguistics Applications for Multimedia Services) is an open-source project led by Brandeis University that builds reusable tools for analyzing audiovisual collections. AV Spex adapts two CLAMS apps — [app-barsdetection](https://github.com/clamsproject/app-barsdetection) and [app-tonedetection](https://github.com/clamsproject/app-tonedetection) — porting just their detection cores into the AV Spex pipeline (both distributed under the Apache License 2.0). The two detectors run together as a single step, independent of qct-parse, and provide a side-by-side comparison with qct-parse's own bars detection.
+**CLAMS** (Computational Linguistics Applications for Multimedia Services) is an open-source project led by Brandeis University that builds reusable tools for analyzing audiovisual collections. AV Spex adapts two CLAMS apps — [app-barsdetection](https://github.com/clamsproject/app-barsdetection) and [app-tonedetection](https://github.com/clamsproject/app-tonedetection) — porting just their detection cores into the AV Spex pipeline (both distributed under the Apache License 2.0). The two detectors run together as a single step, before qct-parse, and their results both complement and feed into qct-parse's own bars detection.
 
 **Bars detection**: Frames are sampled (every 30th frame by default) and converted to grayscale. Each sample is compared to a bundled SMPTE color bars reference image using structural similarity (SSIM). A frame matches when its SSIM score exceeds the primary threshold (0.7), and a run of consecutive matching samples becomes a detected bars span once it exceeds the minimum frame count.
 
 **Tone detection**: The audio track is decoded to 16 kHz mono and split into consecutive 250 ms chunks. Adjacent chunks are compared using cross-correlation; when their similarity stays at or above the tolerance (1.0 by default), the run is extended. Runs longer than the minimum duration (2000 ms by default) are reported as detected tones.
 
-**Two-pass cross-validation**: Color bars and reference tone are typically authored together at the head of a tape, so the two detectors should largely agree. Each detector first scans the file independently. When one detector finds a span the other missed, a targeted windowed scan is re-run on the other detector with relaxed thresholds (bars: SSIM ≥ 0.6; tone: tolerance 0.7, minimum duration 500 ms), with ±5 seconds of slack around the trigger window since bars and tone don't always start and stop in lockstep. Second-pass rows are highlighted in the report and are confirmation hits only.
+**Two-pass cross-validation**: Color bars and reference tone are typically authored together at the head of a tape, so the two detectors should largely agree. Each detector first scans the file independently. When one detector finds a span the other missed, a targeted windowed scan is re-run on the other detector with relaxed thresholds (bars: SSIM ≥ 0.6; tone: tolerance 0.7, minimum duration 500 ms), with ±5 seconds of slack around the trigger window since bars and tone don't always start and stop in lockstep. Second-pass rows are highlighted in the report; they are confirmation hits and never set the head-bars end time described below.
 
 **Fragment merging**: A continuous span can dip below threshold briefly and be reported as several adjacent fragments; fragments separated by less than the configured merge gap (1 s for bars, 5 s for tone) are coalesced back into a single span.
 
-CLAMS results complement qct-parse output, but qct-parse remains authoritative for downstream decisions such as the BRNG-skip window and access-file color-bar trim. Numeric tuning of the CLAMS parameters (SSIM threshold, sample ratio, minimum durations, etc.) is JSON-only — only the on/off toggle is exposed in the GUI and CLI. Edit the saved `last_used_checks_config.json` directly if you need to adjust those.
+**How the results are used**: CLAMS runs before qct-parse, and all detected bars and tone regions are passed to qct-parse, which runs additional windowed bars scans over them beyond the head of the tape. The head color-bars end time that drives the BRNG-skip window and the access-file trim is then merged from both detectors: when CLAMS's primary bars detection starts within the first 10 seconds of the file, the later of the two end times (qct-parse or CLAMS) wins — and if only one detector found head bars, its end time is used on its own. Only primary-pass CLAMS detections participate in this merge; mid-file bars are report-only.
+
+Numeric tuning of the CLAMS parameters (SSIM threshold, sample ratio, minimum durations, etc.) is JSON-only — only the on/off toggle is exposed in the GUI and CLI. Edit the saved `last_used_checks_config.json` directly if you need to adjust those.
 
 CLI: `av-spex --enable-clams-detection {on,off}`
 
