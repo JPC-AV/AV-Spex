@@ -261,6 +261,10 @@ CLI: `av-spex --enable-clamped-levels {on,off}`
 
 Flags frames where the chroma signal has collapsed toward a single hue (typically cyan or magenta), usually caused by helical-scan tracking failures on tape sources (via qct-parse). The artifact is often accompanied by horizontal image displacement and a brief picture "swerve" at onset.
 
+![A detected chroma phase error event](chroma_phase_example.png)
+
+*A detected chroma phase error, from an event thumbnail in the HTML report: a tracking failure collapses the frame's chroma into a saturated field of complementary hues, with U and V spanning nearly their full range — the envelope signature described below.*
+
 Two flagging rules:
 
 - **Envelope** — within a single frame, both U and V span nearly the full chroma range (for 10-bit video: UMIN and VMIN below 100, UMAX and VMAX above 900; scaled for 8-bit). This is the strongest single-frame signature.
