@@ -314,6 +314,10 @@ Evaluates broadcast-range compliance across sampled time periods of the video us
 
 Comparing the two reveals whether violations originate from border/blanking regions or from the picture content itself: if the full frame shows significantly more violations (>5%) than the active area, they are classified as *border violations*; if the active area itself shows >10% violations, they are classified as *content violations* that may require correction. The final diagnosis is based on the active-area results — the picture content that would actually be seen in playback or broadcast.
 
+![A signalstats period comparison from the HTML report](signalstats_period_example.png)
+
+*A one-minute analysis period as shown in the HTML report. The full frame flags BRNG violations on every frame, but the active picture area flags only 16.2% — so the period is classified as border violations rather than content violations.*
+
 **Period selection**: Analysis periods target, in priority order: timestamps where QCTools detected the highest concentrations of BRNG activity, timestamps flagged during border detection as having interesting signal characteristics, and finally evenly spaced periods across the content (after color bars).
 
 CLI: `av-spex --enable-signalstats {on,off}`
