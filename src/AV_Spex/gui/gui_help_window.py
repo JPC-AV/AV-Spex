@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTextBrowser
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtGui import QTextCursor, QTextCharFormat, QTextBlockFormat
 
 import html
@@ -53,9 +53,17 @@ class HelpWindow(QWidget, ThemeableMixin):
         if help_path:
             try:
                 with open(help_path, 'r', encoding='utf-8') as f:
-                    return f.read()
+                    text = f.read()
             except OSError:
                 pass
+            else:
+                # Resolve the document's relative image references (e.g. the
+                # BRNG differential example) against the bundled help dir
+                help_dir = os.path.dirname(help_path)
+                self.content.setSearchPaths([help_dir])
+                self.content.document().setBaseUrl(
+                    QUrl.fromLocalFile(help_dir + os.sep))
+                return text
         return ("# AV Spex Help\n\n"
                 "The help document could not be found. Please see the README at "
                 "https://github.com/JPC-AV/JPC_AV_videoQC for documentation.")

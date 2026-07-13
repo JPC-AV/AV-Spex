@@ -284,7 +284,7 @@ CLI: `av-spex --enable-duplicate-frame-detection {on,off}`
 
 ### Bitplane Check
 
-Verifies that the 9th and 10th bits of 10-bit video contain data. Some TBC/framesync devices truncate these bits, producing what is effectively 8-bit video stored in a 10-bit container. The check flags clips where the high bits show no variation.
+Verifies that the 9th and 10th bits of 10-bit video contain data. Some TBC/framesync devices truncate these bits, producing what is effectively 8-bit video stored in a 10-bit container. The check flags clips where the least significant bits (bits  7th-10th) show no variation.
 
 CLI: `av-spex --enable-bitplane-check {on,off}`
 
@@ -322,7 +322,13 @@ CLI: `av-spex --enable-signalstats {on,off}`
 
 **BRNG (Broadcast Range)** measures whether pixel values fall outside the broadcast-legal range (16–235 for luma, 16–240 for chroma in 8-bit video). Pixels outside this range may be clipped during broadcast or indicate issues in the source material.
 
-**Differential detection**: For each analysis period, two temporary video segments are created from the active picture area — one rendered with FFmpeg's `signalstats=out=brng:color=magenta` filter, which overlays magenta on out-of-range pixels, and one rendered without it. Frames are then compared pixel-by-pixel using three independent detection methods that vote on whether a pixel is a genuine violation:
+**Differential detection**: For each analysis period, two temporary video segments are created from the active picture area — one rendered with FFmpeg's `signalstats=out=brng:color=magenta` filter, which overlays magenta on out-of-range pixels, and one rendered without it.
+
+![The same frame rendered without and with the signalstats BRNG overlay](brng_differential_example.png)
+
+*The same frame from the two rendered segments. On the right, the `signalstats` filter paints out-of-range pixels magenta — here a dropout band crossing the picture, a hot highlight, and violations along the frame edges.*
+
+Frames are then compared pixel-by-pixel using three independent detection methods that vote on whether a pixel is a genuine violation:
 
 1. **BGR threshold** — checks for the magenta color signature (high red + blue, low green channel differences)
 2. **Ratio-based** — verifies that red and blue channel increases are proportional, characteristic of the magenta overlay
