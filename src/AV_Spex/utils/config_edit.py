@@ -1394,7 +1394,8 @@ profile_step2 = {
             "evaluateBars": True,
             "thumbExport": True,
             "audio_analysis": True,
-            "detect_clamped_levels": True
+            "detect_clamped_levels": True,
+            "detect_chroma_phase_errors": True
         },
         "clams_detection": {
             "run_tool": True,
