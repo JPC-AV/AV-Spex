@@ -83,6 +83,12 @@ class SignalstatsResult:
     diagnosis: str
     used_qctools: bool
     comparison_results: List[Dict] = None
+    # 'ok' | 'info' | 'warning' | 'alert' — drives report banner styling
+    # (report falls back to diagnosis keyword matching when absent)
+    severity: str = 'info'
+    # What region the aggregate stats were measured on:
+    # 'active_area' | 'full_frame' | 'mixed' ('' for legacy results)
+    analyzed_region: str = ''
 
 @dataclass
 class DroppedSampleResult:
@@ -2988,6 +2994,7 @@ class IntegratedSignalstatsAnalyzer:
         
         # Analyze periods
         all_results = []
+        period_regions = []  # 'active_area' or 'full_frame' per aggregated period
         used_qctools = False
         comparison_results = []
         total_periods = len(analysis_periods)
@@ -3063,14 +3070,17 @@ class IntegratedSignalstatsAnalyzer:
                     
                     # Use FFprobe result for aggregate
                     all_results.append(ffprobe_result)
+                    period_regions.append('active_area')
                 else:
                     # Fall back to QCTools if FFprobe fails
                     if qctools_result:
                         all_results.append(qctools_result)
+                        period_regions.append('full_frame')
             else:
                 # No active area defined, use QCTools or FFprobe on full frame
                 if qctools_result:
                     all_results.append(qctools_result)
+                    period_regions.append('full_frame')
                 else:
                     logger.info(f"    Using FFprobe on full frame (no border detection)")
                     ffprobe_result = self._analyze_with_ffprobe_period(
@@ -3079,6 +3089,7 @@ class IntegratedSignalstatsAnalyzer:
                     )
                     if ffprobe_result:
                         all_results.append(ffprobe_result)
+                        period_regions.append('full_frame')
             
             comparison_results.append(period_comparison)
             
@@ -3108,9 +3119,17 @@ class IntegratedSignalstatsAnalyzer:
         max_brng = max(all_brng_values) * 100 if all_brng_values else 0
         avg_brng = np.mean(all_brng_values) * 100 if all_brng_values else 0
         
+        # Determine which region the aggregate stats were measured on
+        if period_regions and all(r == 'active_area' for r in period_regions):
+            analyzed_region = 'active_area'
+        elif period_regions and all(r == 'full_frame' for r in period_regions):
+            analyzed_region = 'full_frame'
+        else:
+            analyzed_region = 'mixed'
+
         # Generate comprehensive diagnosis
-        diagnosis = self._generate_comprehensive_diagnosis(
-            violation_pct, max_brng, comparison_results, active_area is not None
+        diagnosis, severity = self._generate_comprehensive_diagnosis(
+            violation_pct, max_brng, avg_brng, comparison_results, active_area is not None
         )
         
         # Log final comparison summary
@@ -3130,37 +3149,63 @@ class IntegratedSignalstatsAnalyzer:
             analysis_periods=analysis_periods,
             diagnosis=diagnosis,
             used_qctools=used_qctools,
-            comparison_results=comparison_results
+            comparison_results=comparison_results,
+            severity=severity,
+            analyzed_region=analyzed_region
         )
 
-    def _generate_comprehensive_diagnosis(self, violation_pct: float, max_brng: float, 
-                                        comparison_results: List[Dict], has_active_area: bool) -> str:
-        """Generate diagnosis based on full frame vs active area comparison"""
-        
+    def _generate_comprehensive_diagnosis(self, violation_pct: float, max_brng: float,
+                                        avg_brng: float, comparison_results: List[Dict],
+                                        has_active_area: bool) -> Tuple[str, str]:
+        """Generate diagnosis based on full frame vs active area comparison.
+
+        Alert severity is keyed to avg_brng (the average share of out-of-range
+        pixels per analyzed frame) rather than the count of flagged frames,
+        since a frame counts as "flagged" from a single out-of-range pixel.
+
+        Returns:
+            (diagnosis sentence, severity) — severity is one of
+            'ok' | 'info' | 'warning' | 'alert'.
+        """
+
         if not has_active_area:
-            # No border detection, standard diagnosis
-            if violation_pct < 10 and max_brng < 0.1:
-                return "Video appears broadcast-compliant"
+            # No border detection — stats reflect the full frame
+            if avg_brng >= 10:
+                return (f"On average {avg_brng:.1f}% of pixels per analyzed frame were outside "
+                        f"broadcast-safe range (full-frame analysis; borders were not excluded) "
+                        f"— review recommended", 'alert')
+            elif violation_pct < 10 and max_brng < 0.1:
+                return ("Analyzed frames are within broadcast-safe range "
+                        "(full-frame analysis)", 'ok')
             elif violation_pct < 50 and max_brng < 1.0:
-                return "Minor BRNG violations - likely acceptable"
-            elif max_brng > 2.0:
-                return "Significant BRNG violations requiring correction"
+                return ("A small share of analyzed frames contain low levels of out-of-range "
+                        "pixels (full-frame analysis; borders were not excluded) — likely acceptable", 'info')
             else:
-                return "Moderate BRNG violations detected"
-        
+                return ("Out-of-range pixels detected in analyzed frames (full-frame analysis; "
+                        "borders were not excluded) — review recommended", 'warning')
+
         # Analyze comparison results
         border_violation_periods = sum(1 for r in comparison_results if r.get('diagnosis') == 'border_violations')
         content_violation_periods = sum(1 for r in comparison_results if r.get('diagnosis') == 'content_violations')
-        
+
         if border_violation_periods > content_violation_periods:
-            return "BRNG violations primarily in border areas - active content appears broadcast-safe"
+            return ("Out-of-range pixels are concentrated in the border and blanking regions "
+                    "outside the active picture; the picture content itself appears "
+                    "broadcast-safe", 'ok')
         elif content_violation_periods > 0:
-            if violation_pct > 50:
-                return "Significant BRNG violations in active picture area - requires correction"
+            quantifier = "Most" if violation_pct > 50 else "Some"
+            if avg_brng >= 10:
+                return (f"{quantifier} analyzed frames contain out-of-range pixels inside the "
+                        f"active picture area, averaging {avg_brng:.1f}% of pixels per frame "
+                        f"— review recommended", 'alert')
             else:
-                return "BRNG violations detected in active picture area - review recommended"
+                severity = 'warning' if violation_pct > 50 else 'info'
+                return (f"{quantifier} analyzed frames contain out-of-range pixels inside the "
+                        f"active picture area — worth reviewing, though low levels are common "
+                        f"for analog sources", severity)
         else:
-            return "Video appears broadcast-compliant with properly detected borders"
+            return ("The analyzed frames in the active picture area are within "
+                    "broadcast-safe range", 'ok')
     
     def _seconds_to_timecode(self, seconds: float) -> str:
         """Convert seconds to MM:SS.mmm format"""
