@@ -3368,7 +3368,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
 
     # Border Detection Section
     if frame_outputs['border_visualization'] or frame_outputs['border_data']:
-        html += "<h3 style='color: #bf971b;'>Border Detection</h3>"
+        html += "<h3 id='section-border-detection' style='color: #bf971b;'>Border Detection</h3>"
         
         # Methodology explanation (collapsible)
         html += """
@@ -3690,7 +3690,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
     
     # Signalstats Analysis Section
     if frame_outputs['signalstats_analysis']:
-        html += "<h3 style='color: #bf971b;'>Signalstats Analysis</h3>"
+        html += "<h3 id='section-signalstats' style='color: #bf971b;'>Signalstats Analysis</h3>"
         
         # Methodology explanation (collapsible)
         html += """
@@ -4025,7 +4025,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
     
     # BRNG Analysis Section
     if frame_outputs['brng_analysis']:
-        html += "<h3 style='color: #bf971b;'>BRNG Violation Analysis</h3>"
+        html += "<h3 id='section-brng-analysis' style='color: #bf971b;'>BRNG Violation Analysis</h3>"
         
         # Methodology explanation (collapsible)
         html += """
@@ -4144,11 +4144,11 @@ def generate_frame_analysis_html(frame_outputs, video_id):
             avg_violation = stats.get('average_violation_percentage', 0)
             max_violation = stats.get('max_violation_percentage', 0)
             
-            if max_violation > 50 or avg_violation > 10:
+            if avg_violation >= 10:
                 assessment_bg = '#ffbaba'
                 assessment_border = '#d32f2f'
                 assessment_icon = '⛔'
-            elif edge_pct > 50 or avg_violation > 1:
+            elif edge_pct > 50:
                 assessment_bg = '#fff3cd'
                 assessment_border = '#bf971b'
                 assessment_icon = '⚠️'
@@ -5608,7 +5608,21 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     if mkvalidator_html:
         toc_entries.append(('section-mkvalidator', 'mkvalidator'))
     if frame_analysis_html:
-        toc_entries.append(('section-frame-analysis', 'Frame Analysis Results'))
+        # Link to the individual frame-analysis subsections rather than the
+        # section heading; only list the ones that were actually rendered
+        frame_subsections = [
+            ('section-border-detection', 'Border Detection'),
+            ('section-signalstats', 'Signalstats Analysis'),
+            ('section-brng-analysis', 'BRNG Violation Analysis'),
+        ]
+        rendered = [
+            (anchor, label) for anchor, label in frame_subsections
+            if f"id='{anchor}'" in frame_analysis_html
+        ]
+        if rendered:
+            toc_entries.extend(rendered)
+        else:
+            toc_entries.append(('section-frame-analysis', 'Frame Analysis Results'))
     if bitplane_html:
         toc_entries.append(('section-bitplane', 'Bitplane Check'))
     if duplicate_frame_html:

@@ -2612,14 +2612,22 @@ class DifferentialBRNGAnalyzer:
         avg_violation = np.mean([v.violation_percentage for v in violations])
         
         parts = []
-        
-        # Describe violation level
-        if avg_violation >= 1.0:
-            parts.append(f"Average BRNG: {avg_violation:.2f}%")
+
+        # Describe violation level. The percentage is a pixel percentage
+        # within flagged frames — not a share of all analyzed frames — so
+        # spell that out rather than reporting a bare "Average BRNG"
+        precision = 2 if avg_violation >= 0.1 else 3
+        sentence = (
+            f"Among the analyzed frames that had any out-of-range pixels, "
+            f"on average {avg_violation:.{precision}f}% of each frame's pixels "
+            f"were outside broadcast-safe range"
+        )
+        if avg_violation >= 10.0:
+            parts.append(sentence)
         elif avg_violation >= 0.1:
-            parts.append(f"Average BRNG: {avg_violation:.2f}% (low-level)")
+            parts.append(f"{sentence} (low-level)")
         else:
-            parts.append(f"Average BRNG: {avg_violation:.3f}% (minimal)")
+            parts.append(f"{sentence} (minimal)")
         
         # Describe spatial distribution
         if edge_pct > 70:
