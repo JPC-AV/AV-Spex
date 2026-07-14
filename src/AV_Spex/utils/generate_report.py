@@ -3754,24 +3754,38 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     signalstats_data = json.load(f)
             
             diagnosis = signalstats_data.get('diagnosis', 'Analysis complete')
-            
-            # Determine assessment styling
-            if 'broadcast-compliant' in diagnosis.lower() or 'broadcast-safe' in diagnosis.lower():
+
+            # Determine assessment styling from the severity field when present;
+            # fall back to diagnosis keyword matching for results generated
+            # before severity existed
+            severity = signalstats_data.get('severity')
+            if not severity:
+                d = diagnosis.lower()
+                if 'broadcast-compliant' in d or 'broadcast-safe' in d:
+                    severity = 'ok'
+                elif 'acceptable' in d or 'minor' in d:
+                    severity = 'info'
+                elif 'significant' in d or 'requires' in d or 'severe' in d:
+                    severity = 'alert'
+                elif 'review' in d or 'detected' in d:
+                    severity = 'warning'
+
+            if severity == 'ok':
                 assessment_bg = '#d2ffed'
                 assessment_border = '#378d6a'
                 assessment_icon = '✅'
-            elif 'acceptable' in diagnosis.lower() or 'minor' in diagnosis.lower():
-                assessment_bg = '#e3f0ff'
-                assessment_border = '#5c6bc0'
-                assessment_icon = 'ℹ️'
-            elif 'significant' in diagnosis.lower() or 'requires' in diagnosis.lower() or 'severe' in diagnosis.lower():
+            elif severity == 'alert':
                 assessment_bg = '#ffbaba'
                 assessment_border = '#d32f2f'
                 assessment_icon = '⛔'
-            elif 'review' in diagnosis.lower() or 'detected' in diagnosis.lower():
+            elif severity == 'warning':
                 assessment_bg = '#fff3cd'
                 assessment_border = '#bf971b'
                 assessment_icon = '⚠️'
+            elif severity == 'info':
+                assessment_bg = '#e3f0ff'
+                assessment_border = '#5c6bc0'
+                assessment_icon = 'ℹ️'
             else:
                 assessment_bg = '#f5e9e3'
                 assessment_border = '#bf971b'
@@ -3791,19 +3805,31 @@ def generate_frame_analysis_html(frame_outputs, video_id):
             used_qctools = signalstats_data.get('used_qctools', False)
             
             if violation_pct is not None or max_brng is not None:
-                html += """
+                # Label the heading with the region the stats were measured on
+                # ('' for legacy results that didn't record it)
+                analyzed_region = signalstats_data.get('analyzed_region', '')
+                region_label = {
+                    'active_area': ' (measured on the active picture area)',
+                    'full_frame': ' (measured on the full frame — borders not excluded)',
+                    'mixed': ' (mixed: some periods active picture area, some full frame)',
+                }.get(analyzed_region, '')
+
+                html += f"""
                 <div style="margin: 16px 0;">
-                    <p style="font-weight: bold; margin-bottom: 8px; color: #4d2b12;">Overall Results</p>
+                    <p style="font-weight: bold; margin-bottom: 8px; color: #4d2b12;">Overall Results{region_label}</p>
                     <table style="border-collapse: collapse; width: auto; margin: 0;">
                 """
-                
+
                 stat_rows = []
                 if violation_pct is not None:
-                    stat_rows.append(("Frames with violations", f"{violation_pct:.1f}%"))
+                    stat_rows.append(("Frames with any out-of-range pixels",
+                                      f"{violation_pct:.1f}% of analyzed frames"))
                 if avg_brng is not None:
-                    stat_rows.append(("Average BRNG", f"{avg_brng:.4f}%"))
+                    stat_rows.append(("Average out-of-range share",
+                                      f"{avg_brng:.4f}% of pixels per analyzed frame"))
                 if max_brng is not None:
-                    stat_rows.append(("Maximum BRNG", f"{max_brng:.4f}%"))
+                    stat_rows.append(("Worst frame",
+                                      f"{max_brng:.4f}% of pixels out of range"))
                 stat_rows.append(("Data source", "QCTools + FFprobe comparison" if used_qctools else "FFprobe signalstats"))
                 
                 for label, value in stat_rows:
