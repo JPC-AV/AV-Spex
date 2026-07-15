@@ -649,7 +649,7 @@ def getCompFromConfig(qct_parse, profile, tag):
    raise ValueError(f"No matching comparison operator found for profile and tag: {profile}, {tag}")
 
 
-def analyzeIt(qct_parse, video_path, profile, profile_name, startObj, pkt, durationStart, durationEnd, thumbPath, thumbDelay, thumbExportDelay, framesList, frameCount=0, overallFrameFail=0, adhoc_tag=False, check_cancelled=None, signals=None, total_duration=None):
+def analyzeIt(qct_parse, video_path, profile, profile_name, startObj, pkt, durationStart, durationEnd, thumbPath, thumbDelay, thumbExportDelay, framesList, frameCount=0, overallFrameFail=0, adhoc_tag=False, check_cancelled=None, signals=None, total_duration=None, skip_regions=None):
     """
     Analyzes video frames from the QCTools report to detect threshold exceedances for specified tags or profiles and logs frame failures.
 
@@ -668,6 +668,10 @@ def analyzeIt(qct_parse, video_path, profile, profile_name, startObj, pkt, durat
         framesList (list): A circular buffer to hold dictionaries of parsed frame attributes.
         frameCount (int, optional): The total number of frames analyzed (defaults to 0).
         overallFrameFail (int, optional): A count of how many frames failed threshold checks across all tags (defaults to 0).
+        skip_regions (list, optional): (start_seconds, end_seconds) spans to exclude from
+            evaluation entirely — used by the color-bars evaluation to skip the detected
+            bars regions themselves, so only content is scored against the bars-derived
+            thresholds. Skipped frames are excluded from frameCount.
 
     Returns:
         tuple: 
@@ -731,6 +735,12 @@ def analyzeIt(qct_parse, video_path, profile, profile_name, startObj, pkt, durat
                         if float(frame_pkt_dts_time) > durationEnd:		#only work on frames that are before the end time
                             print("started at " + str(durationStart) + " seconds and stopped at " + str(frame_pkt_dts_time) + " seconds (" + dts2ts(frame_pkt_dts_time) + ") or " + str(frameCount) + " frames!")
                             break
+                    if skip_regions:
+                        frame_time = float(frame_pkt_dts_time)
+                        if any(rs <= frame_time <= re for rs, re in skip_regions):
+                            frameCount = frameCount - 1  # keep percentage denominators content-only
+                            elem.clear()
+                            continue
                     frameDict = {}  								#start an empty dict for the new frame
                     frameDict[pkt] = frame_pkt_dts_time  			#make a key for the timestamp, which we have now
                     for t in list(elem):    						#iterating through each attribute for each element
@@ -3979,7 +3989,16 @@ def run_qctparse(video_path, qctools_output_path, report_directory, check_cancel
             profile = maxBarsDict
             profile_name = 'color_bars_evaluation'
             thumbExportDelay = 9000
-            kbeyond, frameCount, overallFrameFail, failureInfo = analyzeIt(qct_parse, video_path, profile, profile_name, startObj, pkt, durationStart, durationEnd, thumbPath, thumbDelay, thumbExportDelay, framesList, frameCount=0, overallFrameFail=0, adhoc_tag=False, check_cancelled=check_cancelled, signals=signals, total_duration=total_duration)
+            # Skip the detected bars regions themselves (head + additional):
+            # the evaluation scores content against the bars-derived
+            # thresholds, and scoring bars against bars is self-referential
+            # (additional bars would just flag against the head-bars values).
+            bars_skip_regions = [
+                (region_start, region_end)
+                for _, region_start, region_end in all_bars_regions
+                if region_start is not None and region_end is not None
+            ]
+            kbeyond, frameCount, overallFrameFail, failureInfo = analyzeIt(qct_parse, video_path, profile, profile_name, startObj, pkt, durationStart, durationEnd, thumbPath, thumbDelay, thumbExportDelay, framesList, frameCount=0, overallFrameFail=0, adhoc_tag=False, check_cancelled=check_cancelled, signals=signals, total_duration=total_duration, skip_regions=bars_skip_regions)
             colorbars_eval_fails_csv_path = os.path.join(report_directory, "qct-parse_colorbars_eval_failures.csv")
             if failureInfo:
                 save_failures_to_csv(failureInfo, colorbars_eval_fails_csv_path)

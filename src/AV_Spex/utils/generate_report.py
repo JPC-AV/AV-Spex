@@ -2768,8 +2768,9 @@ def make_bars_detection_comparison_html(qct_csv_path, clams_csv_path, agreement_
         "The authoritative head bars end time is the cross-validated consensus "
         "of the two detectors: when their end times disagree, the disputed span "
         "is arbitrated against the CLAMS SSIM scores. Additional bars "
-        "(highlighted) are report-only and do not affect downstream processing "
-        "(BRNG-skip, access-file trim).",
+        "(highlighted) never drive access-file trimming, but every detected "
+        "bars region is excluded from BRNG, signalstats, and duplicate-frame "
+        "analysis, and from the color-bars evaluation.",
     ]
     has_secondary = clams_additional or qct_windowed
     if has_secondary:
