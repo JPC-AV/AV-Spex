@@ -6017,6 +6017,12 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
             <ol style="margin: 4px 0 10px 20px; padding: 0;">
                 <li style="margin-bottom: 4px;"><strong>Primary pass</strong> — each detector scans the
                     file independently with its default thresholds.</li>
+                <li style="margin-bottom: 4px;"><strong>Head re-check</strong> — if the primary bars pass
+                    found nothing near the head of the file, the recorded SSIM scores over the first two
+                    minutes are re-evaluated at the relaxed threshold
+                    (<code style="background:#eee; padding:1px 4px; border-radius:2px;">0.6</code>).
+                    This catches real but degraded head bars that score just under the primary
+                    threshold.</li>
                 <li style="margin-bottom: 4px;"><strong>Second pass</strong> — when one detector finds a
                     span the other missed, a targeted windowed scan is run on the other detector with
                     <em>relaxed</em> thresholds (bars: SSIM ≥
@@ -6030,9 +6036,12 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
                     start and stop in lockstep.</li>
             </ol>
             <p style="margin: 0 0 10px 0;">
-                Second-pass rows are highlighted in the result tables below. They are confirmation hits
-                only — qct-parse remains authoritative for downstream behavior such as the BRNG-skip
-                window and access-file trim.
+                Re-scan rows are highlighted in the result tables below. The head-bars end time used
+                downstream (the BRNG-skip window, access-file trim) is a <strong>cross-validated
+                consensus</strong> of qct-parse and CLAMS: when the two detectors disagree, the disputed
+                span is checked against the recorded SSIM scores — a span whose scores never approach
+                the bars threshold is rejected, and a head claim from one detector that the other
+                decisively contradicts is treated as unconfirmed rather than trusted.
             </p>
             <p style="margin: 0 0 6px 0; font-weight: bold;">Fragment merging:</p>
             <p style="margin: 0 0 10px 0;">
@@ -6044,7 +6053,10 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
             </p>
             <p style="margin: 0; color: #777;">
                 Both detectors write a per-pass durations CSV alongside the report; the bars detector
-                additionally writes a per-sampled-frame SSIM scores CSV for review.
+                additionally writes a per-sampled-frame SSIM scores CSV
+                (<code style="background:#eee; padding:1px 4px; border-radius:2px;">pass, frame,
+                timestamp, ssim_score, exceeds_threshold</code>). Those recorded scores are also what
+                the head re-check and the consensus arbitration read.
             </p>
         </div>
         """
