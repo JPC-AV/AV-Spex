@@ -2459,9 +2459,16 @@ def make_color_bars_graphs(video_id, qctools_colorbars_duration_output, colorbar
                     logger.critical(f"The csv file {qctools_colorbars_duration_output} does not match the expected format")
                     return None
 
-                duration_text = duration_lines[1].strip()
-                duration_text = duration_text.replace(',', ' - ')
-                duration_text = "Colorbars duration: " + duration_text
+                # Labeled 3-column row: drop the internal pass label
+                # ("head", "head-relaxed", ...) — the section header already
+                # says which region this is. Legacy rows are [start, end].
+                row = next(csv.reader([duration_lines[1].strip()]))
+                if len(row) >= 3:
+                    duration_text = f"Colorbars duration: {row[1]} - {row[2]}"
+                elif len(row) >= 2:
+                    duration_text = f"Colorbars duration: {row[0]} - {row[1]}"
+                else:
+                    duration_text = "Colorbars duration: " + duration_lines[1].strip()
         except Exception as e:
             logger.critical(f"Error processing duration file: {e}")
             return None
@@ -2528,11 +2535,14 @@ def make_color_bars_graphs(video_id, qctools_colorbars_duration_output, colorbar
         '''
         break
 
-    # Create the complete HTML with the duration text and the thumbnail/barchart side-by-side
+    # Create the complete HTML with the duration text and the thumbnail/barchart side-by-side.
+    # The caption column is pinned to the thumbnail width so long captions wrap
+    # instead of widening the column and pushing the fixed-width chart into the
+    # section's overflow clip.
     colorbars_html = f'''
     <div style="background-color: #f5e9e3; padding: 20px 30px; border-radius: 6px;">
         <div style="display: flex; align-items: center; justify-content: center;">
-            <div style="flex-shrink: 0;">
+            <div style="flex: 0 0 200px; max-width: 200px; overflow-wrap: break-word;">
                 {thumbnail_html}
                 <p>{duration_text}</p>
             </div>
@@ -2595,6 +2605,7 @@ def _parse_bars_durations_csv(csv_path):
 _BARS_TONE_PASS_LABELS = {
     "head": "Head bars",
     "head-relaxed": "Head bars (relaxed)",
+    "head-second-pass": "Head bars (relaxed re-check)",
     "primary": "Primary scan",
     "second-pass": "Targeted re-scan",
     "windowed": "Mid-file scan",
@@ -2624,10 +2635,11 @@ def make_bars_detection_comparison_html(qct_csv_path, clams_csv_path, agreement_
     """
     Render a unified table comparing qct-parse and CLAMS SSIM bars detections.
 
-    Each detection becomes a row tagged with its source and pass (qct-parse,
-    CLAMS primary, CLAMS second-pass). Agreement analysis still fires only on
-    the qct-parse vs CLAMS-primary pair, since the second-pass scans are
-    targeted, relaxed-threshold confirmation runs.
+    Each detection becomes a row tagged with its source and pass. Rows are
+    shown chronologically (by start time), so the head bars from both methods
+    appear together, followed by any additional bars. Head candidates are
+    classified by time, matching the processing consensus: the earliest run
+    starting within the head window, regardless of which pass found it.
 
     Returns None when neither detector produced output (so the section is
     omitted from the report entirely).
@@ -2639,6 +2651,9 @@ def make_bars_detection_comparison_html(qct_csv_path, clams_csv_path, agreement_
 
     qct_runs = _parse_bars_durations_csv(qct_csv_path)
     clams_runs = _parse_bars_durations_csv(clams_csv_path)
+
+    # Mirrors HEAD_BARS_START_THRESHOLD in processing_mgmt.py
+    HEAD_WINDOW_S = 30.0
 
     def fmt(seconds):
         if seconds is None:
@@ -2655,15 +2670,20 @@ def make_bars_detection_comparison_html(qct_csv_path, clams_csv_path, agreement_
         qct_head = next((r for r in qct_runs if r[0] == "primary"), None)
     qct_windowed = [r for r in qct_runs if r is not qct_head]
 
-    clams_primary = next((r for r in clams_runs if r[0] == "primary"), None)
-    clams_secondary = [r for r in clams_runs if r[0] != "primary"]
+    # CLAMS head candidate: earliest run starting within the head window.
+    # The primary scan can find only mid-file bars (its first hit isn't
+    # necessarily at the head), and the relaxed head re-check writes a
+    # "head-second-pass" row — so classify by time, not by pass label.
+    clams_head_runs = [r for r in clams_runs if r[1] is not None and r[1] < HEAD_WINDOW_S]
+    clams_head = min(clams_head_runs, key=lambda r: r[1]) if clams_head_runs else None
+    clams_additional = [r for r in clams_runs if r is not clams_head]
 
-    # Agreement: qct-parse head vs CLAMS primary head bars.
+    # Agreement: qct-parse head vs CLAMS head candidate.
     agreement_label = "—"
     agreement_color = "#666"
     if qct_run and clams_run:
         qct_end = qct_head[2] if qct_head else None
-        clams_end = clams_primary[2] if clams_primary else None
+        clams_end = clams_head[2] if clams_head else None
         if qct_end is not None and clams_end is not None:
             delta = abs(qct_end - clams_end)
             if delta <= agreement_tolerance_s:
@@ -2692,13 +2712,16 @@ def make_bars_detection_comparison_html(qct_csv_path, clams_csv_path, agreement_
         for label, ws, we in qct_windowed:
             body_rows.append(("qct-parse", label, True, ws, we, True))
     if clams_run:
-        if clams_primary:
-            _, cs, ce = clams_primary
-            body_rows.append(("CLAMS SSIM", "primary", True, cs, ce, False))
+        if clams_head:
+            body_rows.append(("CLAMS SSIM", clams_head[0], True, clams_head[1], clams_head[2], False))
         else:
-            body_rows.append(("CLAMS SSIM", "primary", False, None, None, False))
-        for _, ss, se in clams_secondary:
-            body_rows.append(("CLAMS SSIM", "second-pass", True, ss, se, True))
+            body_rows.append(("CLAMS SSIM", "head", False, None, None, False))
+        for label, ss, se in clams_additional:
+            body_rows.append(("CLAMS SSIM", label, True, ss, se, True))
+
+    # Chronological order: detected segments by start time (head bars from
+    # both methods together, then additional bars); "not detected" rows last.
+    body_rows.sort(key=lambda r: (r[3] is None, r[3] if r[3] is not None else 0.0))
 
     cell = "padding: 6px 12px; border: 1px solid #e0d0c0;"
 
@@ -2724,7 +2747,7 @@ def make_bars_detection_comparison_html(qct_csv_path, clams_csv_path, agreement_
     rows_html = "".join(render_row(*r) for r in body_rows)
 
     # Plain-language summary line above the grid.
-    head_candidates = [r for r in (qct_head, clams_primary) if r]
+    head_candidates = [r for r in (qct_head, clams_head) if r]
     head_starts = [r[1] for r in head_candidates if r[1] is not None]
     head_ends = [r[2] for r in head_candidates if r[2] is not None]
     if head_starts and head_ends:
@@ -2733,7 +2756,7 @@ def make_bars_detection_comparison_html(qct_csv_path, clams_csv_path, agreement_
                         f"{_short_ts(hs)}–{_short_ts(he)} ({he - hs:.1f}s).")
     else:
         summary_text = "No color bars detected at the start of the file."
-    mid_count = len(qct_windowed) + len(clams_secondary)
+    mid_count = len(qct_windowed) + len(clams_additional)
     if mid_count:
         summary_text += f" {mid_count} additional mid-file detection(s) shown below (report-only)."
     summary_html = (
@@ -2742,16 +2765,19 @@ def make_bars_detection_comparison_html(qct_csv_path, clams_csv_path, agreement_
     )
 
     note_lines = [
-        "The authoritative head bars end time uses the latest end time across "
-        "both detectors. Mid-file bars (highlighted) are report-only and do "
-        "not affect downstream processing (BRNG-skip, access-file trim).",
+        "The authoritative head bars end time is the cross-validated consensus "
+        "of the two detectors: when their end times disagree, the disputed span "
+        "is arbitrated against the CLAMS SSIM scores. Additional bars "
+        "(highlighted) are report-only and do not affect downstream processing "
+        "(BRNG-skip, access-file trim).",
     ]
-    has_secondary = clams_secondary or qct_windowed
+    has_secondary = clams_additional or qct_windowed
     if has_secondary:
         note_lines.append(
             "Targeted re-scans are triggered when one detector finds a span the "
             "other missed: CLAMS rows fire from tone detections outside the primary "
-            "bars window; qct-parse rows are CLAMS-guided scans beyond the first 5 minutes."
+            "bars window; qct-parse rows are CLAMS-guided scans beyond the detected "
+            "head bars."
         )
     note = "".join(
         f'<p style="font-size: 13px; color: #4d2b12; margin: 10px 0 0 0;">{line}</p>'
@@ -5934,13 +5960,13 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
             else:
                 colorbars_header = f"SMPTE Colorbars vs {video_id} Colorbars"
             html_template += f"""
-            <div id="section-colorbars" style="flex: 1 1 0; min-width: 0; overflow: hidden;">
+            <div id="section-colorbars" style="flex: 1 1 720px; max-width: 100%; min-width: 0; overflow: hidden;">
                 <h3>{colorbars_header}</h3>
                 {colorbars_html}
             </div>"""
         for region_name, wv_html in windowed_colorbars_html_list:
             html_template += f"""
-            <div id="section-colorbars-{region_name}" style="flex: 1 1 0; min-width: 0; overflow: hidden;">
+            <div id="section-colorbars-{region_name}" style="flex: 1 1 720px; max-width: 100%; min-width: 0; overflow: hidden;">
                 <h3>SMPTE Colorbars vs Additional {video_id} Colorbars</h3>
                 {wv_html}
             </div>"""
