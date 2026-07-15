@@ -403,13 +403,25 @@ def detectBars(startObj, pkt, durationStart, durationEnd, framesList, buffSize, 
                         else:
                             # Only count as failure if we've already confirmed bars start
                             consecutive_failures += 1
-                            
-                            # Only end if we've had enough consecutive failures AND minimum duration
-                            if (consecutive_failures >= failure_tolerance and 
-                                durationEnd - durationStart > 2):
-                                logger.debug("Bars ended at " + str(framesList[middleFrame][pkt]) + " (" + dts2ts(framesList[middleFrame][pkt]) + ")\n")
-                                barsEndString = dts2ts(framesList[middleFrame][pkt])
-                                break
+
+                            if consecutive_failures >= failure_tolerance:
+                                if durationEnd - durationStart > 2:
+                                    logger.debug("Bars ended at " + str(framesList[middleFrame][pkt]) + " (" + dts2ts(framesList[middleFrame][pkt]) + ")\n")
+                                    barsEndString = dts2ts(framesList[middleFrame][pkt])
+                                    break
+                                else:
+                                    # Confirmed run was too short to be real bars (e.g. a
+                                    # bright saturated shot). Abandon it and resume searching —
+                                    # otherwise the region can never terminate, and a stray
+                                    # passing frame much later drags durationEnd across
+                                    # content that isn't bars.
+                                    logger.debug("Abandoning short bars candidate at " + str(durationStart) + " after " + str(consecutive_failures) + " consecutive non-bar frames\n")
+                                    durationStart = ""
+                                    durationEnd = ""
+                                    barsStartString = None
+                                    bars_confirmation_count = 0
+                                    bars_candidate_start = None
+                                    consecutive_failures = 0
                 elem.clear() # we're done with that element so let's get it outta memory
     except Exception as e:
         logger.error(f"Error during bars detection parsing: {e}")
@@ -3778,8 +3790,17 @@ def run_qctparse(video_path, qctools_output_path, report_directory, check_cancel
                 if s < HEAD_SCAN_WINDOW and label == "bars"
             ]
             if head_clams_bars:
-                clams_start = min(s for s, _ in head_clams_bars)
-                clams_end = max(e for _, e in head_clams_bars)
+                # Cluster from the earliest run: extend only through runs that
+                # start within 30s of the cluster end, so bars found much later
+                # in the scan window (e.g. tail bars) don't stretch the head
+                # retry window and defeat the end clamp below.
+                clustered = sorted(head_clams_bars, key=lambda t: t[0])
+                clams_start, clams_end = clustered[0]
+                for s, e in clustered[1:]:
+                    if s - clams_end <= 30.0:
+                        clams_end = max(clams_end, e)
+                    else:
+                        break
                 logger.info(
                     f"qct-parse head bars retry: CLAMS found bars at "
                     f"{clams_start:.1f}s–{clams_end:.1f}s but qct-parse "
@@ -3795,6 +3816,23 @@ def run_qctparse(video_path, qctools_output_path, report_directory, check_cancel
                 if r_start_str and r_end_str:
                     r_start_sec = float(r_start) if r_start not in ("", None) else None
                     r_end_sec = float(r_end) if r_end not in ("", None) else None
+                    # This is a confirmation pass, not discovery: CLAMS seeded the
+                    # window, and relaxed luma thresholds can't tell bars from a
+                    # saturated slate, so a retry that runs past the CLAMS end is
+                    # overshoot (typically riding into the search-window edge).
+                    # Trust the SSIM-derived CLAMS boundary instead.
+                    if r_end_sec is not None and r_end_sec > clams_end + 1.0:
+                        logger.info(
+                            f"qct-parse relaxed retry ran past CLAMS bars end "
+                            f"({r_end_sec:.1f}s > {clams_end:.1f}s) — clamping to CLAMS end"
+                        )
+                        r_end_sec = clams_end
+                        r_end = clams_end
+                        r_end_str = dts2ts(str(clams_end))
+                    if r_start_sec is not None and r_start_sec < clams_start - 1.0:
+                        r_start_sec = clams_start
+                        r_start = clams_start
+                        r_start_str = dts2ts(str(clams_start))
                     all_bars_regions.append(("head-relaxed", r_start_sec, r_end_sec))
                     durationStart = r_start
                     durationEnd = r_end
@@ -3821,7 +3859,15 @@ def run_qctparse(video_path, qctools_output_path, report_directory, check_cancel
                 if head_region_found:
                     _, head_s, head_e = head_region_found
                     if (head_s is not None and head_e is not None and
-                            region_start >= head_s - 5.0 and region_end <= head_e + 5.0):
+                            region_start <= head_e + 5.0 and region_end >= head_s - 5.0):
+                        # Overlaps the detected head bars: this is the head
+                        # sequence itself (tone routinely outlasts the bars),
+                        # and rescanning it just re-finds the head bars as an
+                        # "additional" region. Only scan a remainder that
+                        # extends well past the head region.
+                        remainder_start = head_e + 5.0
+                        if region_end - remainder_start >= 30.0:
+                            filtered.append((remainder_start, region_end))
                         continue
                 filtered.append((region_start, region_end))
 

@@ -28,6 +28,15 @@ from AV_Spex.checks.mediaconch_check import find_mediaconch_policy, run_mediacon
 from AV_Spex.checks.frame_analysis import analyze_frame_quality
 
 
+# ---- Head-bars consensus tuning (see process_qctools_output merge logic) ----
+HEAD_BARS_START_THRESHOLD = 30.0      # bars starting after this many seconds aren't "head" bars
+HEAD_END_AGREEMENT_SLACK = 3.0        # qct-parse/CLAMS head ends within this count as agreement
+CLAMS_SSIM_CORROBORATION_MIN = 0.55   # max SSIM below this = claimed region is not bars
+CLAMS_HEAD_RESCAN_SECONDS = 120.0     # relaxed CLAMS head re-check window
+SECONDARY_BARS_THRESHOLD = 0.6        # relaxed SSIM threshold for second/verify passes
+SECONDARY_BARS_SAMPLE_RATIO = 5
+
+
 class ProcessingManager:
     def __init__(self, signals=None, check_cancelled_fn=None):
         self.signals = signals
@@ -589,6 +598,86 @@ def find_qctools_report(source_directory, video_id):
     return None
 
 
+def _clams_max_ssim_in_span(report_directory, video_id, start_seconds, end_seconds):
+    """Max recorded CLAMS SSIM score within [start, end], and the sample count."""
+    import csv
+
+    csv_path = os.path.join(
+        report_directory, f"{video_id}{bars_detection_clams.SSIM_SCORES_CSV_SUFFIX}"
+    )
+    if not os.path.exists(csv_path):
+        return None, 0
+    max_score = None
+    count = 0
+    try:
+        with open(csv_path, newline='') as f:
+            reader = csv.reader(f)
+            next(reader, None)  # header
+            for row in reader:
+                if len(row) < 4:
+                    continue
+                try:
+                    parts = row[2].split(':')
+                    sample_seconds = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                    score = float(row[3])
+                except (ValueError, IndexError):
+                    continue
+                if start_seconds <= sample_seconds <= end_seconds:
+                    count += 1
+                    if max_score is None or score > max_score:
+                        max_score = score
+    except OSError as e:
+        logger.warning(f"Could not read CLAMS SSIM scores CSV: {e}")
+        return None, 0
+    return max_score, count
+
+
+def _clams_region_is_bars(video_path, report_directory, video_id, start_seconds, end_seconds, check_cancelled=None):
+    """
+    Cross-check a claimed bars region against CLAMS SSIM evidence.
+
+    Uses the SSIM scores already recorded by the CLAMS passes when they cover
+    the span; otherwise runs a targeted relaxed scan over just that span.
+
+    Returns:
+        True if the region looks like bars, False if it decisively does not,
+        or None when there isn't enough evidence to say either way.
+    """
+    if (not report_directory or start_seconds is None or end_seconds is None
+            or end_seconds <= start_seconds):
+        return None
+    max_score, samples = _clams_max_ssim_in_span(
+        report_directory, video_id, start_seconds, end_seconds
+    )
+    if samples >= 3 and max_score is not None:
+        return max_score >= CLAMS_SSIM_CORROBORATION_MIN
+    if check_cancelled and check_cancelled():
+        return None
+    fps = bars_detection_clams.get_video_fps(video_path)
+    if not fps or fps <= 0:
+        return None
+    logger.info(
+        f"CLAMS verify scan: {start_seconds:.1f}s–{end_seconds:.1f}s "
+        f"(recorded scores don't cover the claimed bars region)"
+    )
+    hits = run_clams_bars_detection(
+        video_path=video_path,
+        report_directory=report_directory,
+        video_id=video_id,
+        threshold=SECONDARY_BARS_THRESHOLD,
+        sample_ratio=SECONDARY_BARS_SAMPLE_RATIO,
+        start_frame=int(max(0.0, start_seconds - 2.0) * fps),
+        stop_at_frame=int((end_seconds + 2.0) * fps),
+        min_frame_count=10,
+        stop_after_one=False,
+        fps=fps,
+        pass_label="verify",
+        append_ssim_csv=True,
+        check_cancelled=check_cancelled,
+    )
+    return bool(hits)
+
+
 def process_qctools_output(video_path, source_directory, destination_directory, video_id, report_directory=None, check_cancelled=None, signals=None):
     """
     Process QCTools output, including running QCTools and optional parsing.
@@ -773,10 +862,35 @@ def process_qctools_output(video_path, source_directory, destination_directory, 
         else:
             logger.info("CLAMS bars detection: finished — no color bars run met the minimum frame count")
 
+        # ---- Phase 2b: relaxed head re-check ----
+        # The primary threshold can sit a hair above real (degraded) head
+        # bars. If the primary pass found nothing starting within the head
+        # window, replay its recorded SSIM scores at the relaxed second-pass
+        # threshold (no video decoding) so the head-bars consensus has a
+        # CLAMS candidate to work with.
+        head_bars_second_pass = []
+        primary_has_head = any(s < HEAD_BARS_START_THRESHOLD for s, _ in primary_bars)
+        if not primary_has_head and fps and fps > 0:
+            head_hits = bars_detection_clams.runs_from_recorded_scores(
+                report_directory, video_id,
+                threshold=SECONDARY_BARS_THRESHOLD,
+                max_frame=int(CLAMS_HEAD_RESCAN_SECONDS * fps),
+                min_frame_count=bars_params.min_frame_count,
+                fps=fps,
+            )
+            head_bars_second_pass = _merge_adjacent_spans(head_hits, gap_seconds=bars_merge_gap)
+            if head_bars_second_pass:
+                first_start, first_end = head_bars_second_pass[0]
+                logger.info(
+                    f"CLAMS bars head second-pass: relaxed threshold found bars at "
+                    f"{first_start:.1f}s–{first_end:.1f}s"
+                )
+                if first_start < HEAD_BARS_START_THRESHOLD:
+                    results['clams_bars_start_time'] = first_start
+                    results['clams_bars_end_time'] = first_end
+
         # ---- Phase 3: cross-validation second passes ----
         WINDOW_SLACK_SECONDS = 5.0
-        SECONDARY_BARS_THRESHOLD = 0.6
-        SECONDARY_BARS_SAMPLE_RATIO = 5
         SECONDARY_TONE_TOLERANCE = 0.7
         SECONDARY_TONE_MIN_DURATION_MS = 500
 
@@ -791,7 +905,7 @@ def process_qctools_output(video_path, source_directory, destination_directory, 
         if primary_tones and fps and fps > 0:
             uncovered_tones = [
                 (s, e) for s, e in primary_tones
-                if not _overlaps_any(s, e, primary_bars, WINDOW_SLACK_SECONDS)
+                if not _overlaps_any(s, e, primary_bars + head_bars_second_pass, WINDOW_SLACK_SECONDS)
             ]
             padded_windows = [
                 (max(0.0, s - WINDOW_SLACK_SECONDS), e + WINDOW_SLACK_SECONDS)
@@ -846,8 +960,9 @@ def process_qctools_output(video_path, source_directory, destination_directory, 
 
         # Tone second-pass: scan bars regions not covered by primary tones
         secondary_tones = []
-        if primary_bars and audio_samples is not None:
-            for bars_start, bars_end in primary_bars:
+        known_bars = primary_bars + head_bars_second_pass
+        if known_bars and audio_samples is not None:
+            for bars_start, bars_end in known_bars:
                 if check_cancelled and check_cancelled():
                     break
                 if _overlaps_any(bars_start, bars_end, primary_tones, WINDOW_SLACK_SECONDS):
@@ -890,6 +1005,7 @@ def process_qctools_output(video_path, source_directory, destination_directory, 
         bars_detection_clams.write_durations_csv(
             report_directory,
             [("primary", s, e) for s, e in primary_bars]
+            + [("head-second-pass", s, e) for s, e in head_bars_second_pass]
             + [("second-pass", s, e) for s, e in secondary_bars],
         )
         tone_detection_clams.write_durations_csv(
@@ -903,7 +1019,7 @@ def process_qctools_output(video_path, source_directory, destination_directory, 
         logger.info("")  # blank line for readability
 
         # Build clams_regions for qct-parse: all bars and tone regions found.
-        for s, e in (primary_bars + secondary_bars):
+        for s, e in (primary_bars + head_bars_second_pass + secondary_bars):
             clams_regions.append((s, e, "bars"))
         for s, e in (primary_tones + secondary_tones):
             clams_regions.append((s, e, "tone"))
@@ -911,6 +1027,7 @@ def process_qctools_output(video_path, source_directory, destination_directory, 
 
     # ---- qct-parse (runs AFTER CLAMS, receives CLAMS regions for
     # additional windowed bars scans beyond the head area) ----
+    qctparse_head_start = None
     qctparse_head_end = None
 
     if qct_parse_run_tool:
@@ -932,6 +1049,7 @@ def process_qctools_output(video_path, source_directory, destination_directory, 
                 signals.step_completed.emit("QCT Parse")
 
             if qctparse_result:
+                qctparse_head_start = qctparse_result.get('head_bars_start')
                 qctparse_head_end = qctparse_result.get('head_bars_end')
                 results['audio_findings'] = qctparse_result.get('audio_findings')
 
@@ -939,28 +1057,70 @@ def process_qctools_output(video_path, source_directory, destination_directory, 
             if qctparse_head_end is None:
                 colorbars_csv = Path(report_directory) / "qct-parse_colorbars_durations.csv"
                 if colorbars_csv.exists():
-                    _, end_seconds, _ = parse_colorbars_duration_csv(str(colorbars_csv))
+                    start_seconds, end_seconds, _ = parse_colorbars_duration_csv(str(colorbars_csv))
+                    qctparse_head_start = start_seconds
                     qctparse_head_end = end_seconds
 
             if qctparse_head_end:
                 logger.debug(f"qct-parse head bars detected, ending at {qctparse_head_end:.1f}s\n")
 
-    # ---- Merge: "longest/latest wins" for head bars ----
-    HEAD_BARS_START_THRESHOLD = 10.0
+    # ---- Merge: cross-validated head-bars consensus ----
+    clams_ran = bool(clams_cfg and getattr(clams_cfg, 'run_tool', False))
     clams_head_end = None
     if results.get('clams_bars_start_time') is not None:
         if results['clams_bars_start_time'] < HEAD_BARS_START_THRESHOLD:
             clams_head_end = results['clams_bars_end_time']
 
-    head_candidates = [t for t in [qctparse_head_end, clams_head_end] if t is not None]
-    if head_candidates:
-        results['color_bars_end_time'] = max(head_candidates)
+    merged_end = None
+    if qctparse_head_end is not None and clams_head_end is not None:
+        if abs(qctparse_head_end - clams_head_end) <= HEAD_END_AGREEMENT_SLACK:
+            merged_end = max(qctparse_head_end, clams_head_end)
+        else:
+            # The detectors disagree on where the head bars end. Luma-stat
+            # thresholds can't tell bars from a saturated slate, so let the
+            # SSIM evidence over the disputed span decide.
+            span_lo, span_hi = sorted((qctparse_head_end, clams_head_end))
+            verdict = _clams_region_is_bars(
+                video_path, report_directory, video_id, span_lo, span_hi,
+                check_cancelled=check_cancelled,
+            )
+            if verdict is False:
+                merged_end = span_lo
+                logger.warning(
+                    f"Head bars end disagreement (qct-parse={qctparse_head_end}, "
+                    f"CLAMS={clams_head_end}): span {span_lo:.1f}s–{span_hi:.1f}s is "
+                    f"not bars per CLAMS SSIM — using {span_lo:.1f}s"
+                )
+            else:
+                merged_end = span_hi
+    elif qctparse_head_end is not None:
+        # Only qct-parse has a head claim. If CLAMS ran and scanned that
+        # region without seeing bars, demote the claim rather than letting
+        # it drive access-file trimming and analysis skips.
+        verdict = None
+        if clams_ran and qctparse_head_start is not None:
+            verdict = _clams_region_is_bars(
+                video_path, report_directory, video_id,
+                qctparse_head_start, qctparse_head_end,
+                check_cancelled=check_cancelled,
+            )
+        if verdict is False:
+            logger.warning(
+                f"qct-parse head bars claim ({qctparse_head_start:.1f}s–"
+                f"{qctparse_head_end:.1f}s) is not corroborated by CLAMS SSIM — "
+                f"treating as unconfirmed; not setting a head-bars end time"
+            )
+        else:
+            merged_end = qctparse_head_end
+    elif clams_head_end is not None:
+        merged_end = clams_head_end
+
+    results['color_bars_end_time'] = merged_end
+    if merged_end is not None:
         logger.info(
-            f"Merged head bars end time: {results['color_bars_end_time']:.1f}s "
+            f"Merged head bars end time: {merged_end:.1f}s "
             f"(qct-parse={qctparse_head_end}, CLAMS={clams_head_end})\n"
         )
-    else:
-        results['color_bars_end_time'] = None
 
     return results
 
