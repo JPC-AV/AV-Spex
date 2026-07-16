@@ -183,20 +183,19 @@ def test_get_stream_hash_algorithm(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# compare_hashes (logging only, test that it runs without error)
+# compare_hashes
 # ---------------------------------------------------------------------------
 
 def test_compare_hashes_match():
-    # Should not raise and should not log critical for matches.
-    ef.compare_hashes("a" * 32, "b" * 32, "a" * 32, "b" * 32)
+    assert ef.compare_hashes("a" * 32, "b" * 32, "a" * 32, "b" * 32) == (True, True)
 
 
 def test_compare_hashes_video_mismatch():
-    ef.compare_hashes("a" * 32, "b" * 32, "c" * 32, "b" * 32)
+    assert ef.compare_hashes("a" * 32, "b" * 32, "c" * 32, "b" * 32) == (False, True)
 
 
 def test_compare_hashes_audio_mismatch():
-    ef.compare_hashes("a" * 32, "b" * 32, "a" * 32, "d" * 32)
+    assert ef.compare_hashes("a" * 32, "b" * 32, "a" * 32, "d" * 32) == (True, False)
 
 
 # ---------------------------------------------------------------------------
@@ -340,3 +339,44 @@ def test_validate_embedded_md5_no_existing_tags(patch_config_for_embed, monkeypa
     monkeypatch.setattr(ef, "extract_tags", lambda path: "")
     result = ef.validate_embedded_md5("/fake/path.mkv", check_cancelled=lambda: False)
     assert result is False
+
+
+def test_validate_embedded_md5_writes_fixity_summary(
+    patch_config_for_embed, monkeypatch, tmp_path
+):
+    """Validation results should be recorded in the fixity summary JSON."""
+    import json
+    import os
+
+    patch_config_for_embed(algorithm="md5")
+    stored_v = "v" * 32
+    stored_a = "a" * 32
+    computed_a = "z" * 32  # audio mismatch
+    video_path = tmp_path / "JPC_AV_00001.mkv"
+    video_path.write_bytes(b"fake")
+    existing = _mkv_tags_xml(video_hash=stored_v, audio_hash=stored_a)
+    monkeypatch.setattr(ef, "extract_tags", lambda path: existing)
+    monkeypatch.setattr(
+        ef, "make_stream_hash",
+        lambda *a, **kw: (stored_v, computed_a),
+    )
+
+    result = ef.validate_embedded_md5(str(video_path), check_cancelled=lambda: False)
+    assert result is True
+
+    summary_path = os.path.join(
+        str(tmp_path), "JPC_AV_00001_qc_metadata", "JPC_AV_00001_fixity_summary.json"
+    )
+    with open(summary_path) as fh:
+        summary = json.load(fh)
+
+    stream = summary["stream_fixity"]
+    assert stream["result"] == "failed"
+    assert stream["algorithm"] == "md5"
+    assert stream["video"] == {
+        "embedded_hash": stored_v, "computed_hash": stored_v, "match": True,
+    }
+    assert stream["audio"] == {
+        "embedded_hash": stored_a, "computed_hash": computed_a, "match": False,
+    }
+    assert stream["validated_at"]

@@ -856,11 +856,12 @@ def find_qc_metadata(destination_directory):
     Returns:
         tuple: Paths to various metadata files and policy content
     """
-    exiftool_output_path = None 
+    exiftool_output_path = None
     ffprobe_output_path = None
     mediainfo_output_path = None
     mediaconch_csv = None
     fixity_sidecar = None
+    fixity_summary_json = None
     mediaconch_policy_content = None
     mediaconch_policy_name = None
 
@@ -876,6 +877,8 @@ def find_qc_metadata(destination_directory):
                     mediainfo_output_path = file_path
                 if "_mediaconch_output" in file:
                     mediaconch_csv = file_path
+                if "_fixity_summary" in file and file.endswith('.json'):
+                    fixity_summary_json = file_path
 
     if os.path.isdir(os.path.dirname(destination_directory)):
         parent_dir = os.path.dirname(destination_directory) 
@@ -899,8 +902,148 @@ def find_qc_metadata(destination_directory):
         except Exception as e:
             logger.error(f"Error retrieving MediaConch policy: {e}")
 
-    return (exiftool_output_path, ffprobe_output_path, mediainfo_output_path, 
-            mediaconch_csv, fixity_sidecar, mediaconch_policy_content, mediaconch_policy_name)
+    return (exiftool_output_path, ffprobe_output_path, mediainfo_output_path,
+            mediaconch_csv, fixity_sidecar, fixity_summary_json,
+            mediaconch_policy_content, mediaconch_policy_name)
+
+
+def make_fixity_section_html(fixity_summary_json, fixity_file_content):
+    """
+    Render the Fixity report section from the structured fixity summary JSON
+    written by the fixity steps (checks/fixity_check.py, checks/embed_fixity.py).
+
+    Falls back to the raw checksum sidecar content for runs that predate the
+    summary file. Returns None when there is nothing to show.
+    """
+    summary = None
+    if fixity_summary_json:
+        try:
+            with open(fixity_summary_json, 'r', encoding='utf-8') as f:
+                summary = json.load(f)
+            if not isinstance(summary, dict):
+                summary = None
+        except Exception as e:
+            logger.warning(f"Could not read fixity summary {fixity_summary_json}: {e}")
+            summary = None
+
+    if not summary:
+        if fixity_file_content:
+            return f'<pre>{fixity_file_content}</pre>'
+        return None
+
+    whole_file = summary.get('whole_file')
+    checksum_output = summary.get('checksum_output')
+    stream_fixity = summary.get('stream_fixity')
+
+    if not (whole_file or checksum_output or stream_fixity):
+        if fixity_file_content:
+            return f'<pre>{fixity_file_content}</pre>'
+        return None
+
+    hash_style = 'font-family: monospace; word-break: break-all;'
+
+    def result_badge(result):
+        if result == 'passed':
+            return ('<span style="background-color: #d2ffed; color: #0a5738; border: 1px solid #0a5738; '
+                    'border-radius: 4px; padding: 2px 10px; font-weight: bold;">&#10003; Passed</span>')
+        return ('<span style="background-color: #ffbaba; color: #8b0000; border: 1px solid #8b0000; '
+                'border-radius: 4px; padding: 2px 10px; font-weight: bold;">&#10007; Failed</span>')
+
+    blocks = []
+
+    # --- Whole-file fixity ---
+    if whole_file:
+        algorithm = (whole_file.get('algorithm') or '').upper()
+        computed = whole_file.get('computed_checksum') or ''
+        block = '<h4 style="margin-bottom: 6px;">Whole-file checksum</h4>'
+        block += (
+            f'<p>{result_badge(whole_file.get("result"))} '
+            f'&nbsp;{algorithm} fixity check on {whole_file.get("validated_at", "unknown date")}</p>'
+        )
+        block += (
+            f'<p>Checksum computed from the video file: '
+            f'<span style="{hash_style}">{computed}</span></p>'
+        )
+        validated_against = whole_file.get('validated_against') or []
+        if validated_against:
+            rows = ''
+            for entry in validated_against:
+                stored = entry.get('checksum') or ''
+                match = bool(computed) and stored == computed
+                match_class = 'cell-match' if match else 'cell-mismatch'
+                match_text = 'match' if match else 'MISMATCH'
+                rows += (
+                    '<tr>'
+                    f'<td>{entry.get("file", "")}</td>'
+                    f'<td>{entry.get("date", "")}</td>'
+                    f'<td style="{hash_style}">{stored}</td>'
+                    f'<td class="{match_class}">{match_text}</td>'
+                    '</tr>'
+                )
+            block += (
+                '<p style="margin-bottom: 4px;">Verified against stored checksum file(s):</p>'
+                '<table>'
+                '<tr><th>Checksum file</th><th>Created</th><th>Stored checksum</th><th>Result</th></tr>'
+                f'{rows}'
+                '</table>'
+            )
+        if checksum_output:
+            block += (
+                f'<p style="font-size: 13px;">A new {(checksum_output.get("algorithm") or "").upper()} '
+                f'checksum sidecar was also written this run: '
+                f'{checksum_output.get("checksum_file", "")} ({checksum_output.get("created_at", "")})</p>'
+            )
+        blocks.append(block)
+    elif checksum_output:
+        algorithm = (checksum_output.get('algorithm') or '').upper()
+        block = '<h4 style="margin-bottom: 6px;">Whole-file checksum</h4>'
+        block += (
+            f'<p>{algorithm} checksum created on {checksum_output.get("created_at", "unknown date")} '
+            f'and written to {checksum_output.get("checksum_file", "")}:</p>'
+            f'<p><span style="{hash_style}">{checksum_output.get("checksum", "")}</span></p>'
+            '<p style="font-size: 13px;">No validation against a previously stored checksum was performed this run.</p>'
+        )
+        blocks.append(block)
+
+    # --- Embedded stream fixity ---
+    if stream_fixity:
+        algorithm = (stream_fixity.get('algorithm') or '').upper()
+        block = '<h4 style="margin-bottom: 6px;">Embedded stream fixity</h4>'
+        block += (
+            f'<p>{result_badge(stream_fixity.get("result"))} '
+            f'&nbsp;{algorithm} stream hash validation on {stream_fixity.get("validated_at", "unknown date")}</p>'
+        )
+        rows = ''
+        for stream_name in ('video', 'audio'):
+            stream = stream_fixity.get(stream_name)
+            if not stream:
+                continue
+            match = stream.get('match')
+            match_class = 'cell-match' if match else 'cell-mismatch'
+            match_text = 'match' if match else 'MISMATCH'
+            rows += (
+                '<tr>'
+                f'<td>{stream_name.capitalize()}</td>'
+                f'<td style="{hash_style}">{stream.get("embedded_hash", "")}</td>'
+                f'<td style="{hash_style}">{stream.get("computed_hash", "")}</td>'
+                f'<td class="{match_class}">{match_text}</td>'
+                '</tr>'
+            )
+        block += (
+            '<table>'
+            '<tr><th>Stream</th><th>Embedded hash</th><th>Computed hash</th><th>Result</th></tr>'
+            f'{rows}'
+            '</table>'
+        )
+        blocks.append(block)
+
+    section_body = ''.join(blocks)
+    return (
+        '<div style="background-color: #f5e9e3; border: 1px solid #4d2b12; border-radius: 4px; '
+        'padding: 10px 30px 20px 30px; margin: 10px 0 20px 0;">'
+        f'{section_body}'
+        '</div>'
+    )
 
 
 def generate_thumbnail_for_failure(video_path, tag, tagValue, timestamp, profile_name, thumbPath):
@@ -5388,8 +5531,9 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         return
     
     # Modified to get MediaConch policy content
-    (exiftool_output_path, mediainfo_output_path, ffprobe_output_path, 
-     mediaconch_csv, fixity_sidecar, mediaconch_policy_content, 
+    (exiftool_output_path, mediainfo_output_path, ffprobe_output_path,
+     mediaconch_csv, fixity_sidecar, fixity_summary_json,
+     mediaconch_policy_content,
      mediaconch_policy_name) = find_qc_metadata(destination_directory)
 
     if check_cancelled():
@@ -5415,6 +5559,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     mi_file_content, mi_file_filename = prepare_file_section(mediainfo_output_path)
     ffprobe_file_content, ffprobe_file_filename = prepare_file_section(ffprobe_output_path)
     fixity_file_content, fixity_file_filename = prepare_file_section(fixity_sidecar)
+    fixity_html = make_fixity_section_html(fixity_summary_json, fixity_file_content)
 
     # Get qct-parse thumbs if they exists
     thumbs_dict = find_qct_thumbs(report_directory)
@@ -5654,6 +5799,8 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         or tone_leak_html
     )
     toc_entries = []
+    if fixity_html:
+        toc_entries.append(('section-fixity', 'Fixity'))
     if mediaconch_csv:
         toc_entries.append(('section-mediaconch-csv', 'MediaConch CSV'))
     if mediaconch_policy_content and mediaconch_policy_name:
@@ -5893,9 +6040,10 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     if check_cancelled():
         return
 
-    if fixity_sidecar:
+    if fixity_html:
         html_template += f"""
-        <pre>{fixity_file_content}</pre>
+        <h3 id="section-fixity">Fixity</h3>
+        {fixity_html}
         """
 
     if mediaconch_csv:

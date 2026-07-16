@@ -292,6 +292,120 @@ def test_prepare_file_section_with_custom_processor(tmp_path):
     assert name == "doc.xml"
 
 
+def test_find_qc_metadata_picks_up_fixity_summary_json(tmp_path):
+    dest = tmp_path / "JPC_AV_00001_qc_metadata"
+    dest.mkdir()
+    summary = dest / "JPC_AV_00001_fixity_summary.json"
+    summary.write_text("{}")
+
+    out = gr.find_qc_metadata(str(dest))
+    assert len(out) == 8
+    (exiftool_path, ffprobe_path, mediainfo_path, mediaconch_csv,
+     fixity_sidecar, fixity_summary_json, policy_content, policy_name) = out
+    assert fixity_summary_json == str(summary)
+    assert fixity_sidecar is None
+    assert mediaconch_csv is None
+
+
+def test_find_qc_metadata_empty_dir_returns_all_none(tmp_path):
+    dest = tmp_path / "JPC_AV_00001_qc_metadata"
+    dest.mkdir()
+    out = gr.find_qc_metadata(str(dest))
+    assert len(out) == 8
+    assert all(v is None for v in out)
+
+
+def _write_fixity_summary(tmp_path, summary_dict):
+    import json
+    path = tmp_path / "JPC_AV_00001_fixity_summary.json"
+    path.write_text(json.dumps(summary_dict))
+    return str(path)
+
+
+def test_make_fixity_section_html_whole_file_passed(tmp_path):
+    computed = "a" * 32
+    path = _write_fixity_summary(tmp_path, {
+        "video_id": "JPC_AV_00001",
+        "whole_file": {
+            "result": "passed",
+            "algorithm": "md5",
+            "computed_checksum": computed,
+            "validated_at": "2026-07-16 10:00:00",
+            "validated_against": [
+                {"file": "JPC_AV_00001_2026_04_19_fixity.md5",
+                 "date": "2026-04-19", "checksum": computed},
+            ],
+        },
+    })
+    html = gr.make_fixity_section_html(path, "")
+    assert "Whole-file checksum" in html
+    assert "Passed" in html
+    assert computed in html
+    assert "JPC_AV_00001_2026_04_19_fixity.md5" in html
+    assert "2026-04-19" in html
+    assert "2026-07-16 10:00:00" in html
+    assert 'class="cell-match"' in html
+    assert 'class="cell-mismatch"' not in html
+
+
+def test_make_fixity_section_html_whole_file_failed_marks_mismatch(tmp_path):
+    path = _write_fixity_summary(tmp_path, {
+        "whole_file": {
+            "result": "failed",
+            "algorithm": "md5",
+            "computed_checksum": "a" * 32,
+            "validated_at": "2026-07-16 10:00:00",
+            "validated_against": [
+                {"file": "old_fixity.md5", "date": "2025-01-01", "checksum": "b" * 32},
+            ],
+        },
+    })
+    html = gr.make_fixity_section_html(path, "")
+    assert "Failed" in html
+    assert 'class="cell-mismatch"' in html
+
+
+def test_make_fixity_section_html_stream_fixity(tmp_path):
+    path = _write_fixity_summary(tmp_path, {
+        "stream_fixity": {
+            "result": "passed",
+            "algorithm": "md5",
+            "validated_at": "2026-07-16 10:00:00",
+            "video": {"embedded_hash": "v" * 32, "computed_hash": "v" * 32, "match": True},
+            "audio": {"embedded_hash": "a" * 32, "computed_hash": "a" * 32, "match": True},
+        },
+    })
+    html = gr.make_fixity_section_html(path, "")
+    assert "Embedded stream fixity" in html
+    assert "v" * 32 in html
+    assert "a" * 32 in html
+    assert html.count('class="cell-match"') == 2
+
+
+def test_make_fixity_section_html_checksum_output_only(tmp_path):
+    path = _write_fixity_summary(tmp_path, {
+        "checksum_output": {
+            "algorithm": "md5",
+            "checksum": "c" * 32,
+            "created_at": "2026-07-16 09:00:00",
+            "checksum_file": "JPC_AV_00001_2026_07_16_09_00_fixity.md5",
+        },
+    })
+    html = gr.make_fixity_section_html(path, "")
+    assert "c" * 32 in html
+    assert "2026-07-16 09:00:00" in html
+    assert "No validation against a previously stored checksum" in html
+
+
+def test_make_fixity_section_html_falls_back_to_sidecar_content():
+    html = gr.make_fixity_section_html(None, "abc123  JPC_AV_00001.mkv")
+    assert html == "<pre>abc123  JPC_AV_00001.mkv</pre>"
+
+
+def test_make_fixity_section_html_nothing_to_show_returns_none():
+    assert gr.make_fixity_section_html(None, "") is None
+
+
 def test_image_to_data_uri_encodes_bytes(tmp_path):
     img = tmp_path / "img.png"
     img.write_bytes(b"PNGDATA")
