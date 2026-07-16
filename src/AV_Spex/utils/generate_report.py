@@ -960,10 +960,6 @@ def make_fixity_section_html(fixity_summary_json, fixity_file_content):
             f'<p>{result_badge(whole_file.get("result"))} '
             f'&nbsp;{algorithm} fixity check on {whole_file.get("validated_at", "unknown date")}</p>'
         )
-        block += (
-            f'<p>Checksum computed from the video file: '
-            f'<span style="{hash_style}">{computed}</span></p>'
-        )
         validated_against = whole_file.get('validated_against') or []
         if validated_against:
             rows = ''
@@ -977,15 +973,20 @@ def make_fixity_section_html(fixity_summary_json, fixity_file_content):
                     f'<td>{entry.get("file", "")}</td>'
                     f'<td>{entry.get("date", "")}</td>'
                     f'<td style="{hash_style}">{stored}</td>'
+                    f'<td style="{hash_style}">{computed}</td>'
                     f'<td class="{match_class}">{match_text}</td>'
                     '</tr>'
                 )
             block += (
-                '<p style="margin-bottom: 4px;">Verified against stored checksum file(s):</p>'
                 '<table>'
-                '<tr><th>Checksum file</th><th>Created</th><th>Stored checksum</th><th>Result</th></tr>'
+                '<tr><th>Checksum file</th><th>Created</th><th>Stored checksum</th><th>Computed checksum</th><th>Result</th></tr>'
                 f'{rows}'
                 '</table>'
+            )
+        else:
+            block += (
+                f'<p>Checksum computed from the video file: '
+                f'<span style="{hash_style}">{computed}</span></p>'
             )
         if checksum_output:
             block += (
@@ -998,9 +999,15 @@ def make_fixity_section_html(fixity_summary_json, fixity_file_content):
         algorithm = (checksum_output.get('algorithm') or '').upper()
         block = '<h4 style="margin-bottom: 6px;">Whole-file checksum</h4>'
         block += (
-            f'<p>{algorithm} checksum created on {checksum_output.get("created_at", "unknown date")} '
-            f'and written to {checksum_output.get("checksum_file", "")}:</p>'
-            f'<p><span style="{hash_style}">{checksum_output.get("checksum", "")}</span></p>'
+            f'<p>{algorithm} checksum created on {checksum_output.get("created_at", "unknown date")}</p>'
+            '<table>'
+            '<tr><th>Checksum file</th><th>Created</th><th>Checksum</th></tr>'
+            '<tr>'
+            f'<td>{checksum_output.get("checksum_file", "")}</td>'
+            f'<td>{checksum_output.get("created_at", "")}</td>'
+            f'<td style="{hash_style}">{checksum_output.get("checksum", "")}</td>'
+            '</tr>'
+            '</table>'
             '<p style="font-size: 13px;">No validation against a previously stored checksum was performed this run.</p>'
         )
         blocks.append(block)

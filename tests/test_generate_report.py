@@ -394,6 +394,8 @@ def test_make_fixity_section_html_checksum_output_only(tmp_path):
     html = gr.make_fixity_section_html(path, "")
     assert "c" * 32 in html
     assert "2026-07-16 09:00:00" in html
+    assert "<tr><th>Checksum file</th><th>Created</th><th>Checksum</th></tr>" in html
+    assert "JPC_AV_00001_2026_07_16_09_00_fixity.md5" in html
     assert "No validation against a previously stored checksum" in html
 
 

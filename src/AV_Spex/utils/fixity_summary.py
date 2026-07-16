@@ -13,6 +13,23 @@ def get_fixity_summary_path(source_directory, video_id):
     )
 
 
+def clear_fixity_summary(source_directory, video_id):
+    """
+    Remove any existing fixity summary so a new fixity run starts fresh.
+
+    Called at the start of fixity processing: the summary accumulates sections
+    via read-modify-write, so without this a section from an earlier run (e.g.
+    a previous whole-file validation) would survive into a run that didn't
+    perform that step, and the report would present it as a current result.
+    """
+    summary_path = get_fixity_summary_path(source_directory, video_id)
+    try:
+        if os.path.isfile(summary_path):
+            os.remove(summary_path)
+    except OSError as e:
+        logger.warning(f'Unable to remove existing fixity summary {summary_path}: {e}\n')
+
+
 def update_fixity_summary(source_directory, video_id, section, data):
     """
     Record the outcome of a fixity step in {video_id}_fixity_summary.json.
