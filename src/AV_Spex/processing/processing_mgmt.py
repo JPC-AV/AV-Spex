@@ -13,6 +13,7 @@ from AV_Spex.utils.config_setup import ChecksConfig, SpexConfig, VALID_QCTOOLS_E
 from AV_Spex.utils.config_manager import ConfigManager
 from AV_Spex.utils.generate_report import generate_final_report
 from AV_Spex.checks.fixity_check import check_fixity, output_fixity
+from AV_Spex.utils.fixity_summary import clear_fixity_summary
 from AV_Spex.checks.mediainfo_check import parse_mediainfo
 from AV_Spex.checks.mediatrace_check import parse_mediatrace, create_metadata_difference_report
 from AV_Spex.checks.exiftool_check import parse_exiftool
@@ -60,6 +61,13 @@ class ProcessingManager:
         
         if self.check_cancelled():
             return None
+
+        # The fixity summary JSON accumulates sections via read-modify-write;
+        # start fresh so the report only reflects the steps this run performed
+        # (a stale section from a previous run would otherwise be presented as
+        # a current result). Report-only runs never reach here, so their
+        # summary from the last fixity run is preserved.
+        clear_fixity_summary(source_directory, video_id)
 
         # Embedded stream fixity (embed + validate) relies on mkvextract/
         # mkvpropedit, which only work on Matroska. If a non-MKV extension is
