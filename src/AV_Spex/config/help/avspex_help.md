@@ -1,10 +1,4 @@
-# AV Spex
-
-AV processing application for digital preservation
-
-<p align="center">
-  <img src="https://github.com/JPC-AV/JPC_AV_videoQC/blob/main/images_for_readme/av_spex_the_logo.png?raw=true" alt="AV Spex logo"/>
-</p>
+# AV Spex Help
 
 AV Spex is a macOS application written in Python that helps process digital audio and video media created from analog sources. It confirms that digitized files conform to predetermined specifications and performs automated preservation actions: fixity checks, access file creation, metadata sidecars, and HTML reports.
 
@@ -44,20 +38,15 @@ The following command line tools must be installed separately. The macOS package
 - **[FFmpeg](https://www.ffmpeg.org/)** — stream analysis, access file creation, stream hashing
 - **[MediaConch](https://mediaarea.net/MediaConch)** — policy-based conformance validation
 - **[MediaInfo](https://mediaarea.net/en/MediaInfo)** — container and stream metadata extraction
-- **[MKVToolNix](https://mkvtoolnix.download/)** - a set of tools to create, alter and inspect Matroska files 
+- **[MKVToolNix](https://mkvtoolnix.download/)** — a set of tools to create, alter and inspect Matroska files
 - **[QCTools](https://bavc.org/programs/preservation/preservation-tools/)** — per-frame video quality analysis
-- **[mkvalidator](https://www.matroska.org/downloads/mkvalidator.html)** — verifies Matroska and WebM files for spec conformance
 
 Install with Homebrew:
 ```bash
-brew install exiftool ffmpeg mediaconch mediainfo mkvtoolnix qcli mkvalidator
+brew install exiftool ffmpeg mediaconch mediainfo mkvtoolnix qcli
 ```
 
-The AV Spex GUI checks for all required dependencies at startup:
-
-<p align="center">
-  <img src="https://github.com/JPC-AV/JPC_AV_videoQC/blob/main/images_for_readme/dependency_check_0102026.png?raw=true" alt="Dependency Check"/>
-</p>
+The AV Spex GUI checks for all required dependencies at startup.
 
 ---
 
@@ -69,7 +58,7 @@ There are three installation options:
 
 Download the installer from the [latest release](https://github.com/JPC-AV/JPC_AV_videoQC/releases/latest).
 
-### 2. Homebrew 
+### 2. Homebrew
 
 ```bash
 brew tap JPC-AV/AV-Spex
@@ -84,9 +73,6 @@ av-spex --help
 ### 3. From Source
 
 Python 3.10 or higher is required.
-
-<details>
-<summary><span style="font-style: italic;">Click for instructions on creating a virtual environment (optional)</span></summary>
 
 Creating a virtual environment is optional but recommended to avoid system-wide package conflicts.
 
@@ -104,7 +90,7 @@ source ./name_of_env/bin/activate
 3. Initialize: `conda init zsh`
 4. Create environment: `conda create -n JPC_AV python=3.10.13`
 
-</details>
+Then install AV Spex:
 
 ```bash
 cd path-to/JPC_AV_videoQC
@@ -116,7 +102,7 @@ av-spex --help
 
 ## GUI Usage
 
-If using the homebrew/cli verison, launch the GUI with the command:
+If using the homebrew/cli version, launch the GUI with the command:
 ```bash
 av-spex-gui
 ```
@@ -125,17 +111,9 @@ The GUI has four tabs: **Import**, **Checks**, **Spex**, and **Complex**
 
 ### Import Tab
 
-<p align="center">
-  <img src="https://github.com/JPC-AV/JPC_AV_videoQC/blob/main/images_for_readme/avspex_import_tab.png?raw=true" alt="AV Spex Import Tab"/>
-</p>
-
 The Import tab is where you select input directories for processing and manage configuration files. It includes options to import, export, or reset the Checks and Spex configurations as JSON files.
 
 ### Checks Tab
-
-<p align="center">
-  <img src="https://github.com/JPC-AV/JPC_AV_videoQC/blob/main/images_for_readme/avspex_checks_tab.png?raw=true" alt="AV Spex Checks Tab"/>
-</p>
 
 The Checks tab controls which tools and processing steps are run. It includes:
 
@@ -149,29 +127,21 @@ Click **Check Spex!** to start processing.
 
 ### Spex Tab
 
-<p align="center">
-  <img src="https://github.com/JPC-AV/JPC_AV_videoQC/blob/main/images_for_readme/avspex_spex_tab.png?raw=true" alt="AV Spex Spex Tab"/>
-</p>
-
 The Spex tab displays the expected metadata values that AV Spex validates against, organized by tool. It includes:
 
 - **Filename / Signal Flow**: Dropdown menus to select the active filename convention and signal flow equipment profiles
-- **ExifTool / MediaInfo / FFprobe**: Dropdown menus to select named expected-values profiles for each metadata tool (see [Custom Metadata Profiles](#custom-metadata-profiles) below)
+- **ExifTool / MediaInfo / FFprobe**: Dropdown menus to select named expected-values profiles for each metadata tool (see the Custom Metadata Profiles section below)
 - **Open Section**: View the current expected values for any section (read-only for default profiles)
 
 ### Complex Tab
-
-<p align="center">
-  <img src="https://github.com/JPC-AV/JPC_AV_videoQC/blob/main/images_for_readme/avspex_complex_tab.png?raw=true" alt="AV Spex Complex Tab"/>
-</p>
 
 The Complex tab configures the advanced analysis steps — typically run during Step 2 or configured independently. Options are grouped by what they check, rather than by the tool that implements them:
 
 - **QCTools Report**: Run QCTools on the input video to generate the per-frame report that many of the checks below read, and set the report's file extension (`qctools.xml.gz` or `qctools.mkv`). If a report already exists in the `_qc_metadata` or `_vrecord_metadata` directory, it is reused instead of re-running.
 - **Color Bars & Tone**:
   - **Detect Color Bars**: Find SMPTE color bars in the video content (via qct-parse). The detected section is used downstream to skip bars in BRNG analysis and trim them from the access file. Its sub-options **Evaluate Color Bars** (compare program content against the detected bars) and **Export Thumbnails** (save thumbnails of failing frames) become available when detection is on.
-  - **CLAMS Bars + Tone Detection**: Run the CLAMS SSIM-based SMPTE bars detector and cross-correlation tone detector together as one step, alongside qct-parse for side-by-side comparison (see [Audio Analysis & CLAMS Detection](#audio-analysis--clams-detection) below)
-- **Video Signal Checks** (see [Frame Analysis](#frame-analysis) below for details on the frame analysis sub-steps):
+  - **CLAMS Bars + Tone Detection**: Run the CLAMS SSIM-based SMPTE bars detector and cross-correlation tone detector together as one step, alongside qct-parse for side-by-side comparison (see the Audio Analysis & CLAMS Detection section below)
+- **Video Signal Checks** (see the Frame Analysis section below for details on the frame analysis sub-steps):
   - **Detect Clamped Levels**: Broadcast-range level clamping from the analog-to-digital converter (via qct-parse)
   - **Detect Chroma Phase Errors**: Tape tracking artifacts where chroma collapses toward cyan or magenta (via qct-parse)
   - **Duplicate Frame Detection**: Runs of repeated frames likely caused by TBC or framesync errors
@@ -191,10 +161,6 @@ Once your Spex selections are complete, navigate to the Checks tab and click **C
 ---
 
 ## Custom Metadata Profiles
-
-<p align="center">
-  <img src="https://github.com/JPC-AV/JPC_AV_videoQC/blob/main/images_for_readme/avspex_mediainfo_profile_gui.png?raw=true" alt="AV Spex Custom MediaInfo Profile Window"/>
-</p>
 
 AV Spex supports custom profiles for ExifTool, MediaInfo, and FFprobe. This is useful when processing collections with different technical specifications — for example, PAL vs. NTSC transfers, or FLAC vs. PCM audio.
 
@@ -273,10 +239,6 @@ Numeric tuning of the CLAMS bars/tone parameters (SSIM threshold, sample ratio, 
 
 ## Frame Analysis
 
-<p align="center">
-  <img src="https://github.com/JPC-AV/JPC_AV_videoQC/blob/main/images_for_readme/avspex_frame_analysis_gui.png?raw=true" alt="AV Spex Frame Analysis Options"/>
-</p>
-
 AV Spex includes a frame analysis module for detecting common analog video artifacts. Each sub-step can be toggled independently from the Checks config (Complex tab in the GUI, or `--enable-*` flags on the CLI).
 
 ### Bitplane Check
@@ -287,10 +249,6 @@ Verifies that the 9th and 10th bits of 10-bit video contain data. Some TBC/frame
 
 Detects the active video area and identifies edge artifacts including head-switching noise at the bottom of the frame.
 
-<p align="center">
-  <img src="https://github.com/JPC-AV/JPC_AV_videoQC/blob/main/images_for_readme/JPC_AV_01709_border_detection.jpg?raw=true" alt="Border Detection Example"/>
-</p>
-
 Two modes are available:
 - **Simple** (default): Crops a fixed pixel border from each edge (default: 25px)
 - **Sophisticated**: Uses edge detection to dynamically identify the active video area
@@ -298,10 +256,6 @@ Two modes are available:
 ### BRNG Analysis
 
 Detects out-of-range luma and chroma values (BRNG — **B**roadcast **Ra**n**g**e) using a multi-method voting approach. Frames with violations are highlighted in the diagnostic output, and results are included in the HTML report. BRNG analysis automatically skips color bars at the head of the tape to avoid false positives.
-
-<p align="center">
-  <img src="https://github.com/JPC-AV/JPC_AV_videoQC/blob/main/images_for_readme/avspex_brng_example.png?raw=true" alt="BRNG Analysis Example"/>
-</p>
 
 ### Signalstats
 
@@ -343,7 +297,7 @@ av-spex [path/to/directory]
 `av-spex --help` prints the full reference grouped by category (Config profiles, Config import/export, Tool toggles, qct-parse / CLAMS, Frame analysis, Output settings, Fixity).
 
 **Processing profiles:**
-- `--profile {step1,step2,off}` — Apply a predefined processing profile (see [Checks Tab](#checks-tab) for details on each profile)
+- `--profile {step1,step2,off}` — Apply a predefined processing profile (see the Checks Tab section above for details on each profile)
 
 **Tool toggles:**
 - `--on / --off` — Enable or disable individual tool options without affecting others. Format: `tool.run_tool` or `tool.check_tool` (e.g., `--on mediainfo.run_tool --on mediainfo.check_tool`)
@@ -450,82 +404,19 @@ For each processed input directory `{video_id}/`:
 
 ### Logging
 
-A per-file log is written inside each `_qc_metadata` directory.
-`video_id}_qc_metadata/{video_id}_avspex_processing.log`
-These per-file logs are overwritten if a file is re-run. 
+A per-file log is written inside each `_qc_metadata` directory:
+`{video_id}_qc_metadata/{video_id}_avspex_processing.log`
+These per-file logs are overwritten if a file is re-run.
 
 Each run also writes a timestamped application log:
 ```
-/.../Library/Logs/AVSpex/YYY-MM-DD/YYYY-MM-DD_HH-MM-SS_JPC_AV_log.log
+/.../Library/Logs/AVSpex/YYYY-MM-DD/YYYY-MM-DD_HH-MM-SS_JPC_AV_log.log
 ```
-
----
-
-## Contributing
-
-Contributions that enhance script functionality are welcome. Please ensure compatibility with Python 3.10 or higher.
 
 ---
 
 ## Acknowledgements
 
-AV Spex makes use of code from several open source projects. Attribution and copyright notices are included as comments inline where open source code is used.
+AV Spex makes use of code from several open source projects, including [loglog](https://github.com/amiaopensource/loglog), [qct-parse](https://github.com/amiaopensource/qct-parse), and [IFIscripts](https://github.com/kieranjol/IFIscripts). Attribution and copyright notices are included as comments inline where open source code is used, and full license texts are included in the project README.
 
-[loglog](https://github.com/amiaopensource/loglog)
-```
-Copyright (C) 2021  Eddy Colloton and Morgan Morel
-
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License version 3 as published by
-    the Free Software Foundation.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
-```
-
-[qct-parse](https://github.com/amiaopensource/qct-parse)
-```
-Copyright (C) 2016 Brendan Coates and Morgan Morel
-
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License version 3 as published by
-    the Free Software Foundation.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
-```
-
-[IFIscripts](https://github.com/kieranjol/IFIscripts)
-```
-MIT License
-
-    Copyright (c) 2015-2018 Kieran O'Leary for the Irish Film Institute.
-
-    Permission is hereby granted, free of charge, to any person obtaining a copy
-    of this software and associated documentation files (the "Software"), to deal
-    in the Software without restriction, including without limitation the rights
-    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-    copies of the Software, and to permit persons to whom the Software is
-    furnished to do so, subject to the following conditions:
-
-    The above copyright notice and this permission notice shall be included in
-    all copies or substantial portions of the Software.
-
-    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-    THE SOFTWARE.
-```
+AV Spex is distributed under the GNU General Public License v3.0.

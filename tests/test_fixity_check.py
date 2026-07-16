@@ -289,6 +289,74 @@ def test_check_fixity_missing_video_file(tmp_path, patch_config_mgr):
     assert result is None
 
 
+def _load_fixity_summary(root, video_id):
+    import json
+    summary_path = os.path.join(
+        root, f"{video_id}_qc_metadata", f"{video_id}_fixity_summary.json"
+    )
+    with open(summary_path) as fh:
+        return json.load(fh)
+
+
+def test_output_fixity_writes_fixity_summary(sample_video_file, patch_config_mgr):
+    patch_config_mgr("md5")
+    fc.output_fixity(sample_video_file["dir"], sample_video_file["path"])
+
+    summary = _load_fixity_summary(sample_video_file["dir"], sample_video_file["video_id"])
+    section = summary["checksum_output"]
+    assert section["algorithm"] == "md5"
+    assert section["checksum"] == sample_video_file["md5"]
+    assert section["checksum_file"].endswith("_fixity.md5")
+    assert section["created_at"]
+
+
+def test_check_fixity_pass_writes_fixity_summary(sample_video_file, patch_config_mgr):
+    patch_config_mgr("md5")
+    _make_qc_dir(sample_video_file["dir"], sample_video_file["video_id"])
+
+    stored_file = os.path.join(
+        sample_video_file["dir"],
+        f"{sample_video_file['video_id']}_2026_04_19_fixity.md5",
+    )
+    with open(stored_file, "w") as fh:
+        fh.write(f"{sample_video_file['md5']}  {sample_video_file['video_id']}.mkv\n")
+
+    fc.check_fixity(sample_video_file["dir"], sample_video_file["video_id"])
+
+    summary = _load_fixity_summary(sample_video_file["dir"], sample_video_file["video_id"])
+    whole_file = summary["whole_file"]
+    assert whole_file["result"] == "passed"
+    assert whole_file["algorithm"] == "md5"
+    assert whole_file["computed_checksum"] == sample_video_file["md5"]
+    assert whole_file["validated_at"]
+    assert whole_file["validated_against"] == [{
+        "file": os.path.basename(stored_file),
+        "date": "2026-04-19",
+        "checksum": sample_video_file["md5"],
+    }]
+
+
+def test_check_fixity_fail_writes_fixity_summary(sample_video_file, patch_config_mgr):
+    patch_config_mgr("md5")
+    _make_qc_dir(sample_video_file["dir"], sample_video_file["video_id"])
+
+    wrong_checksum = "0" * 32
+    stored_file = os.path.join(
+        sample_video_file["dir"],
+        f"{sample_video_file['video_id']}_2026_04_19_fixity.md5",
+    )
+    with open(stored_file, "w") as fh:
+        fh.write(f"{wrong_checksum}  {sample_video_file['video_id']}.mkv\n")
+
+    fc.check_fixity(sample_video_file["dir"], sample_video_file["video_id"])
+
+    summary = _load_fixity_summary(sample_video_file["dir"], sample_video_file["video_id"])
+    whole_file = summary["whole_file"]
+    assert whole_file["result"] == "failed"
+    assert whole_file["computed_checksum"] == sample_video_file["md5"]
+    assert whole_file["validated_against"][0]["checksum"] == wrong_checksum
+
+
 def test_check_fixity_handles_multiple_checksum_files(sample_video_file, patch_config_mgr):
     """
     Multiple stored checksum files with different dates — all are considered,

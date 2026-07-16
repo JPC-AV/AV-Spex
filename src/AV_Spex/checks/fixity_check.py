@@ -7,6 +7,7 @@ from datetime import datetime
 from AV_Spex.utils.log_setup import logger
 from AV_Spex.utils.config_manager import ConfigManager
 from AV_Spex.utils.config_setup import ChecksConfig
+from AV_Spex.utils.fixity_summary import update_fixity_summary
 
 
 def get_checksum_algorithm():
@@ -191,6 +192,8 @@ def check_fixity(directory, video_id, actual_checksum=None, check_cancelled=None
                 logger.warning(f'No checksum files found matching provided checksum algorithm ({provided_algorithm.upper()})')
                 # Use all files as fallback, but comparison will likely fail if algorithms differ
                 files_to_validate = checksum_files
+
+            validation_algorithm = provided_algorithm
         else:
             # No checksum files and actual_checksum is provided - nothing to validate against
             logger.warning(f'No existing checksum files to validate against')
@@ -228,6 +231,21 @@ def check_fixity(directory, video_id, actual_checksum=None, check_cancelled=None
         result_file = open(fixity_result_file, 'w', encoding='utf-8')
         print(f'Fixity check failed for {os.path.basename(video_file_path)} checksum read from file = {expected_checksum} checksum created from MKV file = {actual_checksum}\n', file=result_file)
         result_file.close()
+
+    update_fixity_summary(directory, video_id, 'whole_file', {
+        'result': 'passed' if checksums_match else 'failed',
+        'algorithm': validation_algorithm,
+        'computed_checksum': actual_checksum,
+        'validated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'validated_against': [
+            {
+                'file': os.path.basename(checksum_file_path),
+                'date': str(file_date),
+                'checksum': checksum_cache[checksum_file_path][0],
+            }
+            for checksum_file_path, file_date, file_algorithm in files_to_validate
+        ],
+    })
 
 
 def output_fixity(source_directory, video_path, check_cancelled=None, signals=None):
@@ -274,9 +292,16 @@ def output_fixity(source_directory, video_path, check_cancelled=None, signals=No
     # Write checksum in standard format: 'checksum  filename'
     with open(fixity_result_file, 'w', encoding='utf-8') as result_file:
         print(f'{checksum}  {os.path.basename(video_path)}', file=result_file)
-    
+
     shutil.copy(fixity_result_file, fixity_hash_file)
-    logger.debug(f'{algorithm.upper()} checksum written to {fixity_result_file}\n')    
+    logger.debug(f'{algorithm.upper()} checksum written to {fixity_result_file}\n')
+
+    update_fixity_summary(source_directory, video_id, 'checksum_output', {
+        'algorithm': algorithm,
+        'checksum': checksum,
+        'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'checksum_file': os.path.basename(fixity_hash_file),
+    })
     return checksum
 
 
