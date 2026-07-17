@@ -48,6 +48,8 @@ brew install exiftool ffmpeg mediaconch mediainfo mkvtoolnix qcli
 
 The AV Spex GUI checks for all required dependencies at startup.
 
+![The dependency check shown at GUI startup](dependency_check_example.png)
+
 ---
 
 ## Installation
@@ -113,6 +115,8 @@ The GUI has four tabs: **Import**, **Checks**, **Spex**, and **Complex**
 
 The Import tab is where you select input directories for processing and manage configuration files. It includes options to import, export, or reset the Checks and Spex configurations as JSON files.
 
+![The Import tab](import_tab_example.png)
+
 ### Checks Tab
 
 The Checks tab controls which tools and processing steps are run. It includes:
@@ -125,6 +129,8 @@ The Checks tab controls which tools and processing steps are run. It includes:
 
 Click **Check Spex!** to start processing.
 
+![The Checks tab](checks_tab_example.png)
+
 ### Spex Tab
 
 The Spex tab displays the expected metadata values that AV Spex validates against, organized by tool. It includes:
@@ -132,6 +138,8 @@ The Spex tab displays the expected metadata values that AV Spex validates agains
 - **Filename / Signal Flow**: Dropdown menus to select the active filename convention and signal flow equipment profiles
 - **ExifTool / MediaInfo / FFprobe**: Dropdown menus to select named expected-values profiles for each metadata tool (see the Custom Metadata Profiles section below)
 - **Open Section**: View the current expected values for any section (read-only for default profiles)
+
+![The Spex tab](spex_tab_example.png)
 
 ### Complex Tab
 
@@ -156,6 +164,8 @@ The Complex tab configures the advanced analysis steps — typically run during 
   - **Dropped Sample Detection**: Potential audio sample drops from TBC/framesync or ADC devices
 
 Checks marked "via qct-parse" read the QCTools report through the qct-parse tool, and enabling any of them turns qct-parse on automatically — there is no separate qct-parse "Run Tool" checkbox on this tab. Turning off all qct-parse-backed checks turns the tool off.
+
+![The Complex tab](complex_tab_example.png)
 
 Once your Spex selections are complete, navigate to the Checks tab and click **Check Spex!**.
 
