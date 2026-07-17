@@ -397,6 +397,8 @@ Metrics used (both from FFmpeg's `astats` filter as recorded in the QCTools repo
 
 Peak Level identifies *whether* clipping occurred; Flat Factor indicates *how severe* it is.
 
+![An audio clipping result from the HTML report](audio_clipping_example.png)
+
 ### Channel Imbalance
 
 Compares the average loudness of each audio channel across the entire program to characterize level differences between channels, using the mean RMS level (dBFS) per channel from FFmpeg's `astats` filter.
@@ -409,6 +411,8 @@ Characterization:
 - **Significant imbalance** — greater than 6 dB difference; could indicate a hardware fault, bad cable, or a mono source recorded to only one channel
 
 It is not uncommon for one channel to be somewhat louder than the other on analog source material. This analysis is informational — it characterizes the file rather than flagging an error.
+
+![A channel imbalance result from the HTML report — a significant imbalance with a silent channel](channel_imbalance_example.png)
 
 ### Audible Timecode (LTC)
 
@@ -424,6 +428,8 @@ Detections must persist across multiple consecutive windows to be reported, redu
 
 Region start and end positions are shown as non-drop-frame timecode (`HH:MM:SS:FF`) at the video frame rate, so they match what an NLE displays.
 
+![Audible timecode consensus regions from the HTML report](audible_timecode_example.png)
+
 ### Audio Dropout
 
 Identifies moments where the audio signal level drops suddenly and significantly — characteristic of tape dropout during analog playback. A rolling window of audio frames (7 frames, ~11 seconds) establishes a local baseline, and frames that fall far below it are flagged.
@@ -433,6 +439,8 @@ Identifies moments where the audio signal level drops suddenly and significantly
 - **Zero Crossings Rate** — Very low values indicate silence; very high values may indicate noise bursts.
 
 Confidence is **High** (RMS drop plus two or more corroborating metrics), **Medium** (one corroborating metric), or **Low** (RMS drop only). Detection runs per audio channel to catch single-channel dropouts.
+
+![A dropout event from the HTML report's dropout events table](audio_dropout_events_example.png)
 
 ### Tone Leak Detection
 
