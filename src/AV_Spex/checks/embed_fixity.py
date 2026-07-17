@@ -6,9 +6,12 @@ import time
 import re
 import json
 
+from datetime import datetime
+
 from AV_Spex.utils.log_setup import logger
 from AV_Spex.utils.config_setup import ChecksConfig
 from AV_Spex.utils.config_manager import ConfigManager
+from AV_Spex.utils.fixity_summary import update_fixity_summary
 
 def get_stream_hash_algorithm():
     """Get the configured stream hash algorithm from config."""
@@ -390,26 +393,34 @@ def extract_hashes(xml_tags):
 def compare_hashes(existing_video_hash, existing_audio_hash, video_hash, audio_hash):
     """
     Compare stored hashes with newly computed hashes and log results.
+
+    Returns:
+        tuple: (video_match, audio_match) booleans
     """
     # Detect algorithm for logging purposes
     algorithm = detect_hash_algorithm(existing_video_hash)
     algorithm_display = algorithm.upper() if algorithm else "Unknown"
-    
+
     logger.info(f"Comparing {algorithm_display} hashes:\n")
-    
-    if existing_video_hash == video_hash:
+
+    video_match = existing_video_hash == video_hash
+    audio_match = existing_audio_hash == audio_hash
+
+    if video_match:
         logger.info("✓ Video hashes match.")
     else:
         logger.critical(f"✗ Video hashes do not match.\n"
                        f"  Stored:    {existing_video_hash}\n"
                        f"  Computed:  {video_hash}\n")
 
-    if existing_audio_hash == audio_hash:
+    if audio_match:
         logger.info("✓ Audio hashes match.\n")
     else:
         logger.critical(f"✗ Audio hashes do not match.\n"
                        f"  Stored:    {existing_audio_hash}\n"
                        f"  Computed:  {audio_hash}\n")
+
+    return video_match, audio_match
 
 
 def embed_fixity(video_path, check_cancelled=None, signals=None):
@@ -560,11 +571,29 @@ def validate_embedded_md5(video_path, check_cancelled=None, signals=None):
     video_hash, audio_hash = hash_result
     logger.debug(f"\n")
     logger.debug('Validating stream fixity\n')
-    compare_hashes(existing_video_hash, existing_audio_hash, video_hash, audio_hash)
+    video_match, audio_match = compare_hashes(existing_video_hash, existing_audio_hash, video_hash, audio_hash)
 
     if check_cancelled():
         return None
-    
+
+    source_directory = os.path.dirname(video_path)
+    video_id = os.path.splitext(os.path.basename(video_path))[0]
+    update_fixity_summary(source_directory, video_id, 'stream_fixity', {
+        'result': 'passed' if (video_match and audio_match) else 'failed',
+        'algorithm': configured_algorithm,
+        'validated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'video': {
+            'embedded_hash': existing_video_hash,
+            'computed_hash': video_hash,
+            'match': video_match,
+        },
+        'audio': {
+            'embedded_hash': existing_audio_hash,
+            'computed_hash': audio_hash,
+            'match': audio_match,
+        },
+    })
+
     # Validation completed successfully
     return True
 

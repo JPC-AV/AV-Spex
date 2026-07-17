@@ -1394,7 +1394,8 @@ profile_step2 = {
             "evaluateBars": True,
             "thumbExport": True,
             "audio_analysis": True,
-            "detect_clamped_levels": True
+            "detect_clamped_levels": True,
+            "detect_chroma_phase_errors": True
         },
         "clams_detection": {
             "run_tool": True,
@@ -1468,7 +1469,9 @@ profile_allOff = {
             "evaluateBars": False,
             "thumbExport": False,
             "audio_analysis": False,
-            "detect_clamped_levels": False
+            "detect_clamped_levels": False,
+            "detect_chroma_phase_errors": False,
+            "detect_tone_leak": False
         },
         "clams_detection": {
             "run_tool": False,
@@ -1491,9 +1494,12 @@ profile_allOff = {
         "report": False,
         "qctools_ext": "qctools.xml.gz",
         "frame_analysis": {
+            "enable_bitplane_check": False,
             "enable_border_detection": False,
             "enable_brng_analysis": False,
-            "enable_signalstats": False
+            "enable_signalstats": False,
+            "enable_dropped_sample_detection": False,
+            "enable_duplicate_frame_detection": False
         }
     },
     "fixity": {

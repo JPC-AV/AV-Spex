@@ -156,6 +156,69 @@ def write_durations_csv(report_directory: str, runs: List[Tuple[str, float, floa
             writer.writerow(["clams bars detection found no color bars"])
 
 
+def runs_from_recorded_scores(
+    report_directory: str,
+    video_id: str,
+    threshold: float,
+    max_frame: int,
+    min_frame_count: int,
+    fps: float,
+    pass_label: str = "primary",
+) -> List[Tuple[float, float]]:
+    """
+    Re-evaluate already-recorded SSIM scores against a different threshold.
+
+    The per-frame SSIM CSV stores raw scores, so a relaxed re-check over a
+    range the primary pass already covered needs no video decoding — replay
+    the recorded samples with the new threshold using the same run logic as
+    run_clams_bars_detection.
+
+    Returns:
+        List of (start_seconds, end_seconds) runs, in frame order.
+    """
+    ssim_csv = Path(report_directory) / f"{video_id}{SSIM_SCORES_CSV_SUFFIX}"
+    if not ssim_csv.exists() or not fps or fps <= 0:
+        return []
+
+    samples = []
+    try:
+        with open(ssim_csv, newline="") as f:
+            reader = csv.reader(f)
+            next(reader, None)  # header
+            for row in reader:
+                if len(row) < 4 or row[0] != pass_label:
+                    continue
+                try:
+                    frame = int(row[1])
+                    score = float(row[3])
+                except ValueError:
+                    continue
+                if frame < max_frame:
+                    samples.append((frame, score))
+    except OSError as e:
+        logger.warning(f"CLAMS bars score replay: could not read {ssim_csv}: {e}")
+        return []
+
+    samples.sort(key=lambda t: t[0])
+    bars_runs = []
+    in_run = False
+    run_start_frame: Optional[int] = None
+    cur_frame = 0
+    for cur_frame, score in samples:
+        if score > threshold:
+            if not in_run:
+                in_run = True
+                run_start_frame = cur_frame
+        elif in_run:
+            in_run = False
+            if cur_frame - run_start_frame > min_frame_count:
+                bars_runs.append((run_start_frame, cur_frame))
+    if in_run and run_start_frame is not None and cur_frame - run_start_frame > min_frame_count:
+        bars_runs.append((run_start_frame, cur_frame))
+
+    return [(s_frame / fps, e_frame / fps) for s_frame, e_frame in bars_runs]
+
+
 def run_clams_bars_detection(
     video_path: str,
     report_directory: str,

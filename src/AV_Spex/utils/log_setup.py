@@ -220,9 +220,18 @@ def start_file_log(output_directory, video_id, log_level=logging.DEBUG):
     # Create the log file path
     log_filename = f"{video_id}_avspex_processing.log"
     log_path = os.path.join(output_directory, log_filename)
-    
-    # Create file handler for this specific file
-    file_handler = logging.FileHandler(log_path, mode='w', encoding='utf-8')
+
+    # If a log from a previous run exists, write a separator directly to the
+    # file (not through the logger, so it doesn't echo to console/main log)
+    if os.path.isfile(log_path) and os.path.getsize(log_path) > 0:
+        with open(log_path, 'a', encoding='utf-8') as existing_log:
+            existing_log.write('\n\n')
+            existing_log.write('=' * 80 + '\n')
+            existing_log.write(f"{'NEW PROCESSING RUN':^80}\n")
+            existing_log.write('=' * 80 + '\n\n')
+
+    # Create file handler for this specific file (append mode preserves prior runs)
+    file_handler = logging.FileHandler(log_path, mode='a', encoding='utf-8')
     
     # Use a clean format for per-file logs
     log_format = '%(asctime)s - %(levelname)s: %(message)s'

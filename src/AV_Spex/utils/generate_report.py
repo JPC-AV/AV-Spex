@@ -856,11 +856,12 @@ def find_qc_metadata(destination_directory):
     Returns:
         tuple: Paths to various metadata files and policy content
     """
-    exiftool_output_path = None 
+    exiftool_output_path = None
     ffprobe_output_path = None
     mediainfo_output_path = None
     mediaconch_csv = None
     fixity_sidecar = None
+    fixity_summary_json = None
     mediaconch_policy_content = None
     mediaconch_policy_name = None
 
@@ -876,6 +877,8 @@ def find_qc_metadata(destination_directory):
                     mediainfo_output_path = file_path
                 if "_mediaconch_output" in file:
                     mediaconch_csv = file_path
+                if "_fixity_summary" in file and file.endswith('.json'):
+                    fixity_summary_json = file_path
 
     if os.path.isdir(os.path.dirname(destination_directory)):
         parent_dir = os.path.dirname(destination_directory) 
@@ -899,8 +902,155 @@ def find_qc_metadata(destination_directory):
         except Exception as e:
             logger.error(f"Error retrieving MediaConch policy: {e}")
 
-    return (exiftool_output_path, ffprobe_output_path, mediainfo_output_path, 
-            mediaconch_csv, fixity_sidecar, mediaconch_policy_content, mediaconch_policy_name)
+    return (exiftool_output_path, ffprobe_output_path, mediainfo_output_path,
+            mediaconch_csv, fixity_sidecar, fixity_summary_json,
+            mediaconch_policy_content, mediaconch_policy_name)
+
+
+def make_fixity_section_html(fixity_summary_json, fixity_file_content):
+    """
+    Render the Fixity report section from the structured fixity summary JSON
+    written by the fixity steps (checks/fixity_check.py, checks/embed_fixity.py).
+
+    Falls back to the raw checksum sidecar content for runs that predate the
+    summary file. Returns None when there is nothing to show.
+    """
+    summary = None
+    if fixity_summary_json:
+        try:
+            with open(fixity_summary_json, 'r', encoding='utf-8') as f:
+                summary = json.load(f)
+            if not isinstance(summary, dict):
+                summary = None
+        except Exception as e:
+            logger.warning(f"Could not read fixity summary {fixity_summary_json}: {e}")
+            summary = None
+
+    if not summary:
+        if fixity_file_content:
+            return f'<pre>{fixity_file_content}</pre>'
+        return None
+
+    whole_file = summary.get('whole_file')
+    checksum_output = summary.get('checksum_output')
+    stream_fixity = summary.get('stream_fixity')
+
+    if not (whole_file or checksum_output or stream_fixity):
+        if fixity_file_content:
+            return f'<pre>{fixity_file_content}</pre>'
+        return None
+
+    hash_style = 'font-family: monospace; word-break: break-all;'
+
+    def result_badge(result):
+        if result == 'passed':
+            return ('<span style="background-color: #d2ffed; color: #0a5738; border: 1px solid #0a5738; '
+                    'border-radius: 4px; padding: 2px 10px; font-weight: bold;">&#10003; Passed</span>')
+        return ('<span style="background-color: #ffbaba; color: #8b0000; border: 1px solid #8b0000; '
+                'border-radius: 4px; padding: 2px 10px; font-weight: bold;">&#10007; Failed</span>')
+
+    blocks = []
+
+    # --- Whole-file fixity ---
+    if whole_file:
+        algorithm = (whole_file.get('algorithm') or '').upper()
+        computed = whole_file.get('computed_checksum') or ''
+        block = '<h4 style="margin-bottom: 6px;">Whole-file checksum</h4>'
+        block += (
+            f'<p>{result_badge(whole_file.get("result"))} '
+            f'&nbsp;{algorithm} fixity check on {whole_file.get("validated_at", "unknown date")}</p>'
+        )
+        validated_against = whole_file.get('validated_against') or []
+        if validated_against:
+            rows = ''
+            for entry in validated_against:
+                stored = entry.get('checksum') or ''
+                match = bool(computed) and stored == computed
+                match_class = 'cell-match' if match else 'cell-mismatch'
+                match_text = 'match' if match else 'MISMATCH'
+                rows += (
+                    '<tr>'
+                    f'<td>{entry.get("file", "")}</td>'
+                    f'<td>{entry.get("date", "")}</td>'
+                    f'<td style="{hash_style}">{stored}</td>'
+                    f'<td style="{hash_style}">{computed}</td>'
+                    f'<td class="{match_class}">{match_text}</td>'
+                    '</tr>'
+                )
+            block += (
+                '<table>'
+                '<tr><th>Checksum file</th><th>Created</th><th>Stored checksum</th><th>Computed checksum</th><th>Result</th></tr>'
+                f'{rows}'
+                '</table>'
+            )
+        else:
+            block += (
+                f'<p>Checksum computed from the video file: '
+                f'<span style="{hash_style}">{computed}</span></p>'
+            )
+        if checksum_output:
+            block += (
+                f'<p style="font-size: 13px;">A new {(checksum_output.get("algorithm") or "").upper()} '
+                f'checksum sidecar was also written this run: '
+                f'{checksum_output.get("checksum_file", "")} ({checksum_output.get("created_at", "")})</p>'
+            )
+        blocks.append(block)
+    elif checksum_output:
+        algorithm = (checksum_output.get('algorithm') or '').upper()
+        block = '<h4 style="margin-bottom: 6px;">Whole-file checksum</h4>'
+        block += (
+            f'<p>{algorithm} checksum created on {checksum_output.get("created_at", "unknown date")}</p>'
+            '<table>'
+            '<tr><th>Checksum file</th><th>Created</th><th>Checksum</th></tr>'
+            '<tr>'
+            f'<td>{checksum_output.get("checksum_file", "")}</td>'
+            f'<td>{checksum_output.get("created_at", "")}</td>'
+            f'<td style="{hash_style}">{checksum_output.get("checksum", "")}</td>'
+            '</tr>'
+            '</table>'
+            '<p style="font-size: 13px;">No validation against a previously stored checksum was performed this run.</p>'
+        )
+        blocks.append(block)
+
+    # --- Embedded stream fixity ---
+    if stream_fixity:
+        algorithm = (stream_fixity.get('algorithm') or '').upper()
+        block = '<h4 style="margin-bottom: 6px;">Embedded stream fixity</h4>'
+        block += (
+            f'<p>{result_badge(stream_fixity.get("result"))} '
+            f'&nbsp;{algorithm} stream hash validation on {stream_fixity.get("validated_at", "unknown date")}</p>'
+        )
+        rows = ''
+        for stream_name in ('video', 'audio'):
+            stream = stream_fixity.get(stream_name)
+            if not stream:
+                continue
+            match = stream.get('match')
+            match_class = 'cell-match' if match else 'cell-mismatch'
+            match_text = 'match' if match else 'MISMATCH'
+            rows += (
+                '<tr>'
+                f'<td>{stream_name.capitalize()}</td>'
+                f'<td style="{hash_style}">{stream.get("embedded_hash", "")}</td>'
+                f'<td style="{hash_style}">{stream.get("computed_hash", "")}</td>'
+                f'<td class="{match_class}">{match_text}</td>'
+                '</tr>'
+            )
+        block += (
+            '<table>'
+            '<tr><th>Stream</th><th>Embedded hash</th><th>Computed hash</th><th>Result</th></tr>'
+            f'{rows}'
+            '</table>'
+        )
+        blocks.append(block)
+
+    section_body = ''.join(blocks)
+    return (
+        '<div style="background-color: #f5e9e3; border: 1px solid #4d2b12; border-radius: 4px; '
+        'padding: 10px 30px 20px 30px; margin: 10px 0 20px 0;">'
+        f'{section_body}'
+        '</div>'
+    )
 
 
 def generate_thumbnail_for_failure(video_path, tag, tagValue, timestamp, profile_name, thumbPath):
@@ -2459,9 +2609,16 @@ def make_color_bars_graphs(video_id, qctools_colorbars_duration_output, colorbar
                     logger.critical(f"The csv file {qctools_colorbars_duration_output} does not match the expected format")
                     return None
 
-                duration_text = duration_lines[1].strip()
-                duration_text = duration_text.replace(',', ' - ')
-                duration_text = "Colorbars duration: " + duration_text
+                # Labeled 3-column row: drop the internal pass label
+                # ("head", "head-relaxed", ...) — the section header already
+                # says which region this is. Legacy rows are [start, end].
+                row = next(csv.reader([duration_lines[1].strip()]))
+                if len(row) >= 3:
+                    duration_text = f"Colorbars duration: {row[1]} - {row[2]}"
+                elif len(row) >= 2:
+                    duration_text = f"Colorbars duration: {row[0]} - {row[1]}"
+                else:
+                    duration_text = "Colorbars duration: " + duration_lines[1].strip()
         except Exception as e:
             logger.critical(f"Error processing duration file: {e}")
             return None
@@ -2528,11 +2685,14 @@ def make_color_bars_graphs(video_id, qctools_colorbars_duration_output, colorbar
         '''
         break
 
-    # Create the complete HTML with the duration text and the thumbnail/barchart side-by-side
+    # Create the complete HTML with the duration text and the thumbnail/barchart side-by-side.
+    # The caption column is pinned to the thumbnail width so long captions wrap
+    # instead of widening the column and pushing the fixed-width chart into the
+    # section's overflow clip.
     colorbars_html = f'''
     <div style="background-color: #f5e9e3; padding: 20px 30px; border-radius: 6px;">
         <div style="display: flex; align-items: center; justify-content: center;">
-            <div style="flex-shrink: 0;">
+            <div style="flex: 0 0 200px; max-width: 200px; overflow-wrap: break-word;">
                 {thumbnail_html}
                 <p>{duration_text}</p>
             </div>
@@ -2595,6 +2755,7 @@ def _parse_bars_durations_csv(csv_path):
 _BARS_TONE_PASS_LABELS = {
     "head": "Head bars",
     "head-relaxed": "Head bars (relaxed)",
+    "head-second-pass": "Head bars (relaxed re-check)",
     "primary": "Primary scan",
     "second-pass": "Targeted re-scan",
     "windowed": "Mid-file scan",
@@ -2624,10 +2785,11 @@ def make_bars_detection_comparison_html(qct_csv_path, clams_csv_path, agreement_
     """
     Render a unified table comparing qct-parse and CLAMS SSIM bars detections.
 
-    Each detection becomes a row tagged with its source and pass (qct-parse,
-    CLAMS primary, CLAMS second-pass). Agreement analysis still fires only on
-    the qct-parse vs CLAMS-primary pair, since the second-pass scans are
-    targeted, relaxed-threshold confirmation runs.
+    Each detection becomes a row tagged with its source and pass. Rows are
+    shown chronologically (by start time), so the head bars from both methods
+    appear together, followed by any additional bars. Head candidates are
+    classified by time, matching the processing consensus: the earliest run
+    starting within the head window, regardless of which pass found it.
 
     Returns None when neither detector produced output (so the section is
     omitted from the report entirely).
@@ -2639,6 +2801,9 @@ def make_bars_detection_comparison_html(qct_csv_path, clams_csv_path, agreement_
 
     qct_runs = _parse_bars_durations_csv(qct_csv_path)
     clams_runs = _parse_bars_durations_csv(clams_csv_path)
+
+    # Mirrors HEAD_BARS_START_THRESHOLD in processing_mgmt.py
+    HEAD_WINDOW_S = 30.0
 
     def fmt(seconds):
         if seconds is None:
@@ -2655,15 +2820,20 @@ def make_bars_detection_comparison_html(qct_csv_path, clams_csv_path, agreement_
         qct_head = next((r for r in qct_runs if r[0] == "primary"), None)
     qct_windowed = [r for r in qct_runs if r is not qct_head]
 
-    clams_primary = next((r for r in clams_runs if r[0] == "primary"), None)
-    clams_secondary = [r for r in clams_runs if r[0] != "primary"]
+    # CLAMS head candidate: earliest run starting within the head window.
+    # The primary scan can find only mid-file bars (its first hit isn't
+    # necessarily at the head), and the relaxed head re-check writes a
+    # "head-second-pass" row — so classify by time, not by pass label.
+    clams_head_runs = [r for r in clams_runs if r[1] is not None and r[1] < HEAD_WINDOW_S]
+    clams_head = min(clams_head_runs, key=lambda r: r[1]) if clams_head_runs else None
+    clams_additional = [r for r in clams_runs if r is not clams_head]
 
-    # Agreement: qct-parse head vs CLAMS primary head bars.
+    # Agreement: qct-parse head vs CLAMS head candidate.
     agreement_label = "—"
     agreement_color = "#666"
     if qct_run and clams_run:
         qct_end = qct_head[2] if qct_head else None
-        clams_end = clams_primary[2] if clams_primary else None
+        clams_end = clams_head[2] if clams_head else None
         if qct_end is not None and clams_end is not None:
             delta = abs(qct_end - clams_end)
             if delta <= agreement_tolerance_s:
@@ -2692,13 +2862,16 @@ def make_bars_detection_comparison_html(qct_csv_path, clams_csv_path, agreement_
         for label, ws, we in qct_windowed:
             body_rows.append(("qct-parse", label, True, ws, we, True))
     if clams_run:
-        if clams_primary:
-            _, cs, ce = clams_primary
-            body_rows.append(("CLAMS SSIM", "primary", True, cs, ce, False))
+        if clams_head:
+            body_rows.append(("CLAMS SSIM", clams_head[0], True, clams_head[1], clams_head[2], False))
         else:
-            body_rows.append(("CLAMS SSIM", "primary", False, None, None, False))
-        for _, ss, se in clams_secondary:
-            body_rows.append(("CLAMS SSIM", "second-pass", True, ss, se, True))
+            body_rows.append(("CLAMS SSIM", "head", False, None, None, False))
+        for label, ss, se in clams_additional:
+            body_rows.append(("CLAMS SSIM", label, True, ss, se, True))
+
+    # Chronological order: detected segments by start time (head bars from
+    # both methods together, then additional bars); "not detected" rows last.
+    body_rows.sort(key=lambda r: (r[3] is None, r[3] if r[3] is not None else 0.0))
 
     cell = "padding: 6px 12px; border: 1px solid #e0d0c0;"
 
@@ -2724,7 +2897,7 @@ def make_bars_detection_comparison_html(qct_csv_path, clams_csv_path, agreement_
     rows_html = "".join(render_row(*r) for r in body_rows)
 
     # Plain-language summary line above the grid.
-    head_candidates = [r for r in (qct_head, clams_primary) if r]
+    head_candidates = [r for r in (qct_head, clams_head) if r]
     head_starts = [r[1] for r in head_candidates if r[1] is not None]
     head_ends = [r[2] for r in head_candidates if r[2] is not None]
     if head_starts and head_ends:
@@ -2733,7 +2906,7 @@ def make_bars_detection_comparison_html(qct_csv_path, clams_csv_path, agreement_
                         f"{_short_ts(hs)}–{_short_ts(he)} ({he - hs:.1f}s).")
     else:
         summary_text = "No color bars detected at the start of the file."
-    mid_count = len(qct_windowed) + len(clams_secondary)
+    mid_count = len(qct_windowed) + len(clams_additional)
     if mid_count:
         summary_text += f" {mid_count} additional mid-file detection(s) shown below (report-only)."
     summary_html = (
@@ -2742,16 +2915,20 @@ def make_bars_detection_comparison_html(qct_csv_path, clams_csv_path, agreement_
     )
 
     note_lines = [
-        "The authoritative head bars end time uses the latest end time across "
-        "both detectors. Mid-file bars (highlighted) are report-only and do "
-        "not affect downstream processing (BRNG-skip, access-file trim).",
+        "The authoritative head bars end time is the cross-validated consensus "
+        "of the two detectors: when their end times disagree, the disputed span "
+        "is arbitrated against the CLAMS SSIM scores. Additional bars "
+        "(highlighted) never drive access-file trimming, but every detected "
+        "bars region is excluded from BRNG, signalstats, and duplicate-frame "
+        "analysis, and from the color-bars evaluation.",
     ]
-    has_secondary = clams_secondary or qct_windowed
+    has_secondary = clams_additional or qct_windowed
     if has_secondary:
         note_lines.append(
             "Targeted re-scans are triggered when one detector finds a span the "
             "other missed: CLAMS rows fire from tone detections outside the primary "
-            "bars window; qct-parse rows are CLAMS-guided scans beyond the first 5 minutes."
+            "bars window; qct-parse rows are CLAMS-guided scans beyond the detected "
+            "head bars."
         )
     note = "".join(
         f'<p style="font-size: 13px; color: #4d2b12; margin: 10px 0 0 0;">{line}</p>'
@@ -3368,7 +3545,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
 
     # Border Detection Section
     if frame_outputs['border_visualization'] or frame_outputs['border_data']:
-        html += "<h3 style='color: #bf971b;'>Border Detection</h3>"
+        html += "<h3 id='section-border-detection' style='color: #bf971b;'>Border Detection</h3>"
         
         # Methodology explanation (collapsible)
         html += """
@@ -3690,7 +3867,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
     
     # Signalstats Analysis Section
     if frame_outputs['signalstats_analysis']:
-        html += "<h3 style='color: #bf971b;'>Signalstats Analysis</h3>"
+        html += "<h3 id='section-signalstats' style='color: #bf971b;'>Signalstats Analysis</h3>"
         
         # Methodology explanation (collapsible)
         html += """
@@ -3754,24 +3931,38 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     signalstats_data = json.load(f)
             
             diagnosis = signalstats_data.get('diagnosis', 'Analysis complete')
-            
-            # Determine assessment styling
-            if 'broadcast-compliant' in diagnosis.lower() or 'broadcast-safe' in diagnosis.lower():
+
+            # Determine assessment styling from the severity field when present;
+            # fall back to diagnosis keyword matching for results generated
+            # before severity existed
+            severity = signalstats_data.get('severity')
+            if not severity:
+                d = diagnosis.lower()
+                if 'broadcast-compliant' in d or 'broadcast-safe' in d:
+                    severity = 'ok'
+                elif 'acceptable' in d or 'minor' in d:
+                    severity = 'info'
+                elif 'significant' in d or 'requires' in d or 'severe' in d:
+                    severity = 'alert'
+                elif 'review' in d or 'detected' in d:
+                    severity = 'warning'
+
+            if severity == 'ok':
                 assessment_bg = '#d2ffed'
                 assessment_border = '#378d6a'
                 assessment_icon = '✅'
-            elif 'acceptable' in diagnosis.lower() or 'minor' in diagnosis.lower():
-                assessment_bg = '#e3f0ff'
-                assessment_border = '#5c6bc0'
-                assessment_icon = 'ℹ️'
-            elif 'significant' in diagnosis.lower() or 'requires' in diagnosis.lower() or 'severe' in diagnosis.lower():
+            elif severity == 'alert':
                 assessment_bg = '#ffbaba'
                 assessment_border = '#d32f2f'
                 assessment_icon = '⛔'
-            elif 'review' in diagnosis.lower() or 'detected' in diagnosis.lower():
+            elif severity == 'warning':
                 assessment_bg = '#fff3cd'
                 assessment_border = '#bf971b'
                 assessment_icon = '⚠️'
+            elif severity == 'info':
+                assessment_bg = '#e3f0ff'
+                assessment_border = '#5c6bc0'
+                assessment_icon = 'ℹ️'
             else:
                 assessment_bg = '#f5e9e3'
                 assessment_border = '#bf971b'
@@ -3791,19 +3982,31 @@ def generate_frame_analysis_html(frame_outputs, video_id):
             used_qctools = signalstats_data.get('used_qctools', False)
             
             if violation_pct is not None or max_brng is not None:
-                html += """
+                # Label the heading with the region the stats were measured on
+                # ('' for legacy results that didn't record it)
+                analyzed_region = signalstats_data.get('analyzed_region', '')
+                region_label = {
+                    'active_area': ' (measured on the active picture area)',
+                    'full_frame': ' (measured on the full frame — borders not excluded)',
+                    'mixed': ' (mixed: some periods active picture area, some full frame)',
+                }.get(analyzed_region, '')
+
+                html += f"""
                 <div style="margin: 16px 0;">
-                    <p style="font-weight: bold; margin-bottom: 8px; color: #4d2b12;">Overall Results</p>
+                    <p style="font-weight: bold; margin-bottom: 8px; color: #4d2b12;">Overall Results{region_label}</p>
                     <table style="border-collapse: collapse; width: auto; margin: 0;">
                 """
-                
+
                 stat_rows = []
                 if violation_pct is not None:
-                    stat_rows.append(("Frames with violations", f"{violation_pct:.1f}%"))
+                    stat_rows.append(("Frames with any out-of-range pixels",
+                                      f"{violation_pct:.1f}% of analyzed frames"))
                 if avg_brng is not None:
-                    stat_rows.append(("Average BRNG", f"{avg_brng:.4f}%"))
+                    stat_rows.append(("Average out-of-range share",
+                                      f"{avg_brng:.4f}% of pixels per analyzed frame"))
                 if max_brng is not None:
-                    stat_rows.append(("Maximum BRNG", f"{max_brng:.4f}%"))
+                    stat_rows.append(("Worst frame",
+                                      f"{max_brng:.4f}% of pixels out of range"))
                 stat_rows.append(("Data source", "QCTools + FFprobe comparison" if used_qctools else "FFprobe signalstats"))
                 
                 for label, value in stat_rows:
@@ -4025,7 +4228,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
     
     # BRNG Analysis Section
     if frame_outputs['brng_analysis']:
-        html += "<h3 style='color: #bf971b;'>BRNG Violation Analysis</h3>"
+        html += "<h3 id='section-brng-analysis' style='color: #bf971b;'>BRNG Violation Analysis</h3>"
         
         # Methodology explanation (collapsible)
         html += """
@@ -4144,11 +4347,11 @@ def generate_frame_analysis_html(frame_outputs, video_id):
             avg_violation = stats.get('average_violation_percentage', 0)
             max_violation = stats.get('max_violation_percentage', 0)
             
-            if max_violation > 50 or avg_violation > 10:
+            if avg_violation >= 10:
                 assessment_bg = '#ffbaba'
                 assessment_border = '#d32f2f'
                 assessment_icon = '⛔'
-            elif edge_pct > 50 or avg_violation > 1:
+            elif edge_pct > 50:
                 assessment_bg = '#fff3cd'
                 assessment_border = '#bf971b'
                 assessment_icon = '⚠️'
@@ -5335,8 +5538,9 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         return
     
     # Modified to get MediaConch policy content
-    (exiftool_output_path, mediainfo_output_path, ffprobe_output_path, 
-     mediaconch_csv, fixity_sidecar, mediaconch_policy_content, 
+    (exiftool_output_path, mediainfo_output_path, ffprobe_output_path,
+     mediaconch_csv, fixity_sidecar, fixity_summary_json,
+     mediaconch_policy_content,
      mediaconch_policy_name) = find_qc_metadata(destination_directory)
 
     if check_cancelled():
@@ -5362,6 +5566,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     mi_file_content, mi_file_filename = prepare_file_section(mediainfo_output_path)
     ffprobe_file_content, ffprobe_file_filename = prepare_file_section(ffprobe_output_path)
     fixity_file_content, fixity_file_filename = prepare_file_section(fixity_sidecar)
+    fixity_html = make_fixity_section_html(fixity_summary_json, fixity_file_content)
 
     # Get qct-parse thumbs if they exists
     thumbs_dict = find_qct_thumbs(report_directory)
@@ -5601,6 +5806,8 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         or tone_leak_html
     )
     toc_entries = []
+    if fixity_html:
+        toc_entries.append(('section-fixity', 'Fixity'))
     if mediaconch_csv:
         toc_entries.append(('section-mediaconch-csv', 'MediaConch CSV'))
     if mediaconch_policy_content and mediaconch_policy_name:
@@ -5608,7 +5815,21 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     if mkvalidator_html:
         toc_entries.append(('section-mkvalidator', 'mkvalidator'))
     if frame_analysis_html:
-        toc_entries.append(('section-frame-analysis', 'Frame Analysis Results'))
+        # Link to the individual frame-analysis subsections rather than the
+        # section heading; only list the ones that were actually rendered
+        frame_subsections = [
+            ('section-border-detection', 'Border Detection'),
+            ('section-signalstats', 'Signalstats Analysis'),
+            ('section-brng-analysis', 'BRNG Violation Analysis'),
+        ]
+        rendered = [
+            (anchor, label) for anchor, label in frame_subsections
+            if f"id='{anchor}'" in frame_analysis_html
+        ]
+        if rendered:
+            toc_entries.extend(rendered)
+        else:
+            toc_entries.append(('section-frame-analysis', 'Frame Analysis Results'))
     if bitplane_html:
         toc_entries.append(('section-bitplane', 'Bitplane Check'))
     if duplicate_frame_html:
@@ -5826,9 +6047,10 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     if check_cancelled():
         return
 
-    if fixity_sidecar:
+    if fixity_html:
         html_template += f"""
-        <pre>{fixity_file_content}</pre>
+        <h3 id="section-fixity">Fixity</h3>
+        {fixity_html}
         """
 
     if mediaconch_csv:
@@ -5894,13 +6116,13 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
             else:
                 colorbars_header = f"SMPTE Colorbars vs {video_id} Colorbars"
             html_template += f"""
-            <div id="section-colorbars" style="flex: 1 1 0; min-width: 0; overflow: hidden;">
+            <div id="section-colorbars" style="flex: 1 1 720px; max-width: 100%; min-width: 0; overflow: hidden;">
                 <h3>{colorbars_header}</h3>
                 {colorbars_html}
             </div>"""
         for region_name, wv_html in windowed_colorbars_html_list:
             html_template += f"""
-            <div id="section-colorbars-{region_name}" style="flex: 1 1 0; min-width: 0; overflow: hidden;">
+            <div id="section-colorbars-{region_name}" style="flex: 1 1 720px; max-width: 100%; min-width: 0; overflow: hidden;">
                 <h3>SMPTE Colorbars vs Additional {video_id} Colorbars</h3>
                 {wv_html}
             </div>"""
@@ -5951,6 +6173,12 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
             <ol style="margin: 4px 0 10px 20px; padding: 0;">
                 <li style="margin-bottom: 4px;"><strong>Primary pass</strong> — each detector scans the
                     file independently with its default thresholds.</li>
+                <li style="margin-bottom: 4px;"><strong>Head re-check</strong> — if the primary bars pass
+                    found nothing near the head of the file, the recorded SSIM scores over the first two
+                    minutes are re-evaluated at the relaxed threshold
+                    (<code style="background:#eee; padding:1px 4px; border-radius:2px;">0.6</code>).
+                    This catches real but degraded head bars that score just under the primary
+                    threshold.</li>
                 <li style="margin-bottom: 4px;"><strong>Second pass</strong> — when one detector finds a
                     span the other missed, a targeted windowed scan is run on the other detector with
                     <em>relaxed</em> thresholds (bars: SSIM ≥
@@ -5964,11 +6192,12 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
                     start and stop in lockstep.</li>
             </ol>
             <p style="margin: 0 0 10px 0;">
-                Second-pass rows are highlighted in the result tables below. All detected regions are
-                passed to qct-parse to guide additional windowed bars scans, and the head color bars
-                end time that drives the BRNG-skip window and access-file trim is merged from both
-                detectors — the later of the qct-parse and primary-pass CLAMS end times wins.
-                Second-pass detections never set that trim point.
+                Re-scan rows are highlighted in the result tables below. The head-bars end time used
+                downstream (the BRNG-skip window, access-file trim) is a <strong>cross-validated
+                consensus</strong> of qct-parse and CLAMS: when the two detectors disagree, the disputed
+                span is checked against the recorded SSIM scores — a span whose scores never approach
+                the bars threshold is rejected, and a head claim from one detector that the other
+                decisively contradicts is treated as unconfirmed rather than trusted.
             </p>
             <p style="margin: 0 0 6px 0; font-weight: bold;">Fragment merging:</p>
             <p style="margin: 0 0 10px 0;">
@@ -5980,7 +6209,10 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
             </p>
             <p style="margin: 0; color: #777;">
                 Both detectors write a per-pass durations CSV alongside the report; the bars detector
-                additionally writes a per-sampled-frame SSIM scores CSV for review.
+                additionally writes a per-sampled-frame SSIM scores CSV
+                (<code style="background:#eee; padding:1px 4px; border-radius:2px;">pass, frame,
+                timestamp, ssim_score, exceeds_threshold</code>). Those recorded scores are also what
+                the head re-check and the consensus arbitration read.
             </p>
         </div>
         """
