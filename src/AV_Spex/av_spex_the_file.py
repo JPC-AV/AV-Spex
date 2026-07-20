@@ -503,9 +503,6 @@ def run_cli_mode(args):
         config_io.import_configs(args.import_config)
         print(f"Configs imported from: {args.import_config}")
 
-    if args.print_config_profile:
-        config_edit.print_config(args.print_config_profile)
-
     # Handle individual frame analysis sub-step configuration
     frame_updates = {'outputs': {'frame_analysis': {}}}
 
@@ -676,6 +673,13 @@ def run_cli_mode(args):
                 "mediatrace custom-tag check only work on Matroska. Forcing them off. "
                 "The ffprobe signal-flow (ENCODER_SETTINGS) check is skipped for non-MKV input."
             )
+
+    # Print requested config profile(s) last, so the output reflects every
+    # config change applied above (profiles, tool toggles, frame-analysis,
+    # outputs, fixity, qct-parse sub-toggles, and MKV-only forcing) rather
+    # than the pre-update state.
+    if args.print_config_profile:
+        config_edit.print_config(args.print_config_profile)
 
     if args.dry_run_only:
         logger.critical("Dry run selected. Exiting now.")
