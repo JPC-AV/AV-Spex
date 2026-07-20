@@ -1320,6 +1320,7 @@ profile_step1 = {
             "barsDetection": False,
             "evaluateBars": False,
             "thumbExport": False,
+            "evaluateBarsReference": "detected",
             "audio_analysis": False,
             "detect_clamped_levels": False
         },
@@ -1393,6 +1394,7 @@ profile_step2 = {
             "barsDetection": True,
             "evaluateBars": True,
             "thumbExport": True,
+            "evaluateBarsReference": "detected",
             "audio_analysis": True,
             "detect_clamped_levels": True,
             "detect_chroma_phase_errors": True
@@ -1468,6 +1470,7 @@ profile_allOff = {
             "barsDetection": False,
             "evaluateBars": False,
             "thumbExport": False,
+            "evaluateBarsReference": "detected",
             "audio_analysis": False,
             "detect_clamped_levels": False,
             "detect_chroma_phase_errors": False,
@@ -1547,6 +1550,7 @@ profile_vendor = {
             "barsDetection": False,
             "evaluateBars": False,
             "thumbExport": False,
+            "evaluateBarsReference": "detected",
             "audio_analysis": False,
             "detect_clamped_levels": False
         },

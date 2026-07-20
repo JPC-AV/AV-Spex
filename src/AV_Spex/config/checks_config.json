@@ -72,6 +72,7 @@
       "barsDetection": true,
       "evaluateBars": true,
       "thumbExport": true,
+      "evaluateBarsReference": "detected",
       "audio_analysis": false,
       "detect_clamped_levels": false,
       "detect_chroma_phase_errors": false,
