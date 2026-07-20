@@ -5609,28 +5609,51 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     else:
         colorbars_eval_html = None
 
-    # Check if SMPTE fallback was used
-    smpte_fallback = False
+    # How the color-bars evaluation graded content, which drives the section
+    # headers and whether an info box accompanies the graph:
+    #   - "detected" reference, bars found -> detected-vs-SMPTE graph only
+    #   - "detected" reference, no bars    -> SMPTE fallback, info box only
+    #   - "smpte" reference, bars found    -> graph + "SMPTE selected" info box
+    #   - "smpte" reference, no bars       -> "SMPTE selected" info box only
+    # smpte_reference: SMPTE values were the evaluation reference (drives the
+    # "Values relative to ... thresholds" header). colorbars_box_only: the
+    # colorbars_html is just an info box with no graph (drives the graph
+    # section header).
+    smpte_selected_box = """
+                <div style="background-color: #fff3cd; padding: 15px; border: 1px solid #856404; margin: 10px 0; border-radius: 5px;">
+                    <p style="margin: 0; color: #856404;">Evaluation was performed against standard SMPTE color bar values (selected reference).</p>
+                </div>
+                """
+    smpte_reference = False
+    colorbars_box_only = False
     if colorbars_values_output:
         try:
             with open(colorbars_values_output, 'r') as f:
                 first_line = f.readline().strip()
             if first_line == "SMPTE_FALLBACK":
-                smpte_fallback = True
+                smpte_reference = True
+                colorbars_box_only = True
                 colorbars_html = """
                 <div style="background-color: #fff3cd; padding: 15px; border: 1px solid #856404; margin: 10px 0; border-radius: 5px;">
                     <p style="margin: 0; color: #856404;"><strong>No color bars detected.</strong> Evaluation was performed using standard SMPTE color bar values.</p>
                 </div>
                 """
             elif first_line == "SMPTE_SELECTED":
-                smpte_fallback = True
-                colorbars_html = """
-                <div style="background-color: #fff3cd; padding: 15px; border: 1px solid #856404; margin: 10px 0; border-radius: 5px;">
-                    <p style="margin: 0; color: #856404;">Evaluation was performed against standard SMPTE color bar values (selected reference).</p>
-                </div>
-                """
+                smpte_reference = True
+                colorbars_box_only = True
+                colorbars_html = smpte_selected_box
             else:
-                colorbars_html = make_color_bars_graphs(video_id, qctools_colorbars_duration_output, colorbars_values_output, thumbs_dict)
+                # Real detected-vs-SMPTE comparison CSV -> render the graph.
+                graph_html = make_color_bars_graphs(video_id, qctools_colorbars_duration_output, colorbars_values_output, thumbs_dict)
+                evaluate_reference = config_mgr.get_config('checks', ChecksConfig).tools.qct_parse.evaluateBarsReference
+                if evaluate_reference == 'smpte':
+                    # SMPTE was the evaluation reference but bars were detected:
+                    # show the informational graph with the "SMPTE selected" box
+                    # below it.
+                    smpte_reference = True
+                    colorbars_html = (graph_html or "") + smpte_selected_box
+                else:
+                    colorbars_html = graph_html
         except Exception as e:
             logger.error(f"Error reading colorbars values file: {e}")
             colorbars_html = None
@@ -6118,7 +6141,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     if colorbars_html or windowed_colorbars_html_list:
         html_template += '<div style="display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start;">'
         if colorbars_html:
-            if smpte_fallback:
+            if colorbars_box_only:
                 colorbars_header = "Color Bars Detection"
             else:
                 colorbars_header = f"SMPTE Colorbars vs {video_id} Colorbars"
@@ -6235,7 +6258,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
             """
 
     if colorbars_eval_html:
-        if smpte_fallback:
+        if smpte_reference:
             eval_header = "Values relative to SMPTE colorbar's thresholds"
         else:
             eval_header = "Values relative to colorbar's thresholds"
