@@ -332,6 +332,10 @@ class QCTParseToolConfig:
     barsDetection: bool
     evaluateBars: bool
     thumbExport: bool
+    # What Evaluate Bars measures content against: "detected" uses this
+    # file's own detected bars, falling back to standard SMPTE values if
+    # none are found; "smpte" always uses standard SMPTE values.
+    evaluateBarsReference: str = "detected"
     audio_analysis: bool = False
     detect_clamped_levels: bool = False
     detect_chroma_phase_errors: bool = False

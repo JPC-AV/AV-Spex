@@ -3961,8 +3961,26 @@ def run_qctparse(video_path, qctools_output_path, report_directory, check_cancel
     ######## Iterate Through the XML for Bars Evaluation ########
     if qct_parse['evaluateBars']:
         bars_fallback = False
+        smpte_selected = False
+        # Detected bar values measured for the report graph in "smpte" mode
+        # (the evaluation itself still grades against SMPTE); None when no bars
+        # were detected.
+        smpte_detected_values = None
+        # "detected" (default): grade content against this file's own detected
+        # bars, falling back to SMPTE values when none are found. "smpte":
+        # always grade against standard SMPTE values, regardless of detection.
+        evaluate_reference = qct_parse.get('evaluateBarsReference', 'detected')
 
-        if qct_parse['barsDetection'] and durationStart == "" and durationEnd == "":
+        if evaluate_reference == 'smpte':
+            logger.info("Evaluate Color Bars: grading against standard SMPTE color bars values (user-selected reference).\n")
+            maxBarsDict = asdict(spex_config.qct_parse_values.smpte_color_bars)
+            smpte_selected = True
+            # If bars were detected, measure them too so the report can still
+            # render the informational detected-vs-SMPTE graph. These values
+            # are graph-only; the evaluation grades against maxBarsDict (SMPTE).
+            if qct_parse['barsDetection'] and durationStart != "" and durationEnd != "":
+                smpte_detected_values = evalBars(startObj, pkt, durationStart, durationEnd, framesList, buffSize)
+        elif qct_parse['barsDetection'] and durationStart == "" and durationEnd == "":
             logger.warning(f"No color bars found - falling back to SMPTE color bars values from config.\n")
             maxBarsDict = asdict(spex_config.qct_parse_values.smpte_color_bars)
             bars_fallback = True
@@ -3977,10 +3995,20 @@ def run_qctparse(video_path, qctools_output_path, report_directory, check_cancel
             logger.debug(f"Starting qct-parse color bars evaluation on {baseName}\n")
             smpte_color_bars = asdict(spex_config.qct_parse_values.smpte_color_bars)
             colorbars_values_output = os.path.join(report_directory, "qct-parse_colorbars_values.csv")
-            
+
             if bars_fallback:
                 with open(colorbars_values_output, 'w') as f:
                     f.write("SMPTE_FALLBACK\n")
+            elif smpte_selected:
+                if smpte_detected_values is not None:
+                    # Bars were detected: write the real detected-vs-SMPTE
+                    # comparison CSV so the report renders the graph. The
+                    # report reads evaluateBarsReference to also show the
+                    # "SMPTE selected" info box above it.
+                    print_color_bar_values(baseName, smpte_color_bars, smpte_detected_values, colorbars_values_output)
+                else:
+                    with open(colorbars_values_output, 'w') as f:
+                        f.write("SMPTE_SELECTED\n")
             else:
                 print_color_bar_values(baseName, smpte_color_bars, maxBarsDict, colorbars_values_output)
             

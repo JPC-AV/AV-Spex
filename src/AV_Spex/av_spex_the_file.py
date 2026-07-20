@@ -110,6 +110,7 @@ class ParsedArguments:
     enable_audio_analysis: Optional[str]
     enable_chroma_phase_detection: Optional[str]
     enable_tone_leak_detection: Optional[str]
+    evaluate_bars_reference: Optional[str]
     access_trim_color_bars: Optional[str]
     access_crop_borders: Optional[str]
     access_crop_to_480: Optional[str]
@@ -218,6 +219,8 @@ The scripts will confirm that the digital files conform to predetermined specifi
                            help='Enable/disable chroma phase error detection in qct-parse (detects tape tracking artifacts where chroma collapses toward cyan/magenta). Auto-enables qct_parse.run_tool.')
     qct_group.add_argument('--enable-tone-leak-detection', choices=['on', 'off'],
                            help='Enable/disable reference-tone leak detection (1 kHz calibration tone crosstalk heard as a faint whine/squeak in quiet passages). Analyzes decoded audio directly. Auto-enables qct_parse.run_tool.')
+    qct_group.add_argument('--evaluate-bars-reference', choices=['detected', 'smpte'],
+                           help="What Evaluate Color Bars grades content against: 'detected' (default) uses this file's own detected bars, falling back to standard SMPTE values when none are found; 'smpte' always grades against standard SMPTE values. Only takes effect when evaluateBars is on.")
 
     # Frame analysis sub-steps + tuning
     frame_group = parser.add_argument_group("Frame analysis")
@@ -326,6 +329,7 @@ The scripts will confirm that the digital files conform to predetermined specifi
         enable_audio_analysis=getattr(args, 'enable_audio_analysis', None),
         enable_chroma_phase_detection=getattr(args, 'enable_chroma_phase_detection', None),
         enable_tone_leak_detection=getattr(args, 'enable_tone_leak_detection', None),
+        evaluate_bars_reference=getattr(args, 'evaluate_bars_reference', None),
         access_trim_color_bars=getattr(args, 'access_trim_color_bars', None),
         access_crop_borders=getattr(args, 'access_crop_borders', None),
         access_crop_to_480=getattr(args, 'access_crop_to_480', None),
@@ -499,9 +503,6 @@ def run_cli_mode(args):
         config_io.import_configs(args.import_config)
         print(f"Configs imported from: {args.import_config}")
 
-    if args.print_config_profile:
-        config_edit.print_config(args.print_config_profile)
-
     # Handle individual frame analysis sub-step configuration
     frame_updates = {'outputs': {'frame_analysis': {}}}
 
@@ -596,6 +597,8 @@ def run_cli_mode(args):
         tools_updates.setdefault('qct_parse', {})['detect_chroma_phase_errors'] = (args.enable_chroma_phase_detection == 'on')
     if args.enable_tone_leak_detection:
         tools_updates.setdefault('qct_parse', {})['detect_tone_leak'] = (args.enable_tone_leak_detection == 'on')
+    if args.evaluate_bars_reference:
+        tools_updates.setdefault('qct_parse', {})['evaluateBarsReference'] = args.evaluate_bars_reference
     if args.enable_clams_detection:
         tools_updates.setdefault('clams_detection', {})['run_tool'] = (args.enable_clams_detection == 'on')
 
@@ -626,6 +629,14 @@ def run_cli_mode(args):
         logger.warning(
             "access_file_exclude_flagged_audio is on but qct-parse audio analysis is off; "
             "the option will have no effect until --enable-audio-analysis on is set."
+        )
+
+    # Soft warning (no forcing): the bars-evaluation reference only matters
+    # when Evaluate Color Bars is running.
+    if args.evaluate_bars_reference and not final_checks.tools.qct_parse.evaluateBars:
+        logger.warning(
+            "--evaluate-bars-reference was set but qct_parse.evaluateBars is off; "
+            "the reference will have no effect until Evaluate Color Bars is enabled."
         )
 
     # Input video extension. Persist the selection, then auto-disable MKV-only
@@ -662,6 +673,13 @@ def run_cli_mode(args):
                 "mediatrace custom-tag check only work on Matroska. Forcing them off. "
                 "The ffprobe signal-flow (ENCODER_SETTINGS) check is skipped for non-MKV input."
             )
+
+    # Print requested config profile(s) last, so the output reflects every
+    # config change applied above (profiles, tool toggles, frame-analysis,
+    # outputs, fixity, qct-parse sub-toggles, and MKV-only forcing) rather
+    # than the pre-update state.
+    if args.print_config_profile:
+        config_edit.print_config(args.print_config_profile)
 
     if args.dry_run_only:
         logger.critical("Dry run selected. Exiting now.")
