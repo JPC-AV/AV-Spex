@@ -1,8 +1,8 @@
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QLabel, 
+    QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QLabel,
     QScrollArea, QPushButton, QComboBox, QCheckBox, QGroupBox,
     QMessageBox, QDialog, QTextEdit, QGridLayout, QListWidget,
-    QFileDialog
+    QFileDialog, QRadioButton, QButtonGroup
 )
 from PyQt6.QtCore import Qt
 
@@ -384,9 +384,37 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
         # Evaluate Bars
         self.evaluate_bars_check = QCheckBox("Evaluate Color Bars")
         self.evaluate_bars_check.setStyleSheet("font-weight: bold;")
-        evaluate_bars_desc = QLabel("Compare content to color bars for validation")
+        evaluate_bars_desc = QLabel("Compare video content against reference color bar values for validation")
         evaluate_bars_desc.setIndent(20)
-        
+
+        # Evaluate Bars reference: what the evaluation grades content against.
+        bars_ref_label = QLabel("Compare against:")
+        bars_ref_label.setIndent(40)
+        self.bars_ref_group = QButtonGroup(self)
+        self.bars_ref_detected_radio = QRadioButton("Bars detected in this video")
+        self.bars_ref_smpte_radio = QRadioButton("Standard SMPTE values")
+        self.bars_ref_group.addButton(self.bars_ref_detected_radio)
+        self.bars_ref_group.addButton(self.bars_ref_smpte_radio)
+        self.bars_ref_detected_radio.setChecked(True)
+        bars_ref_detected_row = QHBoxLayout()
+        bars_ref_detected_row.addSpacing(40)
+        bars_ref_detected_row.addWidget(self.bars_ref_detected_radio)
+        bars_ref_detected_row.addStretch()
+        bars_ref_detected_desc = QLabel(
+            "Uses levels measured from this file's own color bars. If no bars "
+            "are found, standard SMPTE values are used as a fallback.")
+        bars_ref_detected_desc.setIndent(60)
+        bars_ref_detected_desc.setWordWrap(True)
+        bars_ref_smpte_row = QHBoxLayout()
+        bars_ref_smpte_row.addSpacing(40)
+        bars_ref_smpte_row.addWidget(self.bars_ref_smpte_radio)
+        bars_ref_smpte_row.addStretch()
+        bars_ref_smpte_desc = QLabel(
+            "Always uses standard SMPTE color bar values, ignoring any bars "
+            "in the video.")
+        bars_ref_smpte_desc.setIndent(60)
+        bars_ref_smpte_desc.setWordWrap(True)
+
         # Thumb Export
         self.thumb_export_check = QCheckBox("Thumbnail Export")
         self.thumb_export_check.setStyleSheet("font-weight: bold;")
@@ -406,6 +434,11 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
         qct_parse_layout.addWidget(bars_detection_desc)
         qct_parse_layout.addWidget(self.evaluate_bars_check)
         qct_parse_layout.addWidget(evaluate_bars_desc)
+        qct_parse_layout.addWidget(bars_ref_label)
+        qct_parse_layout.addLayout(bars_ref_detected_row)
+        qct_parse_layout.addWidget(bars_ref_detected_desc)
+        qct_parse_layout.addLayout(bars_ref_smpte_row)
+        qct_parse_layout.addWidget(bars_ref_smpte_desc)
         qct_parse_layout.addWidget(self.thumb_export_check)
         qct_parse_layout.addWidget(thumb_export_desc)
         qct_parse_layout.addWidget(self.audio_analysis_check)
@@ -785,6 +818,9 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
             self.bars_detection_check.setChecked(qct_config.barsDetection)
             self.evaluate_bars_check.setChecked(qct_config.evaluateBars)
             self.thumb_export_check.setChecked(qct_config.thumbExport)
+            bars_ref = getattr(qct_config, 'evaluateBarsReference', 'detected')
+            self.bars_ref_smpte_radio.setChecked(bars_ref == 'smpte')
+            self.bars_ref_detected_radio.setChecked(bars_ref != 'smpte')
             self.audio_analysis_check.setChecked(getattr(qct_config, 'audio_analysis', False))
 
         except Exception as e:
@@ -885,8 +921,11 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
         self.bars_detection_check.setChecked(qct_config.barsDetection)
         self.evaluate_bars_check.setChecked(qct_config.evaluateBars)
         self.thumb_export_check.setChecked(qct_config.thumbExport)
+        bars_ref = getattr(qct_config, 'evaluateBarsReference', 'detected')
+        self.bars_ref_smpte_radio.setChecked(bars_ref == 'smpte')
+        self.bars_ref_detected_radio.setChecked(bars_ref != 'smpte')
         self.audio_analysis_check.setChecked(getattr(qct_config, 'audio_analysis', False))
-    
+
     def get_profile_from_form(self):
         """Create a ChecksProfile from the form data."""
         # Validate required fields
@@ -964,6 +1003,7 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
                 barsDetection=self.bars_detection_check.isChecked(),
                 evaluateBars=self.evaluate_bars_check.isChecked(),
                 thumbExport=self.thumb_export_check.isChecked(),
+                evaluateBarsReference=('smpte' if self.bars_ref_smpte_radio.isChecked() else 'detected'),
                 audio_analysis=self.audio_analysis_check.isChecked()
             )
         )

@@ -5622,6 +5622,13 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
                     <p style="margin: 0; color: #856404;"><strong>No color bars detected.</strong> Evaluation was performed using standard SMPTE color bar values.</p>
                 </div>
                 """
+            elif first_line == "SMPTE_SELECTED":
+                smpte_fallback = True
+                colorbars_html = """
+                <div style="background-color: #fff3cd; padding: 15px; border: 1px solid #856404; margin: 10px 0; border-radius: 5px;">
+                    <p style="margin: 0; color: #856404;">Evaluation was performed against standard SMPTE color bar values (selected reference).</p>
+                </div>
+                """
             else:
                 colorbars_html = make_color_bars_graphs(video_id, qctools_colorbars_duration_output, colorbars_values_output, thumbs_dict)
         except Exception as e:

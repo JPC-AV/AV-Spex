@@ -3961,8 +3961,17 @@ def run_qctparse(video_path, qctools_output_path, report_directory, check_cancel
     ######## Iterate Through the XML for Bars Evaluation ########
     if qct_parse['evaluateBars']:
         bars_fallback = False
+        smpte_selected = False
+        # "detected" (default): grade content against this file's own detected
+        # bars, falling back to SMPTE values when none are found. "smpte":
+        # always grade against standard SMPTE values, regardless of detection.
+        evaluate_reference = qct_parse.get('evaluateBarsReference', 'detected')
 
-        if qct_parse['barsDetection'] and durationStart == "" and durationEnd == "":
+        if evaluate_reference == 'smpte':
+            logger.info("Evaluate Color Bars: grading against standard SMPTE color bars values (user-selected reference).\n")
+            maxBarsDict = asdict(spex_config.qct_parse_values.smpte_color_bars)
+            smpte_selected = True
+        elif qct_parse['barsDetection'] and durationStart == "" and durationEnd == "":
             logger.warning(f"No color bars found - falling back to SMPTE color bars values from config.\n")
             maxBarsDict = asdict(spex_config.qct_parse_values.smpte_color_bars)
             bars_fallback = True
@@ -3977,10 +3986,13 @@ def run_qctparse(video_path, qctools_output_path, report_directory, check_cancel
             logger.debug(f"Starting qct-parse color bars evaluation on {baseName}\n")
             smpte_color_bars = asdict(spex_config.qct_parse_values.smpte_color_bars)
             colorbars_values_output = os.path.join(report_directory, "qct-parse_colorbars_values.csv")
-            
+
             if bars_fallback:
                 with open(colorbars_values_output, 'w') as f:
                     f.write("SMPTE_FALLBACK\n")
+            elif smpte_selected:
+                with open(colorbars_values_output, 'w') as f:
+                    f.write("SMPTE_SELECTED\n")
             else:
                 print_color_bar_values(baseName, smpte_color_bars, maxBarsDict, colorbars_values_output)
             
