@@ -147,7 +147,7 @@ The Complex tab configures the advanced analysis steps — typically run during 
 
 - **QCTools Report**: Run QCTools on the input video to generate the per-frame report that many of the checks below read, and set the report's file extension (`qctools.xml.gz` or `qctools.mkv`). If a report already exists in the `_qc_metadata` or `_vrecord_metadata` directory, it is reused instead of re-running.
 - **Color Bars & Tone**:
-  - **Detect Color Bars**: Find SMPTE color bars in the video content (via qct-parse). The detected section is used downstream to skip bars in BRNG analysis and trim them from the access file. Its sub-options **Evaluate Color Bars** (compare program content against the detected bars) and **Export Thumbnails** (save thumbnails of failing frames) become available when detection is on.
+  - **Detect Color Bars**: Find SMPTE color bars in the video content (via qct-parse). The detected section is used downstream to skip bars in BRNG analysis and trim them from the access file. Its sub-options **Evaluate Color Bars** (compare program content against a reference — either this file's own detected bars or standard SMPTE values) and **Export Thumbnails** (save thumbnails of failing frames) become available when detection is on.
   - **CLAMS Bars + Tone Detection**: Run the CLAMS SSIM-based SMPTE bars detector and cross-correlation tone detector together as one step; results are compared side-by-side with qct-parse and merged into the head color-bars end time (described in the Color Bars & Tone section below)
 - **Video Signal Checks** (each check is described in the Video Signal Checks section below):
   - **Detect Clamped Levels**: Broadcast-range level clamping from the analog-to-digital converter (via qct-parse)
@@ -225,7 +225,12 @@ When CLAMS Bars + Tone Detection is also enabled, the head-bars end time used fo
 
 ### Evaluate Color Bars
 
-Available when Detect Color Bars is on. Reads the signal values from the detected color bars and compares the program content against them, flagging frames that exceed the levels established by the bars. A summary and per-frame failures are written to CSVs and charted in the HTML report.
+Available when Detect Color Bars is on. Compares the program content against a reference set of color bar levels, flagging frames that exceed those levels. A summary and per-frame failures are written to CSVs and charted in the HTML report.
+
+Use **Compare against** to choose the reference:
+
+- **Bars detected in this video** (default): grades against the signal values measured from this file's own color bars. If no bars are found in the video, the standard SMPTE values are used as a fallback.
+- **Standard SMPTE values**: always grades against the standard SMPTE color bar values from the config, ignoring any bars detected in the video. When bars are also detected, the report still charts the file's measured bars alongside the SMPTE reference for comparison.
 
 ### Export Thumbnails
 
