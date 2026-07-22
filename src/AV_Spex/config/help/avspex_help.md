@@ -118,6 +118,22 @@ The Import tab is where you select input directories for processing and manage c
 
 ![The Import tab](import_tab_example.png)
 
+#### Import and Export Config
+
+The **Export Config** dropdown saves your current settings to a JSON file. Choose what to export from the dropdown, then pick a save location:
+
+- **Checks Config** — only which tools run and how (fixity settings, run/check toggles, output options)
+- **Spex Config** — only the expected values used for validation (codecs, formats, naming conventions, etc.)
+- **Spex and Checks Config** — both of the above in one file
+- **Custom profiles** — your custom Checks, ExifTool, MediaInfo, FFprobe, Filename, or Signal Flow profiles, for sharing with other users
+- **All Config** — everything, including custom profiles
+
+The **Import Config** button loads settings from a JSON file created by the Export feature. Importing Checks or Spex settings replaces the matching values in your current configuration. Imported custom profiles are added alongside your existing ones; if an imported profile has the same name as one you already have, it is added with an `(imported)` suffix rather than overwriting yours.
+
+The **Reset to Default** button restores all settings to the application's built-in defaults. This cannot be undone.
+
+**Example:** Suppose you have tuned the Checks and Spex settings for a collection of NTSC U-matic transfers and want a colleague to process a batch with identical settings. Select **Export Spex and Checks Config** from the Export dropdown and save the JSON file, then send it to your colleague. On their machine they click **Import Config**, choose that file, and their AV Spex now runs the same tools and validates against the same expected values as yours. When they later move on to a different collection, **Reset to Default** returns AV Spex to its shipped configuration.
+
 ### Checks Tab
 
 The Checks tab controls which tools and processing steps are run. It includes:
@@ -139,6 +155,8 @@ The Spex tab displays the expected metadata values that AV Spex validates agains
 - **Filename / Signal Flow**: Dropdown menus to select the active filename convention and signal flow equipment profiles
 - **ExifTool / MediaInfo / FFprobe**: Dropdown menus to select named expected-values profiles for each metadata tool (see the Custom Metadata Profiles section below)
 - **Open Section**: View the current expected values for any section (read-only for default profiles)
+
+The built-in default profiles are read-only, but you can edit the expected values by creating your own custom profile for the ExifTool, MediaInfo, or FFprobe sections — for example, to validate PAL transfers or a different audio codec. Each of those sections includes **Create Custom Profile...** and **Edit Selected Profile...** buttons for defining and modifying your own expected values. See the [Custom Metadata Profiles](#custom-metadata-profiles) section below for details.
 
 ![The Spex tab](spex_tab_example.png)
 
@@ -214,6 +232,8 @@ Checks described below as running "via qct-parse" read the QCTools report throug
 
 ## Color Bars & Tone
 
+![SMPTE color bars](smpte_bars_example.png)
+
 ### Detect Color Bars
 
 Detects SMPTE color bars in the video content (via qct-parse) by scanning the QCTools report for the signal signature of bars — steady near-peak luma and high chroma saturation held over consecutive frames. The detected section is written to `qct-parse_colorbars_durations.csv` and used downstream:
@@ -242,6 +262,8 @@ Available when Detect Color Bars is on. Exports thumbnail images of frames that 
 **CLAMS** (Computational Linguistics Applications for Multimedia Services) is an open-source project led by Brandeis University that builds reusable tools for analyzing audiovisual collections. AV Spex adapts two CLAMS apps — [app-barsdetection](https://github.com/clamsproject/app-barsdetection) and [app-tonedetection](https://github.com/clamsproject/app-tonedetection) — porting just their detection cores into the AV Spex pipeline (both distributed under the Apache License 2.0). The two detectors run together as a single step, before qct-parse, and their results both complement and feed into qct-parse's own bars detection.
 
 **Bars detection**: Frames are sampled (every 30th frame by default) and converted to grayscale. Each sample is compared to a bundled SMPTE color bars reference image using structural similarity (SSIM). A frame matches when its SSIM score exceeds the primary threshold (0.7), and a run of consecutive matching samples becomes a detected bars span once it exceeds the minimum frame count.
+
+![The grayscale SMPTE bars reference image used for SSIM comparison](clams_bars_reference_example.png)
 
 **Tone detection**: The audio track is decoded to 16 kHz mono and split into consecutive 250 ms chunks. Adjacent chunks are compared using cross-correlation; when their similarity stays at or above the tolerance (1.0 by default), the run is extended. Runs longer than the minimum duration (2000 ms by default) are reported as detected tones.
 
