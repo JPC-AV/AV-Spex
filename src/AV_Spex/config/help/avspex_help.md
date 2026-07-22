@@ -40,10 +40,11 @@ The following command line tools must be installed separately. The macOS package
 - **[MediaInfo](https://mediaarea.net/en/MediaInfo)** — container and stream metadata extraction
 - **[MKVToolNix](https://mkvtoolnix.download/)** — a set of tools to create, alter and inspect Matroska files
 - **[QCTools](https://bavc.org/programs/preservation/preservation-tools/)** — per-frame video quality analysis
+- **[mkvalidator](https://www.matroska.org/downloads/mkvalidator.html)** — verifies Matroska and WebM files for spec conformance
 
 Install with Homebrew:
 ```bash
-brew install exiftool ffmpeg mediaconch mediainfo mkvtoolnix qcli
+brew install exiftool ffmpeg mediaconch mediainfo mkvtoolnix qcli mkvalidator
 ```
 
 The AV Spex GUI checks for all required dependencies at startup.
