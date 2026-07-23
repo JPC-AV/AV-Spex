@@ -443,10 +443,10 @@ class ChecksWindow(QWidget, ThemeableMixin):
             run_desc.setIndent(20)
             
             self.tool_widgets[tool] = {'check': check_cb, 'run': run_cb}
-            tool_layout.addWidget(check_cb)
-            tool_layout.addWidget(check_desc)
             tool_layout.addWidget(run_cb)
             tool_layout.addWidget(run_desc)
+            tool_layout.addWidget(check_cb)
+            tool_layout.addWidget(check_desc)
             
             tool_group.setLayout(tool_layout)
             tools_layout.addWidget(tool_group)
