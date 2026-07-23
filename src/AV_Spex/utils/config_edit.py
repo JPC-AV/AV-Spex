@@ -1309,8 +1309,8 @@ profile_step1 = {
             "run_tool": True
         },
         "mkvalidator": {
-            "check_tool": False,
-            "run_tool": False
+            "check_tool": True,
+            "run_tool": True
         },
         "qctools": {
             "run_tool": False
