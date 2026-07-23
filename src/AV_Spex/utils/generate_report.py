@@ -3618,7 +3618,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
         if display_borders:
             # Display detection method
             detection_method = display_borders.get('detection_method', 'unknown')
-            method_label = "Simple (fixed borders)" if detection_method == 'simple_fixed' else "Sophisticated (quality-based detection)"
+            method_label = "Simple (fixed borders)" if detection_method.startswith('simple') else "Sophisticated (quality-based detection)"
             if 'refined' in detection_method:
                 method_label += " with iterative refinement"
             
