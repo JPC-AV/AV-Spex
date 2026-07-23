@@ -1,3 +1,6 @@
+import os
+import shutil
+
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QCheckBox, QLineEdit,
     QLabel, QComboBox, QPushButton, QScrollArea, QFileDialog, QMessageBox, QGridLayout
@@ -488,14 +491,21 @@ class ChecksWindow(QWidget, ThemeableMixin):
         
         self.import_policy_btn = QPushButton("Import New MediaConch Policy")
         theme_manager.style_button(self.import_policy_btn)
-        
+
         import_policy_desc = QLabel("Import a custom policy file for MediaConch validation")
+
+        self.export_policy_btn = QPushButton("Export Current MediaConch Policy")
+        theme_manager.style_button(self.export_policy_btn)
+
+        export_policy_desc = QLabel("Export the current policy file to share it")
 
         policy_layout.addWidget(current_policy_widget)
         policy_layout.addWidget(policies_label)
         policy_layout.addWidget(self.policy_combo)
         policy_layout.addWidget(self.import_policy_btn)
         policy_layout.addWidget(import_policy_desc)
+        policy_layout.addWidget(self.export_policy_btn)
+        policy_layout.addWidget(export_policy_desc)
 
         mediaconch_layout.addWidget(self.run_mediaconch_cb)
         mediaconch_layout.addWidget(run_mediaconch_desc)
@@ -591,6 +601,7 @@ class ChecksWindow(QWidget, ThemeableMixin):
         )
         self.policy_combo.currentTextChanged.connect(self.on_mediaconch_policy_changed)
         self.import_policy_btn.clicked.connect(self.open_policy_file_dialog)
+        self.export_policy_btn.clicked.connect(self.save_policy_file_dialog)
                     
 
     def load_config_values(self):
@@ -1124,3 +1135,45 @@ class ChecksWindow(QWidget, ThemeableMixin):
                         "Error",
                         "Failed to import MediaConch policy file. Check logs for details."
                     )
+
+    def save_policy_file_dialog(self):
+        """Open file dialog for exporting the current MediaConch policy file"""
+        checks_config = config_mgr.get_config('checks', ChecksConfig)
+        policy_name = checks_config.tools.mediaconch.mediaconch_policy
+
+        if not policy_name:
+            QMessageBox.warning(
+                self,
+                "No Policy Selected",
+                "There is no current MediaConch policy to export."
+            )
+            return
+
+        source_path = config_mgr.get_policy_path(policy_name)
+        if not source_path or not os.path.exists(source_path):
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Could not locate the policy file for '{policy_name}'."
+            )
+            return
+
+        dest_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export MediaConch Policy",
+            policy_name,
+            "XML files (*.xml)"
+        )
+
+        if dest_path:
+            # Ensure the exported file keeps an .xml extension
+            if not dest_path.lower().endswith('.xml'):
+                dest_path += '.xml'
+            try:
+                shutil.copyfile(source_path, dest_path)
+            except OSError as e:
+                QMessageBox.critical(
+                    self,
+                    "Error",
+                    f"Failed to export MediaConch policy file:\n{e}"
+                )
