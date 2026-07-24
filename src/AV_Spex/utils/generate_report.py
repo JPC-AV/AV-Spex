@@ -3991,33 +3991,88 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     'mixed': ' (mixed: some periods active picture area, some full frame)',
                 }.get(analyzed_region, '')
 
+                # Example-frame thumbnails (representative / worst) rendered by
+                # frame analysis. Each is a side-by-side original | magenta BRNG
+                # overlay image cropped to the measured region; framed inside the
+                # stat card it illustrates.
+                def _signalstats_frame_figure(thumb_key, timecode_key, caption_label):
+                    thumb_path = signalstats_data.get(thumb_key)
+                    if not thumb_path or not os.path.exists(thumb_path):
+                        return ""
+                    uri = image_to_data_uri(thumb_path, 'image/jpeg')
+                    if not uri:
+                        return ""
+                    timecode = signalstats_data.get(timecode_key)
+                    badge_text = f"{caption_label} &middot; {timecode}" if timecode else caption_label
+                    return f"""
+                        <figure style="margin: 12px 0 0 0;">
+                            <img src="{uri}" alt="{caption_label}"
+                                 style="display: block; width: 100%; height: auto;
+                                        border: 1px solid #e0d0c0; border-radius: 5px;">
+                            <figcaption style="margin-top: 8px;">
+                                <span style="display: inline-block; font-size: 11px; font-weight: 600;
+                                             color: #4d2b12; background-color: #f8f6f3;
+                                             border: 1px solid #e0d0c0; border-radius: 10px;
+                                             padding: 2px 10px;">{badge_text}</span>
+                            </figcaption>
+                        </figure>
+                    """
+
+                representative_fig = _signalstats_frame_figure(
+                    'representative_frame_thumbnail', 'representative_frame_timecode',
+                    'Representative frame')
+                worst_fig = _signalstats_frame_figure(
+                    'worst_frame_thumbnail', 'worst_frame_timecode', 'Worst frame')
+
+                # Each metric is rendered as a clean card: a muted uppercase label,
+                # a prominent value with a smaller descriptor, and (for the two
+                # share metrics) the illustrative frame framed inside the card.
+                def _signalstats_stat_card(label, value_main, value_desc, figure_html=""):
+                    return f"""
+                    <div style="background-color: #ffffff; border: 1px solid #e8ddd0;
+                                border-radius: 8px; padding: 12px 16px;
+                                box-shadow: 0 1px 2px rgba(77, 43, 18, 0.06);">
+                        <div style="display: flex; justify-content: space-between;
+                                    align-items: baseline; gap: 16px;">
+                            <span style="font-size: 11px; text-transform: uppercase;
+                                         letter-spacing: 0.06em; color: #8a7a6d;
+                                         font-weight: 600;">{label}</span>
+                            <span style="font-size: 22px; font-weight: 700; color: #4d2b12;
+                                         white-space: nowrap;">{value_main}</span>
+                        </div>
+                        <div style="font-size: 12px; color: #9a8a7d; text-align: right;
+                                    margin-top: 2px;">{value_desc}</div>
+                        {figure_html}
+                    </div>
+                    """
+
+                cards = []
+                if violation_pct is not None:
+                    cards.append(_signalstats_stat_card(
+                        "Frames with out-of-range pixels",
+                        f"{violation_pct:.1f}%", "of analyzed frames"))
+                if avg_brng is not None:
+                    cards.append(_signalstats_stat_card(
+                        "Average out-of-range share",
+                        f"{avg_brng:.4f}%", "of pixels per analyzed frame",
+                        representative_fig))
+                if max_brng is not None:
+                    cards.append(_signalstats_stat_card(
+                        "Worst frame",
+                        f"{max_brng:.4f}%", "of pixels out of range",
+                        worst_fig))
+
+                source_text = "QCTools + FFprobe comparison" if used_qctools else "FFprobe signalstats"
+
                 html += f"""
                 <div style="margin: 16px 0;">
-                    <p style="font-weight: bold; margin-bottom: 8px; color: #4d2b12;">Overall Results{region_label}</p>
-                    <table style="border-collapse: collapse; width: auto; margin: 0;">
+                    <p style="font-weight: bold; margin-bottom: 10px; color: #4d2b12;">Overall Results{region_label}</p>
+                    <div style="display: flex; flex-direction: column; gap: 10px; max-width: 560px;">
+                        {''.join(cards)}
+                    </div>
+                    <p style="font-size: 11px; color: #9a8a7d; margin: 8px 2px 0;">Data source: {source_text}</p>
+                </div>
                 """
-
-                stat_rows = []
-                if violation_pct is not None:
-                    stat_rows.append(("Frames with any out-of-range pixels",
-                                      f"{violation_pct:.1f}% of analyzed frames"))
-                if avg_brng is not None:
-                    stat_rows.append(("Average out-of-range share",
-                                      f"{avg_brng:.4f}% of pixels per analyzed frame"))
-                if max_brng is not None:
-                    stat_rows.append(("Worst frame",
-                                      f"{max_brng:.4f}% of pixels out of range"))
-                stat_rows.append(("Data source", "QCTools + FFprobe comparison" if used_qctools else "FFprobe signalstats"))
-                
-                for label, value in stat_rows:
-                    html += f"""
-                    <tr>
-                        <td style="padding: 4px 12px 4px 0; color: #555; font-size: 13px; border: none; white-space: nowrap;">{label}</td>
-                        <td style="padding: 4px 0; font-weight: bold; font-size: 13px; border: none;">{value}</td>
-                    </tr>
-                    """
-                
-                html += "</table></div>"
             
             # Display results for active area (legacy format)
             if signalstats_data.get('results', {}).get('active_area'):
