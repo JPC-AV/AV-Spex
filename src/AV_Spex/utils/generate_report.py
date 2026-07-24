@@ -3991,6 +3991,36 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     'mixed': ' (mixed: some periods active picture area, some full frame)',
                 }.get(analyzed_region, '')
 
+                # Example-frame thumbnails (representative / worst) rendered by
+                # frame analysis. Each is a side-by-side original | magenta BRNG
+                # overlay image cropped to the measured region; shown beside the
+                # stat it illustrates.
+                def _signalstats_frame_cell(thumb_key, timecode_key, caption_label):
+                    thumb_path = signalstats_data.get(thumb_key)
+                    if not thumb_path or not os.path.exists(thumb_path):
+                        return ""
+                    uri = image_to_data_uri(thumb_path, 'image/jpeg')
+                    if not uri:
+                        return ""
+                    timecode = signalstats_data.get(timecode_key)
+                    tc_suffix = f" at {timecode}" if timecode else ""
+                    return f"""
+                        <figure style="margin: 0;">
+                            <img src="{uri}" alt="{caption_label}"
+                                 style="max-width: 360px; width: 100%; height: auto;
+                                        border: 1px solid #ddd; border-radius: 3px; display: block;">
+                            <figcaption style="font-size: 11px; color: #777; margin-top: 3px;">
+                                {caption_label}{tc_suffix}
+                            </figcaption>
+                        </figure>
+                    """
+
+                representative_cell = _signalstats_frame_cell(
+                    'representative_frame_thumbnail', 'representative_frame_timecode',
+                    'Representative frame')
+                worst_cell = _signalstats_frame_cell(
+                    'worst_frame_thumbnail', 'worst_frame_timecode', 'Worst frame')
+
                 html += f"""
                 <div style="margin: 16px 0;">
                     <p style="font-weight: bold; margin-bottom: 8px; color: #4d2b12;">Overall Results{region_label}</p>
@@ -4000,23 +4030,28 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                 stat_rows = []
                 if violation_pct is not None:
                     stat_rows.append(("Frames with any out-of-range pixels",
-                                      f"{violation_pct:.1f}% of analyzed frames"))
+                                      f"{violation_pct:.1f}% of analyzed frames", ""))
                 if avg_brng is not None:
                     stat_rows.append(("Average out-of-range share",
-                                      f"{avg_brng:.4f}% of pixels per analyzed frame"))
+                                      f"{avg_brng:.4f}% of pixels per analyzed frame",
+                                      representative_cell))
                 if max_brng is not None:
                     stat_rows.append(("Worst frame",
-                                      f"{max_brng:.4f}% of pixels out of range"))
-                stat_rows.append(("Data source", "QCTools + FFprobe comparison" if used_qctools else "FFprobe signalstats"))
-                
-                for label, value in stat_rows:
+                                      f"{max_brng:.4f}% of pixels out of range",
+                                      worst_cell))
+                stat_rows.append(("Data source",
+                                  "QCTools + FFprobe comparison" if used_qctools else "FFprobe signalstats",
+                                  ""))
+
+                for label, value, thumb_cell in stat_rows:
                     html += f"""
                     <tr>
-                        <td style="padding: 4px 12px 4px 0; color: #555; font-size: 13px; border: none; white-space: nowrap;">{label}</td>
-                        <td style="padding: 4px 0; font-weight: bold; font-size: 13px; border: none;">{value}</td>
+                        <td style="padding: 4px 12px 4px 0; color: #555; font-size: 13px; border: none; white-space: nowrap; vertical-align: top;">{label}</td>
+                        <td style="padding: 4px 16px 4px 0; font-weight: bold; font-size: 13px; border: none; vertical-align: top;">{value}</td>
+                        <td style="padding: 4px 0; border: none; vertical-align: top;">{thumb_cell}</td>
                     </tr>
                     """
-                
+
                 html += "</table></div>"
             
             # Display results for active area (legacy format)
