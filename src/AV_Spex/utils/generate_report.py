@@ -5598,7 +5598,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     elif qctools_bars_eval_check_output and failureInfoSummary_colorbars is None:
        color_bars_segment = f"""
         <div style="display: flex; flex-direction: column; align-items: start; background-color: #f5e9e3; padding: 10px;"> 
-            <p><b>All QCTools values of the video file are within the peak values of the color bars.</b></p>
+            <p><b>All QCTools values of the video file are within the median values of the color bars.</b></p>
         </div>
         """
        colorbars_eval_html = f"""
