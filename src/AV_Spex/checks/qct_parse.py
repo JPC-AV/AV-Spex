@@ -556,7 +556,14 @@ def validateEntireVideoAsBars(startObj, pkt, durationStart, framesList, buffSize
 
 def evalBars(startObj,pkt,durationStart,durationEnd,framesList,buffSize):
     """
-    Find maximum or minimum values for specific QCTools keys inside the duration of the color bars. 
+    Find the mean values for specific QCTools keys inside the duration of the color bars.
+
+    The value returned for each key is the average across every measured frame in the
+    detected bars region, rather than a single peak/trough frame. Averaging keeps
+    transient outliers — most notably the frames where the bars "crash" in or out — from
+    defining the threshold, so the returned values more faithfully represent the steady
+    color bars recorded on the tape. The frame buffer (buffSize) additionally delays the
+    start of measurement, so the leading crash-in frames are excluded from the mean.
 
     Parameters:
         pkt (str): The attribute key used to extract timestamps from <frame> tag in qctools.xml.gz.
@@ -565,24 +572,19 @@ def evalBars(startObj,pkt,durationStart,durationEnd,framesList,buffSize):
         framesList (list): List of frameDict dictionaries
 
     Returns:
-        maxBarsDict (dict): Returns dictionary of max or min value of corresponding QCTools keys
+        maxBarsDict (dict): Returns dictionary of the mean value of corresponding QCTools keys
     """
-    
+
     etree = load_etree()
     if etree is None:
         return None
-    
+
     # Define the keys for which you want to calculate the average
     keys_to_check = ['YMAX', 'YMIN', 'UMIN', 'UMAX', 'VMIN', 'VMAX', 'SATMAX', 'SATMIN']
-    # Initialize a dictionary to store the highest values for each key
-    maxBarsDict = {}
-    # adds the list keys_to_check as keys to a dictionary
-    for key_being_checked in keys_to_check:
-        # assign 'dummy' threshold to be overwritten
-        if "MAX" in key_being_checked:
-            maxBarsDict[key_being_checked] = 0
-        elif "MIN" in key_being_checked:
-            maxBarsDict[key_being_checked] = 1023
+    # Accumulate a running sum and frame count per key so we can return the mean
+    # across all measured bars frames.
+    barsSums = {key_being_checked: 0.0 for key_being_checked in keys_to_check}
+    barsCounts = {key_being_checked: 0 for key_being_checked in keys_to_check}
 
     # Use the safe parser with encoding fallback
     parser_iter = safe_gzip_iterparse(startObj, etree)
@@ -600,29 +602,31 @@ def evalBars(startObj,pkt,durationStart,durationEnd,framesList,buffSize):
                     frameDict = {}  # start an empty dict for the new frame
                     frameDict[pkt] = frame_pkt_dts_time  # give the dict the timestamp, which we have now
                     for t in list(elem):    # iterating through each attribute for each element
-                        keySplit = t.attrib['key'].split(".")   # split the names by dots 
+                        keySplit = t.attrib['key'].split(".")   # split the names by dots
                         keyName = str(keySplit[-1])             # get just the last word for the key name
                         frameDict[keyName] = t.attrib['value']	# add each attribute to the frame dictionary
                     framesList.append(frameDict)
-                    if len(framesList) == buffSize:	# wait till the buffer is full to start detecting bars
-                        ## This is where the bars detection magic actually happens
+                    if len(framesList) == buffSize:	# wait till the buffer is full to start measuring bars
+                        ## This is where the bars measurement magic actually happens
                         for colorbar_key in keys_to_check:
                             if colorbar_key in frameDict:
-                                if "MAX" in colorbar_key:
-                                    # Convert the value to float and compare it with the current highest value
-                                    value = float(frameDict[colorbar_key])
-                                    if value > maxBarsDict[colorbar_key]:
-                                        maxBarsDict[colorbar_key] = value
-                                elif "MIN" in colorbar_key:
-                                    # Convert the value to float and compare it with the current highest value
-                                    value = float(frameDict[colorbar_key])
-                                    if value < maxBarsDict[colorbar_key]:
-                                        maxBarsDict[colorbar_key] = value
-                                # Convert highest values to integer
-                                maxBarsDict = {colorbar_key: int(value) for colorbar_key, value in maxBarsDict.items()}
+                                # Accumulate the value so the region mean can be
+                                # computed once every frame has been visited.
+                                barsSums[colorbar_key] += float(frameDict[colorbar_key])
+                                barsCounts[colorbar_key] += 1
     except Exception as e:
         logger.error(f"Error during bars evaluation parsing: {e}")
-							
+
+    # Compute the mean per key, rounded to an integer to match the QCTools value
+    # scale. Keys with no measured frames fall back to a permissive extreme so the
+    # downstream threshold never rejects everything.
+    maxBarsDict = {}
+    for colorbar_key in keys_to_check:
+        if barsCounts[colorbar_key] > 0:
+            maxBarsDict[colorbar_key] = int(round(barsSums[colorbar_key] / barsCounts[colorbar_key]))
+        else:
+            maxBarsDict[colorbar_key] = 0 if "MAX" in colorbar_key else 1023
+
     return maxBarsDict
 
 
@@ -859,8 +863,8 @@ def print_color_bar_keys(qctools_colorbars_values_output, profile, color_bar_key
     """
     Writes color bar keys and their threshold values to a CSV file.
 
-    If the provided `profile` keys match the expected `color_bar_keys`, 
-    the function writes a header indicating the thresholds are based on peak QCTools filter values.
+    If the provided `profile` keys match the expected `color_bar_keys`,
+    the function writes a header indicating the thresholds are based on the mean QCTools filter values.
     Then, it writes each key and its corresponding threshold value from the `profile`.
 
     Args:
@@ -872,7 +876,7 @@ def print_color_bar_keys(qctools_colorbars_values_output, profile, color_bar_key
     with open(qctools_colorbars_values_output, 'w') as csvfile:
         writer = csv.writer(csvfile)
         if set(profile.keys()) == set(color_bar_keys):
-            writer.writerow(["The thresholds defined by the peak values of QCTools filters in the identified color bars are:"])
+            writer.writerow(["The thresholds defined by the mean values of QCTools filters in the identified color bars are:"])
             for key, value in profile.items():
                 writer.writerow([key, value])
 
