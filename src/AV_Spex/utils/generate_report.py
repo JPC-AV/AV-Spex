@@ -3993,8 +3993,8 @@ def generate_frame_analysis_html(frame_outputs, video_id):
 
                 # Example-frame thumbnails (representative / worst) rendered by
                 # frame analysis. Each is a side-by-side original | magenta BRNG
-                # overlay image cropped to the measured region; shown beside the
-                # stat it illustrates.
+                # overlay image cropped to the measured region; shown underneath
+                # the stat it illustrates.
                 def _signalstats_frame_cell(thumb_key, timecode_key, caption_label):
                     thumb_path = signalstats_data.get(thumb_key)
                     if not thumb_path or not os.path.exists(thumb_path):
@@ -4047,8 +4047,15 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     html += f"""
                     <tr>
                         <td style="padding: 4px 12px 4px 0; color: #555; font-size: 13px; border: none; white-space: nowrap; vertical-align: top;">{label}</td>
-                        <td style="padding: 4px 16px 4px 0; font-weight: bold; font-size: 13px; border: none; vertical-align: top;">{value}</td>
-                        <td style="padding: 4px 0; border: none; vertical-align: top;">{thumb_cell}</td>
+                        <td style="padding: 4px 0; font-weight: bold; font-size: 13px; border: none; vertical-align: top;">{value}</td>
+                    </tr>
+                    """
+                    # Place the example frame directly beneath its stat row,
+                    # spanning both columns.
+                    if thumb_cell:
+                        html += f"""
+                    <tr>
+                        <td colspan="2" style="padding: 2px 0 10px 0; border: none;">{thumb_cell}</td>
                     </tr>
                     """
 
