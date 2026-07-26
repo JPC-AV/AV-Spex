@@ -3534,7 +3534,58 @@ def select_failure_peaks(failure_csv_path, duration=None, max_peaks=5):
     return peaks
 
 
-def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_duration=None, frame_rate=None):
+def get_frame_analysis_periods(frame_outputs):
+    """
+    Extract the frame-analysis sampling periods from the frame analysis outputs.
+
+    Reads analysis_periods ([start_seconds, duration] pairs) from the enhanced
+    frame analysis JSON (signalstats first, then brng_analysis), falling back to
+    the standalone signalstats/BRNG sidecars.
+
+    Args:
+        frame_outputs (dict): Output of find_frame_analysis_outputs(), or None.
+
+    Returns:
+        list of (start_seconds, end_seconds) tuples, sorted by start; empty if
+        no periods were recorded.
+    """
+    if not frame_outputs:
+        return []
+
+    candidates = []
+    if frame_outputs.get('enhanced_frame_analysis'):
+        try:
+            with open(frame_outputs['enhanced_frame_analysis'], 'r') as f:
+                enhanced_data = json.load(f)
+            candidates.append((enhanced_data.get('signalstats') or {}).get('analysis_periods'))
+            candidates.append((enhanced_data.get('brng_analysis') or {}).get('analysis_periods'))
+        except Exception as e:
+            logger.error(f"Error reading enhanced frame analysis JSON: {e}")
+
+    # Standalone sidecars: signalstats_analysis may already be a dict, brng_analysis is a path
+    for key in ('signalstats_analysis', 'brng_analysis'):
+        source = frame_outputs.get(key)
+        if not source:
+            continue
+        if isinstance(source, dict):
+            candidates.append(source.get('analysis_periods'))
+        else:
+            try:
+                with open(source, 'r') as f:
+                    candidates.append(json.load(f).get('analysis_periods'))
+            except Exception as e:
+                logger.error(f"Error reading frame analysis sidecar {source}: {e}")
+
+    for periods in candidates:
+        if periods:
+            try:
+                return sorted((float(start), float(start) + float(duration)) for start, duration in periods)
+            except (TypeError, ValueError) as e:
+                logger.error(f"Malformed analysis_periods in frame analysis output: {e}")
+    return []
+
+
+def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_duration=None, frame_rate=None, analysis_periods=None):
     """
     Build the failure-distribution timeline for the color bars evaluation.
 
@@ -3555,6 +3606,9 @@ def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_d
                                           back to the last failure timestamp.
         frame_rate (float, optional): Frames per second (ffprobe); falls back
                                       to 29.97.
+        analysis_periods (list, optional): (start_seconds, end_seconds) tuples
+                                           from get_frame_analysis_periods();
+                                           drawn as shaded bands on the plot.
 
     Returns:
         str or None: HTML string containing the timeline, None if there is no data.
@@ -3599,9 +3653,26 @@ def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_d
             hovertemplate='%{text} &middot; ' + tag + ': %{y:.0f}% of frames<extra></extra>',
         ))
 
-    # Dotted connector at each peak plus its thumbnail anchored in the top margin
+    # Shaded bands mark the periods sampled by frame analysis, behind the traces
     images = []
     shapes = []
+    analysis_periods = analysis_periods or []
+    for period_start, period_end in analysis_periods:
+        shapes.append(dict(
+            type='rect', xref='x', yref='paper',
+            x0=period_start, x1=min(period_end, duration), y0=0, y1=1,
+            fillcolor='rgba(77,43,18,0.10)', line=dict(width=0), layer='below',
+        ))
+    if analysis_periods:
+        # Legend-only proxy so the bands are identifiable (shapes don't get legend entries)
+        fig.add_trace(go.Scatter(
+            x=[None], y=[None], mode='markers',
+            marker=dict(symbol='square', size=12, color='rgba(77,43,18,0.15)',
+                        line=dict(color='#4d2b12', width=1)),
+            name='Frame analysis period',
+        ))
+
+    # Dotted connector at each peak plus its thumbnail anchored in the top margin
     thumb_sizex = duration * 0.085
     for peak in peaks:
         peak_x = peak['seconds']
@@ -3715,14 +3786,17 @@ def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_d
     """
 
     bin_label = f"{bin_width:.1f}".rstrip('0').rstrip('.')
+    periods_note = ""
+    if analysis_periods:
+        periods_note = " Shaded bands mark the periods sampled by frame analysis (signalstats/BRNG)."
     timeline_html = f"""
     {FAILURE_SECTION_JS}
     <div style="background-color: #f5e9e3; padding: 10px; margin-top: 10px;">
         <p><b>Failure distribution over the video's duration</b></p>
         <p style="font-size: 13px;">Each line shows, per {bin_label}-second interval, the percentage of frames
-        whose value fell outside that tag's threshold &mdash; peaks mark the sections of the tape that need review.
+        whose value fell outside that tag's threshold.
         Dotted lines mark the largest failure clusters; the thumbnail above each shows a representative frame
-        (out-of-range areas highlighted in cyan).</p>
+        (out-of-range areas highlighted in cyan).{periods_note}</p>
         {chart_html}
         {thumb_strip_html}
         {full_table_html}
@@ -6020,7 +6094,8 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         colorbars_eval_html = make_profile_piecharts(qctools_bars_eval_check_output, thumbs_dict, failureInfoSummary_colorbars, video_id, failure_csv_path=colorbars_eval_fails_csv_path, check_cancelled=check_cancelled, failure_details=False)
         colorbars_timeline_html = make_eval_bars_timeline_html(
             colorbars_eval_fails_csv_path, video_id, peaks=colorbars_peaks,
-            video_duration=eval_video_duration, frame_rate=eval_video_fps)
+            video_duration=eval_video_duration, frame_rate=eval_video_fps,
+            analysis_periods=get_frame_analysis_periods(frame_outputs))
         if colorbars_timeline_html:
             colorbars_eval_html = (colorbars_eval_html or "") + colorbars_timeline_html
     elif qctools_bars_eval_check_output and failureInfoSummary_colorbars is None:

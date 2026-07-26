@@ -6,6 +6,7 @@ from AV_Spex.utils.generate_report import (
     make_eval_bars_timeline_html,
     make_profile_piecharts,
     summarize_failures,
+    get_frame_analysis_periods,
 )
 
 
@@ -102,6 +103,40 @@ def test_make_eval_bars_timeline_html_with_thumbs(two_cluster_csv, tmp_path):
 
 def test_make_eval_bars_timeline_html_missing_file(tmp_path):
     assert make_eval_bars_timeline_html(str(tmp_path / "nope.csv"), "JPC_AV_TEST") is None
+
+
+def test_make_eval_bars_timeline_html_analysis_periods(two_cluster_csv):
+    html = make_eval_bars_timeline_html(two_cluster_csv, "JPC_AV_TEST",
+                                        video_duration=200.0, frame_rate=29.97,
+                                        analysis_periods=[(20.0, 80.0), (120.0, 180.0)])
+    assert "Frame analysis period" in html
+    assert "Shaded bands mark the periods" in html
+
+    # Without periods, no band legend or note
+    html_no_periods = make_eval_bars_timeline_html(two_cluster_csv, "JPC_AV_TEST",
+                                                   video_duration=200.0, frame_rate=29.97)
+    assert "Frame analysis period" not in html_no_periods
+    assert "Shaded bands" not in html_no_periods
+
+
+def test_get_frame_analysis_periods_from_enhanced_json(tmp_path):
+    import json
+    enhanced = {
+        "signalstats": {"analysis_periods": [[94.9, 60], [209.9, 60]]},
+        "brng_analysis": {"analysis_periods": [[94.9, 60], [209.9, 60]]},
+    }
+    json_path = tmp_path / "JPC_AV_TEST_enhanced_frame_analysis.json"
+    json_path.write_text(json.dumps(enhanced))
+
+    periods = get_frame_analysis_periods({'enhanced_frame_analysis': str(json_path)})
+    assert periods == [(94.9, 154.9), (209.9, 269.9)]
+
+
+def test_get_frame_analysis_periods_empty():
+    assert get_frame_analysis_periods(None) == []
+    assert get_frame_analysis_periods({}) == []
+    assert get_frame_analysis_periods({'enhanced_frame_analysis': None,
+                                       'signalstats_analysis': {'analysis_periods': []}}) == []
 
 
 def test_make_profile_piecharts_without_failure_details(two_cluster_csv, tmp_path):
