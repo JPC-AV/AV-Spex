@@ -157,6 +157,20 @@ def test_get_frame_analysis_black_segments_empty(tmp_path):
     assert get_frame_analysis_black_segments({'enhanced_frame_analysis': str(json_path)}) == []
 
 
+def test_make_eval_bars_timeline_html_bars_regions(two_cluster_csv):
+    html = make_eval_bars_timeline_html(two_cluster_csv, "JPC_AV_TEST",
+                                        video_duration=200.0, frame_rate=29.97,
+                                        bars_regions=[(2.7, 60.8), (150.0, 170.0)])
+    assert "Detected color bars" in html
+    assert "Plum bands, underlined by a solid rule, mark detected color bars" in html
+    # Each region draws two shapes: the wash and the baseline rule
+    assert html.count('"fillcolor":"#a8548f"') == 2
+
+    html_without = make_eval_bars_timeline_html(two_cluster_csv, "JPC_AV_TEST",
+                                                video_duration=200.0, frame_rate=29.97)
+    assert "Detected color bars" not in html_without
+
+
 def test_make_eval_bars_timeline_html_black_segments(two_cluster_csv):
     html = make_eval_bars_timeline_html(two_cluster_csv, "JPC_AV_TEST",
                                         video_duration=200.0, frame_rate=29.97,

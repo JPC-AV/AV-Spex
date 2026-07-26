@@ -3619,7 +3619,7 @@ def get_frame_analysis_black_segments(frame_outputs):
         return []
 
 
-def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_duration=None, frame_rate=None, analysis_periods=None, black_segments=None):
+def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_duration=None, frame_rate=None, analysis_periods=None, black_segments=None, bars_regions=None):
     """
     Build the failure-distribution timeline for the color bars evaluation.
 
@@ -3646,6 +3646,11 @@ def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_d
         black_segments (list, optional): (start_seconds, end_seconds) tuples
                                          from get_frame_analysis_black_segments();
                                          drawn as dark bands on the plot.
+        bars_regions (list, optional): (start_seconds, end_seconds) tuples of
+                                       detected color bars (head + additional,
+                                       from _parse_bars_durations_csv); drawn
+                                       as plum bands with a saturated rule
+                                       along the baseline.
 
     Returns:
         str or None: HTML string containing the timeline, None if there is no data.
@@ -3726,6 +3731,36 @@ def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_d
             marker=dict(symbol='square', size=12, color='rgba(70,70,70,0.35)',
                         line=dict(color='#555555', width=1)),
             name='Detected black segment',
+        ))
+
+    # Detected color bars (head + additional) — bars are excluded from the
+    # evaluation, so these explain zero-failure stretches. Translucent washes
+    # over the cream surface all converge on the same muddy pastel (the tan
+    # period band and the gray black-segment band are only OKLab ΔE ~7 apart
+    # as rendered), so identity here rides on the saturated plum rule drawn
+    # along the baseline rather than on the wash, which stays light enough to
+    # keep the traces readable.
+    bars_regions = bars_regions or []
+    for bars_start, bars_end in bars_regions:
+        bars_x1 = min(bars_end, duration)
+        shapes.append(dict(
+            type='rect', xref='x', yref='paper',
+            x0=bars_start, x1=bars_x1, y0=0, y1=1,
+            fillcolor='rgba(168,84,143,0.18)', line=dict(color='#a8548f', width=1),
+            layer='below',
+        ))
+        shapes.append(dict(
+            type='rect', xref='x', yref='paper',
+            x0=bars_start, x1=bars_x1, y0=0, y1=0.03,
+            fillcolor='#a8548f', line=dict(width=0),
+            layer='below',
+        ))
+    if bars_regions:
+        fig.add_trace(go.Scatter(
+            x=[None], y=[None], mode='markers',
+            marker=dict(symbol='square', size=12, color='#a8548f',
+                        line=dict(color='#a8548f', width=2)),
+            name='Detected color bars',
         ))
 
     # Dotted connector at each peak plus its thumbnail anchored in the top margin
@@ -3847,6 +3882,8 @@ def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_d
         periods_note = " Shaded bands mark the periods sampled by frame analysis (signalstats/BRNG)."
     if black_segments:
         periods_note += " Dark bands mark detected black segments, which frame analysis skips when placing its periods."
+    if bars_regions:
+        periods_note += " Plum bands, underlined by a solid rule, mark detected color bars, which are excluded from the evaluation."
     timeline_html = f"""
     {FAILURE_SECTION_JS}
     <div style="background-color: #f5e9e3; padding: 10px; margin-top: 10px;">
@@ -6145,6 +6182,12 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     if check_cancelled():
         return
 
+    # Detected bars runs (head + additional). These are the regions the bars
+    # evaluation skips, so the timeline shades them; the windowed graphs below
+    # reuse the same parse for their timecode labels.
+    qct_duration_runs = _parse_bars_durations_csv(qctools_colorbars_duration_output)
+    bars_regions = [(bars_start, bars_end) for _, bars_start, bars_end in qct_duration_runs]
+
     # Create graphs for all existing csv files (existing code...)
     if qctools_bars_eval_check_output and failureInfoSummary_colorbars:
         # Pies summarize the per-tag failure share; the timeline below them
@@ -6154,7 +6197,8 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
             colorbars_eval_fails_csv_path, video_id, peaks=colorbars_peaks,
             video_duration=eval_video_duration, frame_rate=eval_video_fps,
             analysis_periods=get_frame_analysis_periods(frame_outputs),
-            black_segments=get_frame_analysis_black_segments(frame_outputs))
+            black_segments=get_frame_analysis_black_segments(frame_outputs),
+            bars_regions=bars_regions)
         if colorbars_timeline_html:
             colorbars_eval_html = (colorbars_eval_html or "") + colorbars_timeline_html
     elif qctools_bars_eval_check_output and failureInfoSummary_colorbars is None:
@@ -6224,8 +6268,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
 
     # Render bar graphs for windowed (mid-file) bars regions.
     # Build a lookup of region label → duration string from the qct-parse
-    # bars durations CSV so each graph shows the correct timecodes.
-    qct_duration_runs = _parse_bars_durations_csv(qctools_colorbars_duration_output)
+    # bars durations CSV (parsed above) so each graph shows the correct timecodes.
     windowed_duration_lookup = {}
     for label, start_s, end_s in qct_duration_runs:
         def _fmt(seconds):
