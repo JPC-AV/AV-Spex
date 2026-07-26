@@ -7,6 +7,7 @@ from AV_Spex.utils.generate_report import (
     make_profile_piecharts,
     summarize_failures,
     get_frame_analysis_periods,
+    get_frame_analysis_black_segments,
 )
 
 
@@ -130,6 +131,42 @@ def test_get_frame_analysis_periods_from_enhanced_json(tmp_path):
 
     periods = get_frame_analysis_periods({'enhanced_frame_analysis': str(json_path)})
     assert periods == [(94.9, 154.9), (209.9, 269.9)]
+
+
+def test_get_frame_analysis_black_segments_from_enhanced_json(tmp_path):
+    import json
+    enhanced = {
+        "black_segments": [
+            {"start": 290.0, "end": 293.7, "duration": 3.7},
+            {"start": 25.9, "end": 37.4, "duration": 11.5},
+        ],
+    }
+    json_path = tmp_path / "JPC_AV_TEST_enhanced_frame_analysis.json"
+    json_path.write_text(json.dumps(enhanced))
+
+    segments = get_frame_analysis_black_segments({'enhanced_frame_analysis': str(json_path)})
+    assert segments == [(25.9, 37.4), (290.0, 293.7)]
+
+
+def test_get_frame_analysis_black_segments_empty(tmp_path):
+    import json
+    assert get_frame_analysis_black_segments(None) == []
+    assert get_frame_analysis_black_segments({}) == []
+    json_path = tmp_path / "JPC_AV_TEST_enhanced_frame_analysis.json"
+    json_path.write_text(json.dumps({"black_segments": []}))
+    assert get_frame_analysis_black_segments({'enhanced_frame_analysis': str(json_path)}) == []
+
+
+def test_make_eval_bars_timeline_html_black_segments(two_cluster_csv):
+    html = make_eval_bars_timeline_html(two_cluster_csv, "JPC_AV_TEST",
+                                        video_duration=200.0, frame_rate=29.97,
+                                        black_segments=[(50.0, 60.0)])
+    assert "Detected black segment" in html
+    assert "Dark bands mark detected black segments" in html
+
+    html_without = make_eval_bars_timeline_html(two_cluster_csv, "JPC_AV_TEST",
+                                                video_duration=200.0, frame_rate=29.97)
+    assert "Detected black segment" not in html_without
 
 
 def test_get_frame_analysis_periods_empty():

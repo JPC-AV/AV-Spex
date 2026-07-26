@@ -3534,6 +3534,18 @@ def select_failure_peaks(failure_csv_path, duration=None, max_peaks=5):
     return peaks
 
 
+def _load_enhanced_frame_analysis(frame_outputs):
+    """Load the enhanced frame analysis JSON from frame_outputs, or return None."""
+    if not frame_outputs or not frame_outputs.get('enhanced_frame_analysis'):
+        return None
+    try:
+        with open(frame_outputs['enhanced_frame_analysis'], 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"Error reading enhanced frame analysis JSON: {e}")
+        return None
+
+
 def get_frame_analysis_periods(frame_outputs):
     """
     Extract the frame-analysis sampling periods from the frame analysis outputs.
@@ -3553,14 +3565,10 @@ def get_frame_analysis_periods(frame_outputs):
         return []
 
     candidates = []
-    if frame_outputs.get('enhanced_frame_analysis'):
-        try:
-            with open(frame_outputs['enhanced_frame_analysis'], 'r') as f:
-                enhanced_data = json.load(f)
-            candidates.append((enhanced_data.get('signalstats') or {}).get('analysis_periods'))
-            candidates.append((enhanced_data.get('brng_analysis') or {}).get('analysis_periods'))
-        except Exception as e:
-            logger.error(f"Error reading enhanced frame analysis JSON: {e}")
+    enhanced_data = _load_enhanced_frame_analysis(frame_outputs)
+    if enhanced_data:
+        candidates.append((enhanced_data.get('signalstats') or {}).get('analysis_periods'))
+        candidates.append((enhanced_data.get('brng_analysis') or {}).get('analysis_periods'))
 
     # Standalone sidecars: signalstats_analysis may already be a dict, brng_analysis is a path
     for key in ('signalstats_analysis', 'brng_analysis'):
@@ -3585,7 +3593,33 @@ def get_frame_analysis_periods(frame_outputs):
     return []
 
 
-def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_duration=None, frame_rate=None, analysis_periods=None):
+def get_frame_analysis_black_segments(frame_outputs):
+    """
+    Extract the detected black segments from the frame analysis outputs.
+
+    Reads black_segments ({'start', 'end', 'duration'} dicts) from the enhanced
+    frame analysis JSON. Frame analysis avoids these when placing its analysis
+    periods, so showing them alongside the periods explains the period placement.
+
+    Args:
+        frame_outputs (dict): Output of find_frame_analysis_outputs(), or None.
+
+    Returns:
+        list of (start_seconds, end_seconds) tuples, sorted by start; empty if
+        none were recorded.
+    """
+    enhanced_data = _load_enhanced_frame_analysis(frame_outputs)
+    if not enhanced_data:
+        return []
+    try:
+        return sorted((float(segment['start']), float(segment['end']))
+                      for segment in enhanced_data.get('black_segments') or [])
+    except (TypeError, ValueError, KeyError) as e:
+        logger.error(f"Malformed black_segments in frame analysis output: {e}")
+        return []
+
+
+def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_duration=None, frame_rate=None, analysis_periods=None, black_segments=None):
     """
     Build the failure-distribution timeline for the color bars evaluation.
 
@@ -3609,6 +3643,9 @@ def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_d
         analysis_periods (list, optional): (start_seconds, end_seconds) tuples
                                            from get_frame_analysis_periods();
                                            drawn as shaded bands on the plot.
+        black_segments (list, optional): (start_seconds, end_seconds) tuples
+                                         from get_frame_analysis_black_segments();
+                                         drawn as dark bands on the plot.
 
     Returns:
         str or None: HTML string containing the timeline, None if there is no data.
@@ -3661,15 +3698,34 @@ def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_d
         shapes.append(dict(
             type='rect', xref='x', yref='paper',
             x0=period_start, x1=min(period_end, duration), y0=0, y1=1,
-            fillcolor='rgba(77,43,18,0.10)', line=dict(width=0), layer='below',
+            fillcolor='rgba(166,124,82,0.30)', line=dict(color='#a67c52', width=2),
+            layer='below',
         ))
     if analysis_periods:
         # Legend-only proxy so the bands are identifiable (shapes don't get legend entries)
         fig.add_trace(go.Scatter(
             x=[None], y=[None], mode='markers',
-            marker=dict(symbol='square', size=12, color='rgba(77,43,18,0.15)',
-                        line=dict(color='#4d2b12', width=1)),
+            marker=dict(symbol='square', size=12, color='rgba(166,124,82,0.30)',
+                        line=dict(color='#a67c52', width=2)),
             name='Frame analysis period',
+        ))
+
+    # Detected black segments as dark bands — frame analysis avoids these when
+    # placing its periods, so they explain the period placement
+    black_segments = black_segments or []
+    for segment_start, segment_end in black_segments:
+        shapes.append(dict(
+            type='rect', xref='x', yref='paper',
+            x0=segment_start, x1=min(segment_end, duration), y0=0, y1=1,
+            fillcolor='rgba(70,70,70,0.35)', line=dict(color='#555555', width=1),
+            layer='below',
+        ))
+    if black_segments:
+        fig.add_trace(go.Scatter(
+            x=[None], y=[None], mode='markers',
+            marker=dict(symbol='square', size=12, color='rgba(70,70,70,0.35)',
+                        line=dict(color='#555555', width=1)),
+            name='Detected black segment',
         ))
 
     # Dotted connector at each peak plus its thumbnail anchored in the top margin
@@ -3789,6 +3845,8 @@ def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_d
     periods_note = ""
     if analysis_periods:
         periods_note = " Shaded bands mark the periods sampled by frame analysis (signalstats/BRNG)."
+    if black_segments:
+        periods_note += " Dark bands mark detected black segments, which frame analysis skips when placing its periods."
     timeline_html = f"""
     {FAILURE_SECTION_JS}
     <div style="background-color: #f5e9e3; padding: 10px; margin-top: 10px;">
@@ -6095,7 +6153,8 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         colorbars_timeline_html = make_eval_bars_timeline_html(
             colorbars_eval_fails_csv_path, video_id, peaks=colorbars_peaks,
             video_duration=eval_video_duration, frame_rate=eval_video_fps,
-            analysis_periods=get_frame_analysis_periods(frame_outputs))
+            analysis_periods=get_frame_analysis_periods(frame_outputs),
+            black_segments=get_frame_analysis_black_segments(frame_outputs))
         if colorbars_timeline_html:
             colorbars_eval_html = (colorbars_eval_html or "") + colorbars_timeline_html
     elif qctools_bars_eval_check_output and failureInfoSummary_colorbars is None:
