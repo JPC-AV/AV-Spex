@@ -217,6 +217,18 @@ class SmpteColorBars:
     VMAX: float
     SATMIN: float
     SATMAX: float
+    # BRNG is the share of out-of-range pixels (0-1), not a signal level like the
+    # tags above, so it has no MIN/MAX pair and is excluded from the detected-vs-
+    # SMPTE levels graph. Value measured from the same ffmpeg-generated 10-bit
+    # SMPTE bars reference the eight keys above come from (sample_files/color_bars/
+    # ffmpeg_generated/color_bars_v210.mov): correct SMPTE bars are NOT free of
+    # out-of-range pixels — the PLUGE and the 100% saturated patches put ~1.18% of
+    # pixels outside broadcast range, identically in the v210 and ffv1 encodes.
+    # In the bars evaluation this is the floor under the median BRNG measured in
+    # the detected bars, so a file whose bars are cleaner than the reference still
+    # gets a usable threshold instead of one near zero that fails every frame.
+    # Defaulted so a pre-existing last_used_spex_config.json still loads.
+    BRNG: float = 0.0118
 
 @dataclass
 class QCTParseValues:
