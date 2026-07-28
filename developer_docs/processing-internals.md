@@ -12,6 +12,8 @@ Unified module controlled by `FrameAnalysisConfig`. Three optional sub-steps, ea
 - **BRNG analysis**: Detects out-of-range luma/chroma values using multi-method voting; generates diagnostic thumbnails and an HTML report with magenta highlights.
 - **Signalstats**: FFmpeg `signalstats` filter analysis over selected time periods (default: 3 periods of 60s each).
 
+Signalstats and BRNG analysis sample **analysis periods** rather than the whole file. How those periods are chosen — the QCTools violation histogram, the black-segment/bars avoidance and repair passes, and the post-signalstats refinement — is documented separately in **`developer_docs/analysis-period-selection.md`**.
+
 Color bars end time (from qct-parse) is passed to frame analysis so non-program content is skipped. Results feed into the HTML report.
 
 Frame analysis image/JSON outputs (`_enhanced_frame_analysis.json`, `_border_detection.jpg`, `brng_thumbnails/`) are written to **`{video_id}_qc_metadata/`**, not `report_csvs/` — `analyze_frame_quality(output_dir=destination_directory)` and `destination_directory` is the qc_metadata dir (see `dir_setup.py`). Some frame-analysis CSV sidecars and HTML fragments do go to `report_csvs/`.
