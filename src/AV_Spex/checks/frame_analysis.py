@@ -89,6 +89,19 @@ class SignalstatsResult:
     # What region the aggregate stats were measured on:
     # 'active_area' | 'full_frame' | 'mixed' ('' for legacy results)
     analyzed_region: str = ''
+    # Example frames illustrating the aggregate stats, drawn from the same
+    # per-frame BRNG values that produced avg_brng/max_brng. Times are raw
+    # seconds; brng values are percentages; thumbnails are side-by-side
+    # (original | magenta BRNG overlay) images cropped to the measured region.
+    # Populated by EnhancedFrameAnalysis after analysis; None on legacy results.
+    representative_frame_time: float = None   # frame whose BRNG is closest to avg_brng
+    representative_frame_brng: float = None    # its out-of-range share (%)
+    representative_frame_timecode: str = None
+    representative_frame_thumbnail: str = None
+    worst_frame_time: float = None             # frame with the maximum BRNG
+    worst_frame_brng: float = None             # its out-of-range share (%)
+    worst_frame_timecode: str = None
+    worst_frame_thumbnail: str = None
 
 @dataclass
 class DroppedSampleResult:
@@ -340,10 +353,16 @@ class QCToolsParser:
 
         exclude_regions: additional (start, end) spans to skip — e.g. mid-file
         color bars regions, which are test patterns, not content.
+
+        Side effects: sets self.violation_histogram ({bin_start_seconds: count}
+        over ALL violation frames, 10-second bins) and
+        self.total_violation_frames. The returned list is capped at max_frames
+        by severity, so the histogram — not the list — is the faithful picture
+        of how violations are distributed over the tape.
         """
         violations = []
         chunk_size = 1000
-        
+
         # Counters
         total_frames_checked = 0
         frames_after_color_bars = 0
@@ -351,6 +370,15 @@ class QCToolsParser:
         frames_skipped = 0
         black_frames_skipped = 0  # NEW COUNTER
         max_brng_value = 0
+
+        # Full violation distribution, unaffected by the max_frames severity
+        # cap. Counts saturate on noisy tapes (every frame in a bin can
+        # violate), so per-bin summed violation scores are kept alongside to
+        # rank saturated bins by how bad the violations are.
+        histogram_bin_size = 10.0
+        self.violation_histogram = {}
+        self.violation_severity = {}
+        self.total_violation_frames = 0
         
         try:
             if self.report_path.endswith('.gz'):
@@ -408,6 +436,9 @@ class QCToolsParser:
                         frames_with_violations += 1
                         max_brng_value = max(max_brng_value, frame_data.brng_value)
                         frame_buffer.append(frame_data)
+                        bin_start = int(timestamp // histogram_bin_size) * histogram_bin_size
+                        self.violation_histogram[bin_start] = self.violation_histogram.get(bin_start, 0) + 1
+                        self.violation_severity[bin_start] = self.violation_severity.get(bin_start, 0.0) + frame_data.violation_score
                     
                     elem.clear()
                     root.clear()
@@ -447,7 +478,8 @@ class QCToolsParser:
             logger.error(f"Error parsing QCTools report: {e}")
             import traceback
             logger.error(traceback.format_exc())
-        
+
+        self.total_violation_frames = frames_with_violations
         violations.sort(key=lambda x: x.violation_score, reverse=True)
         return violations[:max_frames]
         
@@ -3130,6 +3162,31 @@ class IntegratedSignalstatsAnalyzer:
         violation_pct = (total_violations / total_frames * 100) if total_frames > 0 else 0
         max_brng = max(all_brng_values) * 100 if all_brng_values else 0
         avg_brng = np.mean(all_brng_values) * 100 if all_brng_values else 0
+
+        # Pick example frames from the same per-frame BRNG values that produced
+        # the aggregate stats: the worst frame (max BRNG) and a representative
+        # frame whose BRNG is closest to the average. Thumbnail images are
+        # rendered later by EnhancedFrameAnalysis (which knows the output dir).
+        all_brng_frames = []
+        for r in all_results:
+            all_brng_frames.extend(r.get('brng_frames', []))
+
+        representative_frame_time = None
+        representative_frame_brng = None
+        representative_frame_timecode = None
+        worst_frame_time = None
+        worst_frame_brng = None
+        worst_frame_timecode = None
+        if all_brng_frames:
+            mean_fraction = avg_brng / 100.0
+            rep_ts, rep_frac = min(all_brng_frames, key=lambda tb: abs(tb[1] - mean_fraction))
+            worst_ts, worst_frac = max(all_brng_frames, key=lambda tb: tb[1])
+            representative_frame_time = rep_ts
+            representative_frame_brng = rep_frac * 100
+            representative_frame_timecode = self._seconds_to_timecode(rep_ts)
+            worst_frame_time = worst_ts
+            worst_frame_brng = worst_frac * 100
+            worst_frame_timecode = self._seconds_to_timecode(worst_ts)
         
         # Determine which region the aggregate stats were measured on
         if period_regions and all(r == 'active_area' for r in period_regions):
@@ -3163,7 +3220,13 @@ class IntegratedSignalstatsAnalyzer:
             used_qctools=used_qctools,
             comparison_results=comparison_results,
             severity=severity,
-            analyzed_region=analyzed_region
+            analyzed_region=analyzed_region,
+            representative_frame_time=representative_frame_time,
+            representative_frame_brng=representative_frame_brng,
+            representative_frame_timecode=representative_frame_timecode,
+            worst_frame_time=worst_frame_time,
+            worst_frame_brng=worst_frame_brng,
+            worst_frame_timecode=worst_frame_timecode,
         )
 
     def _generate_comprehensive_diagnosis(self, violation_pct: float, max_brng: float,
@@ -3290,8 +3353,62 @@ class IntegratedSignalstatsAnalyzer:
             periods = self._validate_periods_against_black_segments(
                 periods, black_segments, effective_start, duration
             )
-        
-        return periods
+
+        # Guarantee the requested period count: when violation clusters (or
+        # black-segment validation) yield fewer periods than asked for, fill
+        # the deficit with evenly spaced periods over non-black content
+        if len(periods) < num_periods:
+            periods = self._fill_periods_to_count(
+                periods, num_periods, duration, effective_start, black_segments
+            )
+
+        return sorted(periods)
+
+    def _fill_periods_to_count(self, periods: List[Tuple[float, int]],
+                               num_periods: int, duration: int,
+                               effective_start: float,
+                               black_segments: List[Tuple[float, float]] = None) -> List[Tuple[float, int]]:
+        """
+        Top up a period list to num_periods with evenly spaced periods.
+
+        Candidate starts are spread across the content window (a denser grid
+        than needed, so candidates rejected for overlapping existing periods
+        or black segments still leave enough alternatives). Candidates that
+        overlap an existing period, or overlap black segments by more than
+        25%, are skipped.
+        """
+        needed = num_periods - len(periods)
+        window_end = self.duration - 30
+        if needed <= 0 or window_end - effective_start < duration:
+            return periods
+
+        span = (window_end - effective_start) - duration
+        slots = max(num_periods * 2, 4)
+        filled = list(periods)
+        added = 0
+        for i in range(slots):
+            if len(filled) >= num_periods:
+                break
+            candidate = effective_start + span * i / (slots - 1)
+            candidate_end = candidate + duration
+
+            if any(candidate < p_start + p_dur and p_start < candidate_end
+                   for p_start, p_dur in filled):
+                continue
+
+            black_overlap = sum(
+                max(0.0, min(candidate_end, seg_end) - max(candidate, seg_start))
+                for seg_start, seg_end in black_segments or []
+            )
+            if black_overlap / duration > 0.25:
+                continue
+
+            filled.append((candidate, duration))
+            added += 1
+
+        if added:
+            logger.info(f"  Added {added} evenly spaced period(s) to reach the requested {num_periods}")
+        return filled
 
     def _validate_periods_against_black_segments(
             self, 
@@ -3501,6 +3618,7 @@ class IntegratedSignalstatsAnalyzer:
             'frames_analyzed': len(violations),
             'frames_with_violations': len([v for v in violations if v.violation_score > 0]),
             'brng_values': [v.violation_score for v in violations],
+            'brng_frames': [(v.timestamp, v.violation_score) for v in violations],
             'source': 'qctools',
             'period_num': period_num,
             'time_range': (start_time, end_time)
@@ -3548,7 +3666,10 @@ class IntegratedSignalstatsAnalyzer:
             'ffprobe',
             '-f', 'lavfi',
             '-i', filter_chain,
-            '-show_entries', 'frame_tags=lavfi.signalstats.BRNG',
+            # pts_time (absolute source timestamp; the movie filter preserves it)
+            # is captured alongside BRNG so downstream code can locate the
+            # representative/worst frames for thumbnails.
+            '-show_entries', 'frame=pts_time:frame_tags=lavfi.signalstats.BRNG',
             '-of', 'csv=p=0'
         ]
 
@@ -3562,6 +3683,7 @@ class IntegratedSignalstatsAnalyzer:
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     text=True, bufsize=1)
             brng_values = []
+            brng_frames = []  # (timestamp_seconds, brng_fraction) per analyzed frame
             frame_count = 0
             while True:
                 line = proc.stdout.readline()
@@ -3579,10 +3701,23 @@ class IntegratedSignalstatsAnalyzer:
                 line = line.strip()
                 if not line:
                     continue
+                # Each CSV row is "pts_time,BRNG". Fall back to a single BRNG
+                # column if pts_time is unavailable in this ffmpeg build.
+                ts_val = None
+                brng_str = line
+                if ',' in line:
+                    ts_str, brng_str = line.rsplit(',', 1)
+                    try:
+                        ts_val = float(ts_str)
+                    except ValueError:
+                        ts_val = None
                 try:
-                    brng_values.append(float(line))
+                    brng_val = float(brng_str)
                 except ValueError:
                     continue
+                brng_values.append(brng_val)
+                if ts_val is not None:
+                    brng_frames.append((ts_val, brng_val))
                 frame_count += 1
                 if progress_range and frame_count % emit_interval == 0:
                     fraction = min(1.0, frame_count / expected_frames)
@@ -3608,6 +3743,7 @@ class IntegratedSignalstatsAnalyzer:
                 'frames_analyzed': len(brng_values),
                 'frames_with_violations': frames_with_violations,
                 'brng_values': brng_values,
+                'brng_frames': brng_frames,
                 'source': 'ffprobe',
                 'period_num': period_num
             }
@@ -3671,9 +3807,141 @@ class EnhancedFrameAnalysis:
             if path.exists():
                 logger.debug(f"Found QCTools report for Frame Analysis: {path}\n")
                 return str(path)
-        
+
         return None
-    
+
+    def _create_signalstats_frame_thumbnails(self, ss_results: 'SignalstatsResult',
+                                             border_results: 'BorderDetectionResult'):
+        """Render example-frame thumbnails illustrating the signalstats aggregate.
+
+        Produces two side-by-side (original | magenta BRNG overlay) JPGs cropped
+        to the measured region (the detected active picture area when border
+        detection ran, otherwise the full frame):
+
+          - representative frame: the frame whose out-of-range share is closest
+            to the average (avg_brng)
+          - worst frame: the frame with the maximum out-of-range share (max_brng)
+
+        Sets ss_results.{representative,worst}_frame_thumbnail to the saved paths
+        (before the caller serializes the result). Nothing is generated when the
+        video has no out-of-range pixels anywhere, or when frame times are
+        unavailable.
+        """
+        # Nothing interesting to visualize if the whole video is in range.
+        if not ss_results.max_brng or ss_results.max_brng <= 0:
+            return
+
+        active_area = border_results.active_area if border_results else None
+
+        thumb_dir = self.output_dir / "signalstats_frames"
+        thumb_dir.mkdir(exist_ok=True)
+        # Clear any thumbnails from a previous run so only the current run shows.
+        for old_thumb in list(thumb_dir.glob("*.jpg")) + list(thumb_dir.glob("*.png")):
+            try:
+                old_thumb.unlink()
+            except Exception as e:
+                logger.warning(f"  Could not remove old signalstats frame {old_thumb.name}: {e}")
+
+        targets = [
+            ('representative', ss_results.representative_frame_time),
+            ('worst', ss_results.worst_frame_time),
+        ]
+        for kind, ts in targets:
+            if ts is None:
+                continue
+            if self.check_cancelled():
+                return
+            thumb_path = self._render_side_by_side_brng_frame(ts, active_area, thumb_dir, kind)
+            if thumb_path:
+                if kind == 'representative':
+                    ss_results.representative_frame_thumbnail = str(thumb_path)
+                else:
+                    ss_results.worst_frame_thumbnail = str(thumb_path)
+
+    def _render_side_by_side_brng_frame(self, timestamp: float,
+                                        active_area: Optional[Tuple[int, int, int, int]],
+                                        thumb_dir: Path, kind: str) -> Optional[Path]:
+        """Extract one frame and build an original | BRNG-overlay side-by-side JPG.
+
+        The BRNG overlay is ffmpeg's own signalstats out=brng highlight (magenta =
+        out-of-range pixels), so the highlighted share matches the measured value.
+        Both halves are cropped to active_area when provided. Returns the JPG path,
+        or None on failure.
+        """
+        crop_prefix = ""
+        if active_area:
+            x, y, w, h = active_area
+            crop_prefix = f"crop={w}:{h}:{x}:{y},"
+
+        # Single seek + split: left half is the (cropped) original, right half is
+        # the same frame with the magenta out-of-range highlight, hstacked.
+        filter_complex = (
+            f"[0:v]{crop_prefix}split[a][b];"
+            f"[b]signalstats=out=brng:color=magenta[bh];"
+            f"[a][bh]hstack=inputs=2"
+        )
+        raw_path = thumb_dir / f"{self.video_id}_signalstats_{kind}_raw.png"
+        cmd = [
+            "ffmpeg",
+            "-ss", str(timestamp),
+            "-i", str(self.video_path),
+            "-frames:v", "1",
+            "-filter_complex", filter_complex,
+            "-y", str(raw_path)
+        ]
+        try:
+            subprocess.run(cmd, capture_output=True, check=True)
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"  Could not render signalstats {kind} frame at {timestamp:.2f}s: "
+                           f"{e.stderr.decode(errors='ignore') if e.stderr else e}")
+            return None
+
+        # Label each half so the panels are self-describing in the report.
+        thumb_path = thumb_dir / f"{self.video_id}_signalstats_{kind}.jpg"
+        try:
+            img = cv2.imread(str(raw_path))
+            if img is not None:
+                self._label_brng_panels(img)
+                cv2.imwrite(str(thumb_path), img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            else:
+                # Fall back to the unlabeled render if cv2 can't read it.
+                thumb_path = thumb_dir / f"{self.video_id}_signalstats_{kind}.png"
+                raw_path.replace(thumb_path)
+                return thumb_path
+        except Exception as e:
+            logger.warning(f"  Could not label signalstats {kind} frame: {e}")
+            thumb_path = thumb_dir / f"{self.video_id}_signalstats_{kind}.png"
+            try:
+                raw_path.replace(thumb_path)
+            except Exception:
+                return None
+            return thumb_path
+
+        try:
+            raw_path.unlink()
+        except Exception:
+            pass
+        return thumb_path
+
+    def _label_brng_panels(self, img: np.ndarray):
+        """Draw 'Original' / 'BRNG (magenta = out of range)' labels on the two
+        halves of a side-by-side hstacked image, in place."""
+        h, w = img.shape[:2]
+        half = w // 2
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = max(0.4, min(0.7, w / 1400.0))
+        thickness = 1
+        labels = [
+            ("Original", 8),
+            ("BRNG (magenta = out of range)", half + 8),
+        ]
+        for text, x0 in labels:
+            (tw, th), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+            cv2.rectangle(img, (x0 - 4, 4), (x0 + tw + 4, 4 + th + baseline + 6),
+                          (0, 0, 0), -1)
+            cv2.putText(img, text, (x0, 4 + th + 4), font, font_scale,
+                        (255, 255, 255), thickness, cv2.LINE_AA)
+
     def _is_step_enabled(self, flag_value) -> bool:
         """
         Check if a step is enabled, handling both boolean and string types.
@@ -4861,7 +5129,8 @@ class EnhancedFrameAnalysis:
                     color_bars_end_time=color_bars_end_time,
                     exclude_regions=bars_regions
                 )
-                frames_with_qctools_violations = len(violations)
+                # Total frames with violations, not the severity-capped list length
+                frames_with_qctools_violations = getattr(parser, 'total_violation_frames', len(violations))
 
                 if frames_with_qctools_violations == 0:
                     results['qctools_violations_found'] = "No BRNG violations detected in content"
@@ -4877,7 +5146,9 @@ class EnhancedFrameAnalysis:
                     num_periods=frame_config.analysis_period_count,
                     period_duration=frame_config.analysis_period_duration,
                     video_duration=self.signalstats_analyzer.duration,
-                    black_segments=avoid_segments
+                    black_segments=avoid_segments,
+                    histogram=getattr(parser, 'violation_histogram', None),
+                    severity=getattr(parser, 'violation_severity', None)
                 )
                 logger.info(f"Identified {len(qctools_suggested_periods)} periods with highest violation density\n")
 
@@ -4953,6 +5224,11 @@ class EnhancedFrameAnalysis:
                 qctools_periods=qctools_suggested_periods,
                 black_segments=avoid_segments
             )
+
+            # Render example-frame thumbnails (representative + worst) that
+            # illustrate the aggregate out-of-range stats in the report.
+            self._create_signalstats_frame_thumbnails(signalstats_results, border_results)
+
             results['signalstats'] = asdict(signalstats_results)
 
             # Extract the analysis periods from signalstats results
@@ -5262,6 +5538,10 @@ class EnhancedFrameAnalysis:
                 results['final_brng_analysis'] = asdict(brng_results) if brng_results else None
                 results['initial_brng_analysis'] = asdict(initial_brng) if initial_brng else None
                 if signalstats_enabled:
+                    # Regenerate example-frame thumbnails against the final
+                    # (refined) borders so the report's preferred
+                    # final_signalstats carries them.
+                    self._create_signalstats_frame_thumbnails(signalstats_results, border_results)
                     results['final_signalstats'] = asdict(signalstats_results)
                 
                 # CREATE COMPARISON VISUALIZATION (initial vs final)
@@ -6134,102 +6414,125 @@ class EnhancedFrameAnalysis:
                                                 num_periods: int = 3,
                                                 period_duration: int = 60,
                                                 video_duration: float = None,
-                                                black_segments: List[Tuple[float, float]] = None) -> List[Tuple[float, int]]:
+                                                black_segments: List[Tuple[float, float]] = None,
+                                                histogram: Dict[float, int] = None,
+                                                severity: Dict[float, float] = None) -> List[Tuple[float, int]]:
         """
         Analyze the temporal distribution of QCTools violations and suggest analysis periods.
 
+        Periods are ranked by true violation density and kept at least two period
+        lengths apart, so they land on distinct problem regions of the tape
+        instead of stacking on the single worst burst.
+
         Args:
-            violations: List of frame violations to analyze
+            violations: List of frame violations to analyze (severity-capped;
+                used as the histogram fallback only)
             num_periods: Number of analysis periods to generate
             period_duration: Duration of each period in seconds
             video_duration: Total video duration; periods are clamped so they
                 never extend past the end of the file
-            black_segments: Known all-black segments; violations inside them
-                (noise spikes that escape the per-frame black classifier) are
-                excluded so period selection doesn't target unwatchable content
+            black_segments: Known all-black segments (plus detected bars
+                regions); bins mostly inside them are excluded so period
+                selection doesn't target unwatchable content
+            histogram: {bin_start_seconds: violation_count} over ALL violation
+                frames (parser.violation_histogram). Preferred over the capped
+                violations list, whose "distribution" collapses to the few
+                worst bursts on noisy tapes.
+            severity: {bin_start_seconds: summed violation score}
+                (parser.violation_severity). When given, bins are ranked by
+                severity — on noisy tapes counts saturate (every frame in a
+                bin violates), and severity distinguishes the saturated bins.
 
         Returns:
-            List of (start_time, duration) tuples for suggested periods
+            List of (start_time, duration) tuples for suggested periods,
+            sorted by start time
         """
-        if black_segments and violations:
-            filtered = [
-                v for v in violations
-                if not any(bs <= v.timestamp <= be for bs, be in black_segments)
-            ]
-            excluded = len(violations) - len(filtered)
-            if excluded:
-                logger.debug(f"  Excluded {excluded} violations inside black segments")
-            violations = filtered
+        bin_size = 10.0
 
-        if not violations:
+        # Prefer the full histogram; fall back to binning the capped list
+        if histogram:
+            bin_counts = dict(histogram)
+        else:
+            bin_counts = {}
+            for v in violations or []:
+                bin_start = int(v.timestamp // bin_size) * bin_size
+                bin_counts[bin_start] = bin_counts.get(bin_start, 0) + 1
+
+        # Drop bins that mostly overlap black segments / bars regions (noise
+        # spikes that escape the per-frame black classifier), and bins in the
+        # final seconds of the file (end-of-tape static)
+        def _bin_excluded(bin_start):
+            bin_end = bin_start + bin_size
+            if video_duration and bin_end > video_duration - 30:
+                return True
+            for seg_start, seg_end in black_segments or []:
+                overlap = min(bin_end, seg_end) - max(bin_start, seg_start)
+                if overlap > bin_size / 2:
+                    return True
+            return False
+
+        excluded_count = sum(count for start, count in bin_counts.items() if _bin_excluded(start))
+        bin_counts = {start: count for start, count in bin_counts.items() if not _bin_excluded(start)}
+        if excluded_count:
+            logger.debug(f"  Excluded {excluded_count} violations inside black/bars segments or the file tail")
+
+        if not bin_counts:
             logger.info("  No QCTools violations to analyze distribution")
             return []
 
         # Never suggest a period longer than the video itself
         if video_duration and period_duration > video_duration:
             period_duration = max(1, int(video_duration))
-        
-        # Get all violation timestamps
-        timestamps = [v.timestamp for v in violations]
-        timestamps.sort()
-        
+
         # Log the overall distribution
         logger.info(f"\n  === QCTools Violation Distribution ===")
-        logger.debug(f"  Total violations found: {len(violations)}")
-        logger.debug(f"  Time range: {timestamps[0]:.1f}s - {timestamps[-1]:.1f}s")
-        
-        # Create a histogram of violations over time (10-second bins)
-        bin_size = 10.0
-        num_bins = int((timestamps[-1] - timestamps[0]) / bin_size) + 1
-        bins = [0] * num_bins
-        
-        for ts in timestamps:
-            bin_idx = int((ts - timestamps[0]) / bin_size)
-            if 0 <= bin_idx < num_bins:
-                bins[bin_idx] += 1
-        
-        # Find the top periods with most violations
-        bin_scores = []
-        for i, count in enumerate(bins):
-            if count > 0:
-                start_time = timestamps[0] + i * bin_size
-                bin_scores.append((start_time, count))
-        
-        # Sort by violation count
-        bin_scores.sort(key=lambda x: x[1], reverse=True)
-        
+        logger.debug(f"  Total violations found: {sum(bin_counts.values())}")
+        logger.debug(f"  Time range: {min(bin_counts):.1f}s - {max(bin_counts) + bin_size:.1f}s")
+
+        # Rank by summed severity when available (counts saturate on noisy
+        # tapes — every frame in a bin can violate), else by count
+        def _bin_rank(item):
+            bin_start, count = item
+            if severity:
+                return severity.get(bin_start, 0.0)
+            return count
+
+        bin_scores = sorted(bin_counts.items(), key=_bin_rank, reverse=True)
+
         # Log the top bins
         logger.debug(f"  Top 10-second bins with violations:")
         for i, (start_time, count) in enumerate(bin_scores[:10]):
-            logger.debug(f"    {i+1}. {start_time:.1f}s - {start_time+bin_size:.1f}s: {count} violations")
-        
-        # Select up to num_periods non-overlapping periods, ranked by violation density
-        suggested_periods = []
-        used_ranges = []
-        
-        for start_time, count in bin_scores:
-            # Clamp so the period ends at or before the end of the video
-            if video_duration:
-                start_time = max(0.0, min(start_time, video_duration - period_duration))
+            sev_note = f", severity {severity.get(start_time, 0.0):.0f}" if severity else ""
+            logger.debug(f"    {i+1}. {start_time:.1f}s - {start_time+bin_size:.1f}s: {count} violations{sev_note}")
 
-            # Check if this period overlaps with any already selected
-            overlaps = False
-            for used_start, used_end in used_ranges:
-                if not (start_time + period_duration < used_start or start_time > used_end):
-                    overlaps = True
-                    break
-            
-            if not overlaps:
-                suggested_periods.append((start_time, period_duration))
-                used_ranges.append((start_time, start_time + period_duration))
-                
+        def _candidate_start(bin_start):
+            # Center the period on the dense bin, clamped inside the file
+            start = bin_start + bin_size / 2 - period_duration / 2
+            if video_duration:
+                start = min(start, video_duration - period_duration)
+            return max(0.0, start)
+
+        # Pass 1: densest bins first, requiring periods to sit well apart so
+        # they cover distinct problem regions. Pass 2 relaxes the separation to
+        # simple non-overlap for tapes whose violations are concentrated.
+        suggested_periods = []
+        min_separation = period_duration * 2
+        for required_gap in (min_separation, period_duration):
+            for bin_start, count in bin_scores:
                 if len(suggested_periods) >= num_periods:
                     break
-        
+                start_time = _candidate_start(bin_start)
+                if all(abs(start_time - used_start) >= required_gap for used_start, _ in suggested_periods):
+                    suggested_periods.append((start_time, period_duration))
+            if len(suggested_periods) >= num_periods:
+                break
+
+        suggested_periods.sort()
+
         logger.debug(f"\n  QCTools-based analysis periods ({len(suggested_periods)} of {num_periods} requested):")
         for i, (start, duration) in enumerate(suggested_periods):
             logger.debug(f"    Period {i+1}: {start:.1f}s - {start+duration:.1f}s")
-        
+
         return suggested_periods
 
 

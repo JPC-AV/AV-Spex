@@ -194,6 +194,106 @@ def test_get_comp_from_config_raises_when_profile_does_not_match(monkeypatch):
         qp.getCompFromConfig({}, profile, "AnotherTag")
 
 
+# ---- evalBars BRNG handling ----------------------------------------------
+
+_EVAL_BARS_LEVEL_TAGS = ("YMAX", "YMIN", "UMIN", "UMAX", "VMIN", "VMAX", "SATMAX", "SATMIN")
+
+
+def _write_qctools_gz(path, frames, pkt="pkt_dts_time"):
+    """Write a minimal .qctools.xml.gz holding the given video frames.
+
+    frames: list of (timestamp_seconds, {tag_name: value}) pairs.
+    """
+    parts = ["<?xml version='1.0'?><ffprobe><frames>"]
+    for timestamp, tags in frames:
+        parts.append(f'<frame media_type="video" {pkt}="{timestamp}">')
+        for name, value in tags.items():
+            parts.append(f'<tag key="lavfi.signalstats.{name}" value="{value}"/>')
+        parts.append("</frame>")
+    parts.append("</frames></ffprobe>")
+    with gzip.open(path, "wt", encoding="utf-8") as f:
+        f.write("".join(parts))
+
+
+def _bars_frames(brng_values, level_value=500):
+    """Frames spanning 0-n seconds, one BRNG value each plus flat level tags."""
+    frames = []
+    for index, brng in enumerate(brng_values):
+        tags = {tag: level_value for tag in _EVAL_BARS_LEVEL_TAGS}
+        tags["BRNG"] = brng
+        frames.append((f"{index * 0.1:.3f}", tags))
+    return frames
+
+
+def _run_eval_bars(path, monkeypatch, brng_floor=0.01, frame_count=30):
+    import collections
+    monkeypatch.setattr(qp, "_get_smpte_brng_floor", lambda: brng_floor)
+    buffSize = 11
+    return qp.evalBars(str(path), "pkt_dts_time", 0, 9999,
+                       collections.deque(maxlen=buffSize), buffSize)
+
+
+def test_eval_bars_keeps_brng_float_precision(tmp_path, monkeypatch):
+    """BRNG is a 0-1 share, so the median must not be rounded to the integer
+    level scale used by YMAX/SATMAX etc."""
+    path = tmp_path / "report.qctools.xml.gz"
+    _write_qctools_gz(path, _bars_frames([0.0306] * 30))
+
+    bars = _run_eval_bars(path, monkeypatch)
+    assert bars["BRNG"] == pytest.approx(0.0306)
+    # Level tags still round to ints
+    assert bars["YMAX"] == 500
+
+
+def test_eval_bars_floors_brng_at_config_value(tmp_path, monkeypatch):
+    """A pristine bars region measures near zero; the floor keeps the threshold
+    from failing every content frame downstream."""
+    path = tmp_path / "report.qctools.xml.gz"
+    _write_qctools_gz(path, _bars_frames([0.0001] * 30))
+
+    bars = _run_eval_bars(path, monkeypatch, brng_floor=0.01)
+    assert bars["BRNG"] == 0.01
+
+
+def test_eval_bars_brng_falls_back_to_floor_when_unmeasured(tmp_path, monkeypatch):
+    """Fewer frames than the buffer means nothing is measured — BRNG falls back
+    to the floor rather than the level tags' permissive extremes."""
+    path = tmp_path / "report.qctools.xml.gz"
+    _write_qctools_gz(path, _bars_frames([0.05] * 3))
+
+    bars = _run_eval_bars(path, monkeypatch, brng_floor=0.02)
+    assert bars["BRNG"] == 0.02
+    assert bars["YMAX"] == 0        # unchanged permissive fallbacks
+    assert bars["YMIN"] == 1023
+
+
+def test_get_smpte_brng_floor_reads_config(monkeypatch):
+    fake_spex = MagicMock()
+    fake_spex.qct_parse_values.smpte_color_bars.BRNG = 0.025
+    monkeypatch.setattr(qp.config_mgr, "get_config", lambda *a, **kw: fake_spex)
+    assert qp._get_smpte_brng_floor() == 0.025
+
+
+def test_get_smpte_brng_floor_defaults_when_malformed(monkeypatch):
+    fake_spex = MagicMock()
+    fake_spex.qct_parse_values.smpte_color_bars.BRNG = "not a number"
+    monkeypatch.setattr(qp.config_mgr, "get_config", lambda *a, **kw: fake_spex)
+    assert qp._get_smpte_brng_floor() == qp.SMPTE_BRNG_DEFAULT
+
+
+def test_smpte_brng_default_matches_shipped_config():
+    """The backstop constant must not drift from the config it stands in for."""
+    import json
+    from AV_Spex.utils import config_setup
+
+    config_path = os.path.join(os.path.dirname(config_setup.__file__),
+                               "..", "config", "spex_config.json")
+    with open(os.path.normpath(config_path)) as f:
+        shipped = json.load(f)
+    assert shipped["qct_parse_values"]["smpte_color_bars"]["BRNG"] == qp.SMPTE_BRNG_DEFAULT
+    assert config_setup.SmpteColorBars.BRNG == qp.SMPTE_BRNG_DEFAULT
+
+
 # ===========================================================================
 # Section 2 — _tc_* statistics + filtering helpers
 # ===========================================================================
@@ -903,6 +1003,18 @@ def test_print_color_bar_values_handles_missing_values(tmp_path):
     rows = _read_csv_rows(out)
     # Missing detected value comes back as empty cell
     assert rows[1] == ["YMAX", "940", ""]
+
+
+def test_print_color_bar_values_omits_brng(tmp_path):
+    """BRNG is a share of out-of-range pixels, not a 0-1023 level, so it stays
+    out of the detected-vs-SMPTE levels comparison (and its graph)."""
+    out = tmp_path / "bars.csv"
+    smpte = {"YMAX": 940, "BRNG": 0.01}
+    detected = {"YMAX": 1019, "BRNG": 0.031}
+    qp.print_color_bar_values("video_42", smpte, detected, str(out))
+
+    rows = _read_csv_rows(out)
+    assert [row[0] for row in rows[1:]] == ["YMAX"]
 
 
 # ---- print_color_bar_keys -----------------------------------------------

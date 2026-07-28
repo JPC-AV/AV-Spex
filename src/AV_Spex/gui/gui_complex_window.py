@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QCheckBox, QLineEdit,
-    QLabel, QComboBox, QStyle, QStyleOptionButton
+    QLabel, QComboBox, QStyle, QStyleOptionButton, QRadioButton, QButtonGroup
 )
 from PyQt6.QtCore import Qt
 
@@ -99,11 +99,14 @@ class ComplexWindow(QWidget, ThemeableMixin):
         pair.addWidget(desc)
         layout.addLayout(pair)
 
-    def _indent_row(self, widget):
-        """Return an HBox with the widget indented under its parent option."""
+    def _indent_row(self, widget, indent=None):
+        """Return an HBox with the widget indented under its parent option.
+
+        `indent` defaults to one level (self.INDENT); pass a larger value for
+        controls nested a further level down (e.g. self.INDENT * 2)."""
         row = QHBoxLayout()
         row.setSpacing(6)  # explicit: nested rows inherit _add_option's 0 spacing
-        row.addSpacing(self.INDENT)
+        row.addSpacing(self.INDENT if indent is None else indent)
         row.addWidget(widget)
         row.addStretch()
         return row
@@ -192,8 +195,32 @@ class ComplexWindow(QWidget, ThemeableMixin):
 
         self.evaluate_bars_cb = self._make_checkbox("Evaluate Color Bars")
         self._add_option(layout, self._indent_row(self.evaluate_bars_cb), self._desc_label(
-            "Compare content to color bars for validation",
+            "Compare video content against reference color bar values for validation",
             extra_indent=self.INDENT))
+
+        # Reference selection: what the evaluation grades content against.
+        # Nested a further level under Evaluate Color Bars.
+        self.bars_ref_label = QLabel("Compare against:")
+        self.bars_ref_label.setIndent(self.DESC_INDENT)
+        layout.addLayout(self._indent_row(self.bars_ref_label, self.INDENT * 2))
+
+        self.bars_ref_group = QButtonGroup(self)
+        self.bars_ref_detected_radio = QRadioButton("Bars detected in this video")
+        self.bars_ref_smpte_radio = QRadioButton("Standard SMPTE values")
+        self.bars_ref_group.addButton(self.bars_ref_detected_radio)
+        self.bars_ref_group.addButton(self.bars_ref_smpte_radio)
+        self.bars_ref_detected_radio.setChecked(True)
+
+        self._add_option(layout, self._indent_row(self.bars_ref_detected_radio, self.INDENT * 2),
+            self._desc_label(
+                "Uses levels measured from this file's own color bars. If no "
+                "bars are found, standard SMPTE values are used as a fallback.",
+                extra_indent=self.INDENT * 2))
+        self._add_option(layout, self._indent_row(self.bars_ref_smpte_radio, self.INDENT * 2),
+            self._desc_label(
+                "Always uses standard SMPTE color bar values, ignoring any "
+                "bars in the video.",
+                extra_indent=self.INDENT * 2))
 
         self.thumb_export_cb = self._make_checkbox("Export Thumbnails")
         self._add_option(layout, self._indent_row(self.thumb_export_cb), self._desc_label(
@@ -435,7 +462,8 @@ class ComplexWindow(QWidget, ThemeableMixin):
             self.enable_signalstats_cb.setEnabled(True)
 
     def _apply_bars_dependencies(self):
-        """Evaluate Bars and Export Thumbnails depend on Detect Color Bars."""
+        """Evaluate Bars and Export Thumbnails depend on Detect Color Bars;
+        the bars-reference radios depend on Evaluate Color Bars."""
         bars_on = self.bars_detection_cb.isChecked()
         for cb in (self.evaluate_bars_cb, self.thumb_export_cb):
             if not bars_on:
@@ -443,6 +471,11 @@ class ComplexWindow(QWidget, ThemeableMixin):
                 cb.setChecked(False)
                 cb.blockSignals(False)
             cb.setEnabled(bars_on)
+
+        evaluate_on = bars_on and self.evaluate_bars_cb.isChecked()
+        for w in (self.bars_ref_label, self.bars_ref_detected_radio,
+                  self.bars_ref_smpte_radio):
+            w.setEnabled(evaluate_on)
 
     def on_theme_changed(self, palette):
         """Handle theme changes for ComplexWindow"""
@@ -481,6 +514,10 @@ class ComplexWindow(QWidget, ThemeableMixin):
                    self.detect_clamped_levels_cb, self.detect_chroma_phase_errors_cb,
                    self.detect_tone_leak_cb):
             cb.stateChanged.connect(self.on_qct_parse_flag_changed)
+
+        # Bars-reference radios: the detected radio's toggled fires exactly
+        # once per user change (exclusive pair), so one connection is enough.
+        self.bars_ref_detected_radio.toggled.connect(self.on_qct_parse_flag_changed)
 
         # CLAMS detection — single toggle runs both bars and tone detectors.
         # Numeric tuning is JSON-only.
@@ -580,6 +617,9 @@ class ComplexWindow(QWidget, ThemeableMixin):
         self.bars_detection_cb.setChecked(run_tool and qct.barsDetection)
         self.evaluate_bars_cb.setChecked(run_tool and qct.evaluateBars)
         self.thumb_export_cb.setChecked(run_tool and qct.thumbExport)
+        bars_ref = getattr(qct, 'evaluateBarsReference', 'detected')
+        self.bars_ref_smpte_radio.setChecked(bars_ref == 'smpte')
+        self.bars_ref_detected_radio.setChecked(bars_ref != 'smpte')
         self.audio_analysis_cb.setChecked(run_tool and getattr(qct, 'audio_analysis', False))
         self.detect_clamped_levels_cb.setChecked(run_tool and getattr(qct, 'detect_clamped_levels', False))
         self.detect_chroma_phase_errors_cb.setChecked(run_tool and getattr(qct, 'detect_chroma_phase_errors', False))
@@ -671,12 +711,17 @@ class ComplexWindow(QWidget, ThemeableMixin):
             'barsDetection': self.bars_detection_cb.isChecked(),
             'evaluateBars': self.evaluate_bars_cb.isChecked(),
             'thumbExport': self.thumb_export_cb.isChecked(),
+            'evaluateBarsReference': self._bars_reference_value(),
             'audio_analysis': self.audio_analysis_cb.isChecked(),
             'detect_clamped_levels': self.detect_clamped_levels_cb.isChecked(),
             'detect_chroma_phase_errors': self.detect_chroma_phase_errors_cb.isChecked(),
             'detect_tone_leak': self.detect_tone_leak_cb.isChecked(),
         }}}
         config_mgr.update_config('checks', updates)
+
+    def _bars_reference_value(self):
+        """Current Evaluate Color Bars reference: 'smpte' or 'detected'."""
+        return 'smpte' if self.bars_ref_smpte_radio.isChecked() else 'detected'
 
     def on_frame_analysis_mode_changed(self, index):
         """Handle border detection mode changes"""

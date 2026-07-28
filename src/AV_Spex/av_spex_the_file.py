@@ -94,6 +94,7 @@ class ParsedArguments:
     export_file: Optional[str] 
     import_config: Optional[str]
     mediaconch_policy: Optional[str]
+    export_mediaconch_policy: Optional[Any]
     use_default_config: bool
     enable_bitplane_check: Optional[str]
     enable_border_detection: Optional[str]
@@ -110,6 +111,7 @@ class ParsedArguments:
     enable_audio_analysis: Optional[str]
     enable_chroma_phase_detection: Optional[str]
     enable_tone_leak_detection: Optional[str]
+    evaluate_bars_reference: Optional[str]
     access_trim_color_bars: Optional[str]
     access_crop_borders: Optional[str]
     access_crop_to_480: Optional[str]
@@ -192,6 +194,10 @@ The scripts will confirm that the digital files conform to predetermined specifi
                                  help='Specify export filename (default: auto-generated)')
     config_io_group.add_argument('--import-config',
                                  help='Import configs from JSON file')
+    config_io_group.add_argument('--export-mediaconch-policy', nargs='?', const=True, default=None,
+                                 metavar="DEST",
+                                 help='Export the current MediaConch policy XML so it can be shared. '
+                                      'Optionally provide a destination file or directory (default: current directory).')
     config_io_group.add_argument("--use-default-config", action="store_true",
                                  help="Reset to default config by removing any saved configurations")
 
@@ -218,6 +224,8 @@ The scripts will confirm that the digital files conform to predetermined specifi
                            help='Enable/disable chroma phase error detection in qct-parse (detects tape tracking artifacts where chroma collapses toward cyan/magenta). Auto-enables qct_parse.run_tool.')
     qct_group.add_argument('--enable-tone-leak-detection', choices=['on', 'off'],
                            help='Enable/disable reference-tone leak detection (1 kHz calibration tone crosstalk heard as a faint whine/squeak in quiet passages). Analyzes decoded audio directly. Auto-enables qct_parse.run_tool.')
+    qct_group.add_argument('--evaluate-bars-reference', choices=['detected', 'smpte'],
+                           help="What Evaluate Color Bars grades content against: 'detected' (default) uses this file's own detected bars, falling back to standard SMPTE values when none are found; 'smpte' always grades against standard SMPTE values. Only takes effect when evaluateBars is on.")
 
     # Frame analysis sub-steps + tuning
     frame_group = parser.add_argument_group("Frame analysis")
@@ -310,6 +318,7 @@ The scripts will confirm that the digital files conform to predetermined specifi
         export_file=args.export_file,
         import_config=args.import_config,
         mediaconch_policy=args.mediaconch_policy,
+        export_mediaconch_policy=args.export_mediaconch_policy,
         use_default_config=args.use_default_config,
         enable_bitplane_check=getattr(args, 'enable_bitplane_check', None),
         enable_border_detection=getattr(args, 'enable_border_detection', None),
@@ -326,6 +335,7 @@ The scripts will confirm that the digital files conform to predetermined specifi
         enable_audio_analysis=getattr(args, 'enable_audio_analysis', None),
         enable_chroma_phase_detection=getattr(args, 'enable_chroma_phase_detection', None),
         enable_tone_leak_detection=getattr(args, 'enable_tone_leak_detection', None),
+        evaluate_bars_reference=getattr(args, 'evaluate_bars_reference', None),
         access_trim_color_bars=getattr(args, 'access_trim_color_bars', None),
         access_crop_borders=getattr(args, 'access_crop_borders', None),
         access_crop_to_480=getattr(args, 'access_crop_to_480', None),
@@ -341,6 +351,43 @@ The scripts will confirm that the digital files conform to predetermined specifi
         mediainfo_from_file=args.mediainfo_from_file,
         ffprobe_from_file=args.ffprobe_from_file,
     )
+
+
+def export_mediaconch_policy(destination, config_mgr):
+    """Export the current MediaConch policy XML to a shareable location.
+
+    `destination` is either True (export to the current directory using the
+    policy's own filename) or a string destination file/directory path.
+    """
+    import shutil
+
+    checks_config = config_mgr.get_config('checks', ChecksConfig)
+    policy_name = checks_config.tools.mediaconch.mediaconch_policy
+
+    if not policy_name:
+        print("Error: no current MediaConch policy is set to export.")
+        return
+
+    source_path = config_mgr.get_policy_path(policy_name)
+    if not source_path or not os.path.exists(source_path):
+        print(f"Error: could not locate the policy file for '{policy_name}'.")
+        return
+
+    # Resolve the destination path
+    if destination is True:
+        dest_path = os.path.join(os.getcwd(), policy_name)
+    elif os.path.isdir(destination):
+        dest_path = os.path.join(destination, policy_name)
+    else:
+        dest_path = destination
+        if not dest_path.lower().endswith('.xml'):
+            dest_path += '.xml'
+
+    try:
+        shutil.copyfile(source_path, dest_path)
+        print(f"MediaConch policy '{policy_name}' exported to: {dest_path}")
+    except OSError as e:
+        print(f"Error: failed to export MediaConch policy file: {e}")
 
 
 def apply_filename_profile(config_type: str, profile_name: str):
@@ -493,14 +540,16 @@ def run_cli_mode(args):
         print(f"Configs exported to: {filename}")
         if args.dry_run_only:
             sys.exit(0)
-    
+
+    if args.export_mediaconch_policy is not None:
+        export_mediaconch_policy(args.export_mediaconch_policy, config_mgr)
+        if args.dry_run_only:
+            sys.exit(0)
+
     if args.import_config:
         config_io = ConfigIO(config_mgr)
         config_io.import_configs(args.import_config)
         print(f"Configs imported from: {args.import_config}")
-
-    if args.print_config_profile:
-        config_edit.print_config(args.print_config_profile)
 
     # Handle individual frame analysis sub-step configuration
     frame_updates = {'outputs': {'frame_analysis': {}}}
@@ -596,6 +645,8 @@ def run_cli_mode(args):
         tools_updates.setdefault('qct_parse', {})['detect_chroma_phase_errors'] = (args.enable_chroma_phase_detection == 'on')
     if args.enable_tone_leak_detection:
         tools_updates.setdefault('qct_parse', {})['detect_tone_leak'] = (args.enable_tone_leak_detection == 'on')
+    if args.evaluate_bars_reference:
+        tools_updates.setdefault('qct_parse', {})['evaluateBarsReference'] = args.evaluate_bars_reference
     if args.enable_clams_detection:
         tools_updates.setdefault('clams_detection', {})['run_tool'] = (args.enable_clams_detection == 'on')
 
@@ -626,6 +677,14 @@ def run_cli_mode(args):
         logger.warning(
             "access_file_exclude_flagged_audio is on but qct-parse audio analysis is off; "
             "the option will have no effect until --enable-audio-analysis on is set."
+        )
+
+    # Soft warning (no forcing): the bars-evaluation reference only matters
+    # when Evaluate Color Bars is running.
+    if args.evaluate_bars_reference and not final_checks.tools.qct_parse.evaluateBars:
+        logger.warning(
+            "--evaluate-bars-reference was set but qct_parse.evaluateBars is off; "
+            "the reference will have no effect until Evaluate Color Bars is enabled."
         )
 
     # Input video extension. Persist the selection, then auto-disable MKV-only
@@ -662,6 +721,13 @@ def run_cli_mode(args):
                 "mediatrace custom-tag check only work on Matroska. Forcing them off. "
                 "The ffprobe signal-flow (ENCODER_SETTINGS) check is skipped for non-MKV input."
             )
+
+    # Print requested config profile(s) last, so the output reflects every
+    # config change applied above (profiles, tool toggles, frame-analysis,
+    # outputs, fixity, qct-parse sub-toggles, and MKV-only forcing) rather
+    # than the pre-update state.
+    if args.print_config_profile:
+        config_edit.print_config(args.print_config_profile)
 
     if args.dry_run_only:
         logger.critical("Dry run selected. Exiting now.")
