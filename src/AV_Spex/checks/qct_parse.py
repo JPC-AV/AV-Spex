@@ -555,6 +555,30 @@ def validateEntireVideoAsBars(startObj, pkt, durationStart, framesList, buffSize
         return False, None
     
 
+# Color bars keys that are not signal levels on the 0-1023 scale. They take part in
+# the bars evaluation but are skipped by the detected-vs-SMPTE levels comparison.
+BARS_NON_LEVEL_KEYS = ('BRNG',)
+
+# Out-of-range pixel share of a correct SMPTE bars signal, measured from the
+# ffmpeg-generated 10-bit reference the smpte_color_bars config values come from.
+# Only a backstop for a missing/malformed config value — the config is the source
+# of truth. See SmpteColorBars.BRNG in utils/config_setup.py.
+SMPTE_BRNG_DEFAULT = 0.0118
+
+
+def _get_smpte_brng_floor():
+    """
+    Return the configured SMPTE BRNG value, used as the floor under the bars-derived
+    BRNG threshold (and as the threshold outright when no bars were detected).
+    """
+    spex_config = config_mgr.get_config('spex', SpexConfig)
+    try:
+        return float(getattr(spex_config.qct_parse_values.smpte_color_bars, 'BRNG', SMPTE_BRNG_DEFAULT))
+    except (TypeError, ValueError):
+        logger.warning(f"Malformed SMPTE BRNG value in spex config - using {SMPTE_BRNG_DEFAULT}\n")
+        return SMPTE_BRNG_DEFAULT
+
+
 def evalBars(startObj,pkt,durationStart,durationEnd,framesList,buffSize):
     """
     Find the median values for specific QCTools keys inside the duration of the color bars.
@@ -565,6 +589,15 @@ def evalBars(startObj,pkt,durationStart,durationEnd,framesList,buffSize):
     the returned values faithfully represent the steady color bars recorded on the tape.
     The frame buffer (buffSize) additionally delays the start of measurement, so the
     leading crash-in frames are excluded before the median is taken.
+
+    BRNG is measured alongside the level tags but handled differently: it is the share
+    of out-of-range pixels (0-1), so it keeps float precision instead of being rounded
+    to the integer QCTools level scale, and its median is floored at the configured
+    SMPTE BRNG value. The median makes a good per-tape reference — "content should not
+    be further out of range than this tape's own bars" — and analog bars measure
+    0.008-0.03 on the sample tapes. The floor keeps a bars region that measures below
+    the SMPTE reference (0.0118 — correct bars are not out-of-range-free) from driving
+    the threshold down toward zero, where every content frame would fail.
 
     Parameters:
         pkt (str): The attribute key used to extract timestamps from <frame> tag in qctools.xml.gz.
@@ -581,7 +614,7 @@ def evalBars(startObj,pkt,durationStart,durationEnd,framesList,buffSize):
         return None
 
     # Define the keys for which you want to calculate the median
-    keys_to_check = ['YMAX', 'YMIN', 'UMIN', 'UMAX', 'VMIN', 'VMAX', 'SATMAX', 'SATMIN']
+    keys_to_check = ['YMAX', 'YMIN', 'UMIN', 'UMAX', 'VMIN', 'VMAX', 'SATMAX', 'SATMIN', 'BRNG']
     # Collect every measured value per key so we can take the median across all
     # measured bars frames once parsing is complete.
     barsValues = {key_being_checked: [] for key_being_checked in keys_to_check}
@@ -619,9 +652,24 @@ def evalBars(startObj,pkt,durationStart,durationEnd,framesList,buffSize):
     # Compute the median per key, rounded to an integer to match the QCTools value
     # scale. Keys with no measured frames fall back to a permissive extreme so the
     # downstream threshold never rejects everything.
+    smpte_brng_floor = _get_smpte_brng_floor()
     maxBarsDict = {}
     for colorbar_key in keys_to_check:
-        if barsValues[colorbar_key]:
+        if colorbar_key == "BRNG":
+            # Fraction of out-of-range pixels: keep float precision (rounding to
+            # int would zero it out) and never let the threshold fall below the
+            # configured floor. Unmeasured bars fall back to the floor itself.
+            if barsValues[colorbar_key]:
+                measured_brng = round(statistics.median(barsValues[colorbar_key]), 5)
+                maxBarsDict[colorbar_key] = max(measured_brng, smpte_brng_floor)
+                if maxBarsDict[colorbar_key] != measured_brng:
+                    logger.debug(
+                        f"Measured bars BRNG median {measured_brng} is below the configured "
+                        f"floor - using {smpte_brng_floor} as the BRNG threshold\n"
+                    )
+            else:
+                maxBarsDict[colorbar_key] = smpte_brng_floor
+        elif barsValues[colorbar_key]:
             maxBarsDict[colorbar_key] = int(round(statistics.median(barsValues[colorbar_key])))
         else:
             maxBarsDict[colorbar_key] = 0 if "MAX" in colorbar_key else 1023
@@ -779,6 +827,11 @@ def print_color_bar_values(video_id, smpte_color_bars, maxBarsDict, colorbars_va
     Compares SMPTE color bar values with those extracted from a video using QCTools.
     The output CSV includes the attribute name, the expected SMPTE value, and the value detected in the video.
 
+    BRNG is deliberately omitted: it is a share of out-of-range pixels (0-1), not a
+    signal level on the 0-1023 scale the other keys sit on, so it would plot as an
+    invisible bar in the report's detected-vs-SMPTE graph. BRNG participates in the
+    bars *evaluation* (and therefore the failure timeline) instead.
+
     Args:
         video_id (str): Identifier for the video being analyzed.
         smpte_color_bars (dict): Dictionary of expected SMPTE color bar values, from config.yaml
@@ -788,12 +841,14 @@ def print_color_bar_values(video_id, smpte_color_bars, maxBarsDict, colorbars_va
 
     with open(colorbars_values_output, 'w', newline='') as csvfile:
         writer = csv.writer(csvfile)
-        
+
         # Write the header
         writer.writerow(["QCTools Fields", "SMPTE Colorbars", f"{video_id} Colorbars"])
-        
+
         # Write the data
         for key in smpte_color_bars:
+            if key in BARS_NON_LEVEL_KEYS:
+                continue
             smpte_value = smpte_color_bars.get(key, "")
             maxbars_value = maxBarsDict.get(key, "")
             writer.writerow([key, smpte_value, maxbars_value])

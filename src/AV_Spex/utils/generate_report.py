@@ -3435,7 +3435,16 @@ EVAL_BARS_TAG_COLORS = {
     'VMIN': '#008300',
     'SATMAX': '#4a3aa7',
     'SATMIN': '#e34948',
+    # BRNG measures a different thing than the level tags above (share of
+    # out-of-range pixels rather than a signal level), so it also carries a
+    # dashed line — identity doesn't rest on hue alone. Teal echoes the cyan
+    # out-of-range highlight in the thumbnails. Validated with the eight above
+    # on #f5e9e3: no adjacent CVD pair or contrast result got worse.
+    'BRNG': '#00969e',
 }
+
+# Tags drawn dashed in the timeline because they aren't 0-1023 signal levels
+EVAL_BARS_DASHED_TAGS = ('BRNG',)
 
 
 def _read_failures_csv_rows(failure_csv_path):
@@ -3688,9 +3697,12 @@ def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_d
     fig = go.Figure()
     for tag in ordered_tags:
         density = [min(100.0, count / frames_per_bin * 100.0) for count in tag_counts[tag]]
+        line_style = dict(width=2, color=EVAL_BARS_TAG_COLORS.get(tag, '#52514e'))
+        if tag in EVAL_BARS_DASHED_TAGS:
+            line_style['dash'] = 'dash'
         fig.add_trace(go.Scatter(
             x=bin_centers, y=density, mode='lines', name=tag,
-            line=dict(width=2, color=EVAL_BARS_TAG_COLORS.get(tag, '#52514e')),
+            line=line_style,
             text=bin_labels,
             hovertemplate='%{text} &middot; ' + tag + ': %{y:.0f}% of frames<extra></extra>',
         ))
@@ -3884,6 +3896,13 @@ def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_d
         periods_note += " Dark bands mark detected black segments, which frame analysis skips when placing its periods."
     if bars_regions:
         periods_note += " Plum bands, underlined by a solid rule, mark detected color bars, which are excluded from the evaluation."
+    # BRNG is the measure frame analysis uses to place its periods, so calling it
+    # out explains why the dashed trace and the shaded bands tend to coincide.
+    brng_note = ""
+    if 'BRNG' in tag_counts:
+        brng_note = (" The dashed BRNG line counts frames where a larger share of pixels fell outside"
+                     " broadcast range than in this tape's own color bars &mdash; the same measure frame"
+                     " analysis uses to choose where to place its analysis periods.")
     timeline_html = f"""
     {FAILURE_SECTION_JS}
     <div style="background-color: #f5e9e3; padding: 10px; margin-top: 10px;">
@@ -3891,7 +3910,7 @@ def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_d
         <p style="font-size: 13px;">Each line shows, per {bin_label}-second interval, the percentage of frames
         whose value fell outside that tag's threshold.
         Dotted lines mark the largest failure clusters; the thumbnail above each shows a representative frame
-        (out-of-range areas highlighted in cyan).{periods_note}</p>
+        (out-of-range areas highlighted in cyan).{brng_note}{periods_note}</p>
         {chart_html}
         {thumb_strip_html}
         {full_table_html}

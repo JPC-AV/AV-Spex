@@ -120,6 +120,30 @@ def test_make_eval_bars_timeline_html_analysis_periods(two_cluster_csv):
     assert "Shaded bands" not in html_no_periods
 
 
+def test_make_eval_bars_timeline_html_brng_trace(tmp_path):
+    """BRNG plots like the level tags but carries its own color, a dashed line
+    (it is not a 0-1023 level), and an explanatory note tying it to the
+    frame-analysis period placement."""
+    csv_path = _write_failures_csv(tmp_path, [
+        (10.0, 30, "YMAX", 925.0, 897.0),
+        (100.0, 40, "BRNG", 0.41, 0.0306),
+    ])
+    html = make_eval_bars_timeline_html(csv_path, "JPC_AV_TEST",
+                                        video_duration=200.0, frame_rate=29.97)
+
+    assert "BRNG" in html
+    assert "00969e" in html
+    assert '"dash":"dash"' in html.replace(" ", "")
+    assert "dashed BRNG line" in html
+
+
+def test_make_eval_bars_timeline_html_no_brng_note_without_brng(two_cluster_csv):
+    html = make_eval_bars_timeline_html(two_cluster_csv, "JPC_AV_TEST",
+                                        video_duration=200.0, frame_rate=29.97)
+    assert "dashed BRNG line" not in html
+    assert '"dash":"dash"' not in html.replace(" ", "")
+
+
 def test_get_frame_analysis_periods_from_enhanced_json(tmp_path):
     import json
     enhanced = {
