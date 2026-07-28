@@ -6208,6 +6208,10 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     bars_regions = [(bars_start, bars_end) for _, bars_start, bars_end in qct_duration_runs]
 
     # Create graphs for all existing csv files (existing code...)
+    # The timeline renders as its own titled section below the evaluation pies,
+    # so it stays a separate variable rather than being folded into
+    # colorbars_eval_html.
+    colorbars_timeline_html = None
     if qctools_bars_eval_check_output and failureInfoSummary_colorbars:
         # Pies summarize the per-tag failure share; the timeline below them
         # carries the failure specifics (distribution + peak thumbnails)
@@ -6218,8 +6222,6 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
             analysis_periods=get_frame_analysis_periods(frame_outputs),
             black_segments=get_frame_analysis_black_segments(frame_outputs),
             bars_regions=bars_regions)
-        if colorbars_timeline_html:
-            colorbars_eval_html = (colorbars_eval_html or "") + colorbars_timeline_html
     elif qctools_bars_eval_check_output and failureInfoSummary_colorbars is None:
        color_bars_segment = f"""
         <div style="display: flex; flex-direction: column; align-items: start; background-color: #f5e9e3; padding: 10px;"> 
@@ -6498,6 +6500,8 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         toc_entries.append(('section-clams-detection', 'CLAMS Detection'))
     if colorbars_eval_html:
         toc_entries.append(('section-colorbars-eval', 'Colorbars Threshold Evaluation'))
+    if colorbars_timeline_html:
+        toc_entries.append(('section-timeline', 'Timeline of Signal Distribution'))
     if clamped_levels_html:
         toc_entries.append(('section-clamped-levels', 'Clamped Levels Detection'))
     if chroma_phase_html:
@@ -6889,6 +6893,12 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         html_template += f"""
         <h3 id="section-colorbars-eval">{eval_header}</h3>
         {colorbars_eval_html}
+        """
+
+    if colorbars_timeline_html:
+        html_template += f"""
+        <h3 id="section-timeline">Timeline of Signal Distribution</h3>
+        {colorbars_timeline_html}
         """
 
     if clamped_levels_html:
