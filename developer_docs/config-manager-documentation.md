@@ -174,7 +174,7 @@ class QCTParseToolConfig:
     barsDetection: bool                  # Detect color bars in video
     evaluateBars: bool                   # Compare content to detected bars
     thumbExport: bool                    # Export thumbnail images of failed frames
-    audio_analysis: bool = False         # Detect audio clipping, channel imbalance, dropout
+    audio_analysis: bool = False         # Detect audio clipping, channel imbalance, identical channels, dropout
     detect_clamped_levels: bool = False  # Detect broadcast-range level clamping
 ```
 

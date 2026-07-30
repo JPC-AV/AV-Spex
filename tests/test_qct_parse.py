@@ -194,6 +194,106 @@ def test_get_comp_from_config_raises_when_profile_does_not_match(monkeypatch):
         qp.getCompFromConfig({}, profile, "AnotherTag")
 
 
+# ---- evalBars BRNG handling ----------------------------------------------
+
+_EVAL_BARS_LEVEL_TAGS = ("YMAX", "YMIN", "UMIN", "UMAX", "VMIN", "VMAX", "SATMAX", "SATMIN")
+
+
+def _write_qctools_gz(path, frames, pkt="pkt_dts_time"):
+    """Write a minimal .qctools.xml.gz holding the given video frames.
+
+    frames: list of (timestamp_seconds, {tag_name: value}) pairs.
+    """
+    parts = ["<?xml version='1.0'?><ffprobe><frames>"]
+    for timestamp, tags in frames:
+        parts.append(f'<frame media_type="video" {pkt}="{timestamp}">')
+        for name, value in tags.items():
+            parts.append(f'<tag key="lavfi.signalstats.{name}" value="{value}"/>')
+        parts.append("</frame>")
+    parts.append("</frames></ffprobe>")
+    with gzip.open(path, "wt", encoding="utf-8") as f:
+        f.write("".join(parts))
+
+
+def _bars_frames(brng_values, level_value=500):
+    """Frames spanning 0-n seconds, one BRNG value each plus flat level tags."""
+    frames = []
+    for index, brng in enumerate(brng_values):
+        tags = {tag: level_value for tag in _EVAL_BARS_LEVEL_TAGS}
+        tags["BRNG"] = brng
+        frames.append((f"{index * 0.1:.3f}", tags))
+    return frames
+
+
+def _run_eval_bars(path, monkeypatch, brng_floor=0.01, frame_count=30):
+    import collections
+    monkeypatch.setattr(qp, "_get_smpte_brng_floor", lambda: brng_floor)
+    buffSize = 11
+    return qp.evalBars(str(path), "pkt_dts_time", 0, 9999,
+                       collections.deque(maxlen=buffSize), buffSize)
+
+
+def test_eval_bars_keeps_brng_float_precision(tmp_path, monkeypatch):
+    """BRNG is a 0-1 share, so the median must not be rounded to the integer
+    level scale used by YMAX/SATMAX etc."""
+    path = tmp_path / "report.qctools.xml.gz"
+    _write_qctools_gz(path, _bars_frames([0.0306] * 30))
+
+    bars = _run_eval_bars(path, monkeypatch)
+    assert bars["BRNG"] == pytest.approx(0.0306)
+    # Level tags still round to ints
+    assert bars["YMAX"] == 500
+
+
+def test_eval_bars_floors_brng_at_config_value(tmp_path, monkeypatch):
+    """A pristine bars region measures near zero; the floor keeps the threshold
+    from failing every content frame downstream."""
+    path = tmp_path / "report.qctools.xml.gz"
+    _write_qctools_gz(path, _bars_frames([0.0001] * 30))
+
+    bars = _run_eval_bars(path, monkeypatch, brng_floor=0.01)
+    assert bars["BRNG"] == 0.01
+
+
+def test_eval_bars_brng_falls_back_to_floor_when_unmeasured(tmp_path, monkeypatch):
+    """Fewer frames than the buffer means nothing is measured — BRNG falls back
+    to the floor rather than the level tags' permissive extremes."""
+    path = tmp_path / "report.qctools.xml.gz"
+    _write_qctools_gz(path, _bars_frames([0.05] * 3))
+
+    bars = _run_eval_bars(path, monkeypatch, brng_floor=0.02)
+    assert bars["BRNG"] == 0.02
+    assert bars["YMAX"] == 0        # unchanged permissive fallbacks
+    assert bars["YMIN"] == 1023
+
+
+def test_get_smpte_brng_floor_reads_config(monkeypatch):
+    fake_spex = MagicMock()
+    fake_spex.qct_parse_values.smpte_color_bars.BRNG = 0.025
+    monkeypatch.setattr(qp.config_mgr, "get_config", lambda *a, **kw: fake_spex)
+    assert qp._get_smpte_brng_floor() == 0.025
+
+
+def test_get_smpte_brng_floor_defaults_when_malformed(monkeypatch):
+    fake_spex = MagicMock()
+    fake_spex.qct_parse_values.smpte_color_bars.BRNG = "not a number"
+    monkeypatch.setattr(qp.config_mgr, "get_config", lambda *a, **kw: fake_spex)
+    assert qp._get_smpte_brng_floor() == qp.SMPTE_BRNG_DEFAULT
+
+
+def test_smpte_brng_default_matches_shipped_config():
+    """The backstop constant must not drift from the config it stands in for."""
+    import json
+    from AV_Spex.utils import config_setup
+
+    config_path = os.path.join(os.path.dirname(config_setup.__file__),
+                               "..", "config", "spex_config.json")
+    with open(os.path.normpath(config_path)) as f:
+        shipped = json.load(f)
+    assert shipped["qct_parse_values"]["smpte_color_bars"]["BRNG"] == qp.SMPTE_BRNG_DEFAULT
+    assert config_setup.SmpteColorBars.BRNG == qp.SMPTE_BRNG_DEFAULT
+
+
 # ===========================================================================
 # Section 2 — _tc_* statistics + filtering helpers
 # ===========================================================================
@@ -873,6 +973,216 @@ def test_dropout_results_suppresses_stereo_silence_zcr_events(tmp_path):
 
 
 # ===========================================================================
+# Section 4d — identical channel (dual mono) detection
+# ===========================================================================
+
+def _screen_frames(rms_by_channel_per_frame, phase=None, interval=1.0):
+    """Run the per-frame screen over a list of {channel: rms} dicts."""
+    pairs = {}
+    for i, frame_rms in enumerate(rms_by_channel_per_frame):
+        frame_phase = phase[i] if isinstance(phase, list) else phase
+        qp._identical_update_pairs(pairs, i * interval, frame_rms, frame_phase)
+    return pairs
+
+
+def test_identical_screen_matches_duplicated_channels():
+    """Equal per-frame RMS + phase 1.0 screens as a full match."""
+    frames = [{1: -20.0 - (i % 5), 2: -20.0 - (i % 5)} for i in range(50)]
+    pairs = _screen_frames(frames, phase=1.0)
+    pair = pairs[(1, 2)]
+    assert pair["active_frames"] == 50
+    assert pair["matching_frames"] == 50
+
+
+def test_identical_screen_rejects_differing_levels():
+    """A level difference beyond the tolerance is not a match."""
+    frames = [{1: -20.0, 2: -20.0 - qp.IDENTICAL_RMS_TOLERANCE_DB - 0.5} for _ in range(50)]
+    pairs = _screen_frames(frames, phase=1.0)
+    assert pairs[(1, 2)]["matching_frames"] == 0
+
+
+def test_identical_screen_rejects_matching_levels_with_uncorrelated_phase():
+    """Equal levels alone don't match — the stereo phase has to agree too."""
+    frames = [{1: -20.0, 2: -20.0} for _ in range(50)]
+    pairs = _screen_frames(frames, phase=0.2)
+    assert pairs[(1, 2)]["matching_frames"] == 0
+
+
+def test_identical_screen_counts_inverted_phase_as_duplicate():
+    """Polarity-inverted channels (phase -1) screen as duplicated audio."""
+    frames = [{1: -20.0, 2: -20.0} for _ in range(50)]
+    pairs = _screen_frames(frames, phase=-1.0)
+    pair = pairs[(1, 2)]
+    assert pair["matching_frames"] == 50
+    assert pair["inverted_frames"] == 50
+
+
+def test_identical_screen_excludes_silent_frames():
+    """Silence matches silence trivially, so it isn't counted either way."""
+    frames = [{1: -90.0, 2: -90.0} for _ in range(30)]
+    pairs = _screen_frames(frames, phase=1.0)
+    pair = pairs[(1, 2)]
+    assert pair["active_frames"] == 0
+    assert pair["silent_frames"] == 30
+
+
+def test_identical_screen_ignores_phase_beyond_stereo():
+    """aphasemeter describes one stereo pair, so it isn't applied to 3 channels."""
+    frames = [{1: -20.0, 2: -20.0, 3: -40.0} for _ in range(20)]
+    pairs = _screen_frames(frames, phase=0.0)
+    assert pairs[(1, 2)]["matching_frames"] == 20   # matched on level alone
+    assert pairs[(1, 3)]["matching_frames"] == 0
+
+
+def test_identical_screen_keeps_long_runs_as_spans():
+    """A matching run long enough to report becomes a span; silence doesn't break it."""
+    frames = ([{1: -20.0, 2: -20.0}] * 10
+              + [{1: -90.0, 2: -90.0}] * 5      # silent gap, run stays open
+              + [{1: -20.0, 2: -20.0}] * 10
+              + [{1: -20.0, 2: -5.0}] * 10)     # divergence closes the run
+    pairs = _screen_frames(frames, phase=1.0)
+    qp._identical_close_run(pairs[(1, 2)])
+    spans = pairs[(1, 2)]["spans"]
+    assert len(spans) == 1
+    assert spans[0] == (0.0, 24.0)
+
+
+def test_identical_screen_drops_short_runs():
+    """Runs shorter than the minimum span aren't reported as regions."""
+    frames = ([{1: -20.0, 2: -20.0}] * 2
+              + [{1: -20.0, 2: -5.0}] * 20)
+    pairs = _screen_frames(frames, phase=1.0)
+    qp._identical_close_run(pairs[(1, 2)])
+    assert pairs[(1, 2)]["spans"] == []
+
+
+def test_characterize_identical_bit_identical():
+    """A difference that cancels to digital silence is bit-identical."""
+    m = {"difference_peak_db": float("-inf"), "sum_peak_db": -12.0, "program_peak_db": -18.0}
+    assert qp._characterize_identical(m, False) == ("Bit-identical", False, float("-inf"))
+
+
+def test_characterize_identical_effective_margin():
+    """A residual far enough below program peak is the same audio twice."""
+    m = {"difference_peak_db": -60.0, "sum_peak_db": -12.0, "program_peak_db": -18.0}
+    assert qp._characterize_identical(m, False)[0] == "Effectively identical"
+
+
+def test_characterize_identical_rejects_program_level_residual():
+    """A residual near program level means the channels really do differ."""
+    m = {"difference_peak_db": -20.0, "sum_peak_db": -20.0, "program_peak_db": -18.0}
+    assert qp._characterize_identical(m, False)[0] == "Distinct channels"
+
+
+def test_characterize_identical_polarity_inverted():
+    """When the sum cancels instead of the difference, it's an inverted duplicate."""
+    m = {"difference_peak_db": -12.0, "sum_peak_db": float("-inf"), "program_peak_db": -18.0}
+    label, inverted, residual = qp._characterize_identical(m, True)
+    assert label == "Polarity-inverted duplicate (bit-identical)"
+    assert inverted is True
+
+
+def test_identical_results_unconfirmed_without_video(tmp_path):
+    """With no file to decode, the verdict is reported as unconfirmed."""
+    frames = [{1: -20.0, 2: -20.0} for _ in range(50)]
+    results = qp._detect_and_write_identical_results(
+        _screen_frames(frames, phase=1.0), str(tmp_path), total_audio_frames=50
+    )
+    assert results["overall_verdict"] == "Identical channels (dual mono)"
+    assert results["overall_characterization"] == "Effectively identical (unconfirmed)"
+    assert results["identical_channel_pairs"] == [(1, 2)]
+    assert os.path.isfile(tmp_path / "qct-parse_identical_channels.csv")
+
+
+def test_identical_results_distinct_channels_write_csv(tmp_path):
+    """Distinct channels still get a CSV, reporting the negative result."""
+    frames = [{1: -20.0, 2: -8.0} for _ in range(50)]
+    results = qp._detect_and_write_identical_results(
+        _screen_frames(frames, phase=0.1), str(tmp_path), total_audio_frames=50
+    )
+    assert results["overall_verdict"] == "Distinct channels"
+    rows = _read_csv_rows(tmp_path / "qct-parse_identical_channels.csv")
+    assert rows[0] == ["Identical Channel Detection Results"]
+    assert ["Overall Verdict", "Distinct channels"] in rows
+
+
+def test_identical_results_confirmation_overrides_screen(tmp_path):
+    """The sample comparison is authoritative when it contradicts the screen."""
+    frames = [{1: -20.0, 2: -20.0} for _ in range(50)]
+    with patch.object(qp, "_measure_channel_difference", return_value={
+        "samples": 1000, "peak_a_db": -18.0, "peak_b_db": -18.0,
+        "program_peak_db": -18.0, "difference_peak_db": -19.0,
+        "difference_rms_db": -25.0, "sum_peak_db": -19.0, "sum_rms_db": -25.0,
+    }):
+        results = qp._detect_and_write_identical_results(
+            _screen_frames(frames, phase=1.0), str(tmp_path),
+            total_audio_frames=50, video_path="/fake/video.mkv"
+        )
+    assert results["overall_verdict"] == "Distinct channels"
+    assert results["identical_channel_pairs"] == []
+
+
+def test_identical_results_partial_confirms_longest_span(tmp_path):
+    """A partial match confirms on its longest matching span, not the whole file."""
+    frames = ([{1: -20.0, 2: -20.0}] * 40      # duplicated stretch
+              + [{1: -20.0, 2: -5.0}] * 160)   # stereo remainder
+    with patch.object(qp, "_measure_channel_difference", return_value={
+        "samples": 1000, "peak_a_db": -18.0, "peak_b_db": -18.0,
+        "program_peak_db": -18.0, "difference_peak_db": float("-inf"),
+        "difference_rms_db": float("-inf"), "sum_peak_db": -12.0, "sum_rms_db": -15.0,
+    }) as measure:
+        results = qp._detect_and_write_identical_results(
+            _screen_frames(frames, phase=[1.0] * 40 + [0.1] * 160), str(tmp_path),
+            total_audio_frames=200, video_path="/fake/video.mkv"
+        )
+    assert results["overall_verdict"] == "Partially identical channels"
+    assert results["overall_characterization"] == "Partially identical (bit-identical)"
+    # confirmed over the span, not the file: start/duration were passed
+    _, kwargs = measure.call_args
+    assert kwargs["start"] == pytest.approx(0.0)
+    assert kwargs["duration"] == pytest.approx(39.0)
+
+
+def test_identical_results_none_without_pairs(tmp_path):
+    """A mono file has nothing to compare, so no results and no CSV."""
+    assert qp._detect_and_write_identical_results({}, str(tmp_path), 100) is None
+    assert not os.path.exists(tmp_path / "qct-parse_identical_channels.csv")
+
+
+def test_measure_channel_difference_builds_pan_command(tmp_path):
+    """Single-stream sources map the two channels through a pan filter."""
+    fake = MagicMock()
+    fake.stdout.read.return_value = b""
+    fake.stderr.read.return_value = b""
+    fake.returncode = 0
+    with patch.object(qp.subprocess, "Popen", return_value=fake) as popen:
+        qp._measure_channel_difference("/fake/video.mkv", 1, 2)
+    cmd = popen.call_args[0][0]
+    assert "pan=stereo|c0=c0|c1=c1" in cmd
+    assert "0:a:0" in cmd
+    assert "-ss" not in cmd
+
+
+def test_measure_channel_difference_merges_multi_stream_sources(tmp_path):
+    """Discrete mono streams are amerged in sidecar order before the pan."""
+    fake = MagicMock()
+    fake.stdout.read.return_value = b""
+    fake.stderr.read.return_value = b""
+    fake.returncode = 0
+    with patch.object(qp.subprocess, "Popen", return_value=fake) as popen:
+        qp._measure_channel_difference(
+            "/fake/video.mxf", 1, 3, audio_stream_indexes=[0, 1, 2, 3],
+            start=10.0, duration=30.0
+        )
+    cmd = popen.call_args[0][0]
+    graph = cmd[cmd.index("-filter_complex") + 1]
+    assert graph.startswith("[0:a:0][0:a:1][0:a:2][0:a:3]amerge=inputs=4")
+    assert graph.endswith("pan=stereo|c0=c0|c1=c2[cmp]")
+    assert cmd[cmd.index("-ss") + 1] == "10.000"
+    assert cmd[cmd.index("-t") + 1] == "30.000"
+
+
+# ===========================================================================
 # Section 5 — CSV writers
 # ===========================================================================
 
@@ -903,6 +1213,18 @@ def test_print_color_bar_values_handles_missing_values(tmp_path):
     rows = _read_csv_rows(out)
     # Missing detected value comes back as empty cell
     assert rows[1] == ["YMAX", "940", ""]
+
+
+def test_print_color_bar_values_omits_brng(tmp_path):
+    """BRNG is a share of out-of-range pixels, not a 0-1023 level, so it stays
+    out of the detected-vs-SMPTE levels comparison (and its graph)."""
+    out = tmp_path / "bars.csv"
+    smpte = {"YMAX": 940, "BRNG": 0.01}
+    detected = {"YMAX": 1019, "BRNG": 0.031}
+    qp.print_color_bar_values("video_42", smpte, detected, str(out))
+
+    rows = _read_csv_rows(out)
+    assert [row[0] for row in rows[1:]] == ["YMAX"]
 
 
 # ---- print_color_bar_keys -----------------------------------------------

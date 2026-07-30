@@ -213,15 +213,15 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
             tool_group = QGroupBox(tool.title())
             tool_layout = QGridLayout()
             
-            # Check tool (now using checkbox for boolean)
-            tool_layout.addWidget(QLabel("Check Tool:"), 0, 0)
-            check_checkbox = QCheckBox()
-            tool_layout.addWidget(check_checkbox, 0, 1)
-            
             # Run tool (now using checkbox for boolean)
-            tool_layout.addWidget(QLabel("Run Tool:"), 1, 0)
+            tool_layout.addWidget(QLabel("Run Tool:"), 0, 0)
             run_checkbox = QCheckBox()
-            tool_layout.addWidget(run_checkbox, 1, 1)
+            tool_layout.addWidget(run_checkbox, 0, 1)
+
+            # Check tool (now using checkbox for boolean)
+            tool_layout.addWidget(QLabel("Check Tool:"), 1, 0)
+            check_checkbox = QCheckBox()
+            tool_layout.addWidget(check_checkbox, 1, 1)
             
             self.basic_tool_checks[tool] = {
                 'check_tool': check_checkbox,
@@ -424,7 +424,7 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
         # Perform Audio Analysis
         self.audio_analysis_check = QCheckBox("Perform Audio Analysis")
         self.audio_analysis_check.setStyleSheet("font-weight: bold;")
-        audio_analysis_desc = QLabel("Detect audio clipping, channel imbalance, audible timecode, and audio dropout")
+        audio_analysis_desc = QLabel("Detect audio clipping, channel imbalance, identical channels, audible timecode, and audio dropout")
         audio_analysis_desc.setIndent(20)
 
         # Add all widgets

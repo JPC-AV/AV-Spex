@@ -17,11 +17,14 @@ import sys
 import re
 import operator
 import collections      # for circular buffer
+import statistics       # for median of bars values
 import csv
 import datetime as dt
 import io
 from dataclasses import asdict, dataclass, field
 from collections import defaultdict
+
+import numpy as np
 
 from AV_Spex.utils.log_setup import logger, report_ffmpeg_stderr
 from AV_Spex.utils.config_setup import ChecksConfig, SpexConfig
@@ -554,9 +557,49 @@ def validateEntireVideoAsBars(startObj, pkt, durationStart, framesList, buffSize
         return False, None
     
 
+# Color bars keys that are not signal levels on the 0-1023 scale. They take part in
+# the bars evaluation but are skipped by the detected-vs-SMPTE levels comparison.
+BARS_NON_LEVEL_KEYS = ('BRNG',)
+
+# Out-of-range pixel share of a correct SMPTE bars signal, measured from the
+# ffmpeg-generated 10-bit reference the smpte_color_bars config values come from.
+# Only a backstop for a missing/malformed config value — the config is the source
+# of truth. See SmpteColorBars.BRNG in utils/config_setup.py.
+SMPTE_BRNG_DEFAULT = 0.0118
+
+
+def _get_smpte_brng_floor():
+    """
+    Return the configured SMPTE BRNG value, used as the floor under the bars-derived
+    BRNG threshold (and as the threshold outright when no bars were detected).
+    """
+    spex_config = config_mgr.get_config('spex', SpexConfig)
+    try:
+        return float(getattr(spex_config.qct_parse_values.smpte_color_bars, 'BRNG', SMPTE_BRNG_DEFAULT))
+    except (TypeError, ValueError):
+        logger.warning(f"Malformed SMPTE BRNG value in spex config - using {SMPTE_BRNG_DEFAULT}\n")
+        return SMPTE_BRNG_DEFAULT
+
+
 def evalBars(startObj,pkt,durationStart,durationEnd,framesList,buffSize):
     """
-    Find maximum or minimum values for specific QCTools keys inside the duration of the color bars. 
+    Find the median values for specific QCTools keys inside the duration of the color bars.
+
+    The value returned for each key is the median across every measured frame in the
+    detected bars region, rather than a single peak/trough frame. The median ignores
+    transient outliers — most notably the frames where the bars "crash" in or out — so
+    the returned values faithfully represent the steady color bars recorded on the tape.
+    The frame buffer (buffSize) additionally delays the start of measurement, so the
+    leading crash-in frames are excluded before the median is taken.
+
+    BRNG is measured alongside the level tags but handled differently: it is the share
+    of out-of-range pixels (0-1), so it keeps float precision instead of being rounded
+    to the integer QCTools level scale, and its median is floored at the configured
+    SMPTE BRNG value. The median makes a good per-tape reference — "content should not
+    be further out of range than this tape's own bars" — and analog bars measure
+    0.008-0.03 on the sample tapes. The floor keeps a bars region that measures below
+    the SMPTE reference (0.0118 — correct bars are not out-of-range-free) from driving
+    the threshold down toward zero, where every content frame would fail.
 
     Parameters:
         pkt (str): The attribute key used to extract timestamps from <frame> tag in qctools.xml.gz.
@@ -565,24 +608,18 @@ def evalBars(startObj,pkt,durationStart,durationEnd,framesList,buffSize):
         framesList (list): List of frameDict dictionaries
 
     Returns:
-        maxBarsDict (dict): Returns dictionary of max or min value of corresponding QCTools keys
+        maxBarsDict (dict): Returns dictionary of the median value of corresponding QCTools keys
     """
-    
+
     etree = load_etree()
     if etree is None:
         return None
-    
-    # Define the keys for which you want to calculate the average
-    keys_to_check = ['YMAX', 'YMIN', 'UMIN', 'UMAX', 'VMIN', 'VMAX', 'SATMAX', 'SATMIN']
-    # Initialize a dictionary to store the highest values for each key
-    maxBarsDict = {}
-    # adds the list keys_to_check as keys to a dictionary
-    for key_being_checked in keys_to_check:
-        # assign 'dummy' threshold to be overwritten
-        if "MAX" in key_being_checked:
-            maxBarsDict[key_being_checked] = 0
-        elif "MIN" in key_being_checked:
-            maxBarsDict[key_being_checked] = 1023
+
+    # Define the keys for which you want to calculate the median
+    keys_to_check = ['YMAX', 'YMIN', 'UMIN', 'UMAX', 'VMIN', 'VMAX', 'SATMAX', 'SATMIN', 'BRNG']
+    # Collect every measured value per key so we can take the median across all
+    # measured bars frames once parsing is complete.
+    barsValues = {key_being_checked: [] for key_being_checked in keys_to_check}
 
     # Use the safe parser with encoding fallback
     parser_iter = safe_gzip_iterparse(startObj, etree)
@@ -600,29 +637,45 @@ def evalBars(startObj,pkt,durationStart,durationEnd,framesList,buffSize):
                     frameDict = {}  # start an empty dict for the new frame
                     frameDict[pkt] = frame_pkt_dts_time  # give the dict the timestamp, which we have now
                     for t in list(elem):    # iterating through each attribute for each element
-                        keySplit = t.attrib['key'].split(".")   # split the names by dots 
+                        keySplit = t.attrib['key'].split(".")   # split the names by dots
                         keyName = str(keySplit[-1])             # get just the last word for the key name
                         frameDict[keyName] = t.attrib['value']	# add each attribute to the frame dictionary
                     framesList.append(frameDict)
-                    if len(framesList) == buffSize:	# wait till the buffer is full to start detecting bars
-                        ## This is where the bars detection magic actually happens
+                    if len(framesList) == buffSize:	# wait till the buffer is full to start measuring bars
+                        ## This is where the bars measurement magic actually happens
                         for colorbar_key in keys_to_check:
                             if colorbar_key in frameDict:
-                                if "MAX" in colorbar_key:
-                                    # Convert the value to float and compare it with the current highest value
-                                    value = float(frameDict[colorbar_key])
-                                    if value > maxBarsDict[colorbar_key]:
-                                        maxBarsDict[colorbar_key] = value
-                                elif "MIN" in colorbar_key:
-                                    # Convert the value to float and compare it with the current highest value
-                                    value = float(frameDict[colorbar_key])
-                                    if value < maxBarsDict[colorbar_key]:
-                                        maxBarsDict[colorbar_key] = value
-                                # Convert highest values to integer
-                                maxBarsDict = {colorbar_key: int(value) for colorbar_key, value in maxBarsDict.items()}
+                                # Collect the value so the region median can be
+                                # computed once every frame has been visited.
+                                barsValues[colorbar_key].append(float(frameDict[colorbar_key]))
     except Exception as e:
         logger.error(f"Error during bars evaluation parsing: {e}")
-							
+
+    # Compute the median per key, rounded to an integer to match the QCTools value
+    # scale. Keys with no measured frames fall back to a permissive extreme so the
+    # downstream threshold never rejects everything.
+    smpte_brng_floor = _get_smpte_brng_floor()
+    maxBarsDict = {}
+    for colorbar_key in keys_to_check:
+        if colorbar_key == "BRNG":
+            # Fraction of out-of-range pixels: keep float precision (rounding to
+            # int would zero it out) and never let the threshold fall below the
+            # configured floor. Unmeasured bars fall back to the floor itself.
+            if barsValues[colorbar_key]:
+                measured_brng = round(statistics.median(barsValues[colorbar_key]), 5)
+                maxBarsDict[colorbar_key] = max(measured_brng, smpte_brng_floor)
+                if maxBarsDict[colorbar_key] != measured_brng:
+                    logger.debug(
+                        f"Measured bars BRNG median {measured_brng} is below the configured "
+                        f"floor - using {smpte_brng_floor} as the BRNG threshold\n"
+                    )
+            else:
+                maxBarsDict[colorbar_key] = smpte_brng_floor
+        elif barsValues[colorbar_key]:
+            maxBarsDict[colorbar_key] = int(round(statistics.median(barsValues[colorbar_key])))
+        else:
+            maxBarsDict[colorbar_key] = 0 if "MAX" in colorbar_key else 1023
+
     return maxBarsDict
 
 
@@ -776,6 +829,11 @@ def print_color_bar_values(video_id, smpte_color_bars, maxBarsDict, colorbars_va
     Compares SMPTE color bar values with those extracted from a video using QCTools.
     The output CSV includes the attribute name, the expected SMPTE value, and the value detected in the video.
 
+    BRNG is deliberately omitted: it is a share of out-of-range pixels (0-1), not a
+    signal level on the 0-1023 scale the other keys sit on, so it would plot as an
+    invisible bar in the report's detected-vs-SMPTE graph. BRNG participates in the
+    bars *evaluation* (and therefore the failure timeline) instead.
+
     Args:
         video_id (str): Identifier for the video being analyzed.
         smpte_color_bars (dict): Dictionary of expected SMPTE color bar values, from config.yaml
@@ -785,12 +843,14 @@ def print_color_bar_values(video_id, smpte_color_bars, maxBarsDict, colorbars_va
 
     with open(colorbars_values_output, 'w', newline='') as csvfile:
         writer = csv.writer(csvfile)
-        
+
         # Write the header
         writer.writerow(["QCTools Fields", "SMPTE Colorbars", f"{video_id} Colorbars"])
-        
+
         # Write the data
         for key in smpte_color_bars:
+            if key in BARS_NON_LEVEL_KEYS:
+                continue
             smpte_value = smpte_color_bars.get(key, "")
             maxbars_value = maxBarsDict.get(key, "")
             writer.writerow([key, smpte_value, maxbars_value])
@@ -859,8 +919,8 @@ def print_color_bar_keys(qctools_colorbars_values_output, profile, color_bar_key
     """
     Writes color bar keys and their threshold values to a CSV file.
 
-    If the provided `profile` keys match the expected `color_bar_keys`, 
-    the function writes a header indicating the thresholds are based on peak QCTools filter values.
+    If the provided `profile` keys match the expected `color_bar_keys`,
+    the function writes a header indicating the thresholds are based on the median QCTools filter values.
     Then, it writes each key and its corresponding threshold value from the `profile`.
 
     Args:
@@ -872,7 +932,7 @@ def print_color_bar_keys(qctools_colorbars_values_output, profile, color_bar_key
     with open(qctools_colorbars_values_output, 'w') as csvfile:
         writer = csv.writer(csvfile)
         if set(profile.keys()) == set(color_bar_keys):
-            writer.writerow(["The thresholds defined by the peak values of QCTools filters in the identified color bars are:"])
+            writer.writerow(["The thresholds defined by the median values of QCTools filters in the identified color bars are:"])
             for key, value in profile.items():
                 writer.writerow([key, value])
 
@@ -1192,6 +1252,49 @@ DROPOUT_LONG_EVENT_SEC = 2.0          # events longer than this require high con
 DROPOUT_LONG_EVENT_MIN_CORR = 2       # minimum corroborating metrics for long events
 DROPOUT_BARS_MARGIN_SEC = 1.0         # suppress candidates this long past a bars region (tone-off cliff)
 DROPOUT_ZCR_XCHAN_TOLERANCE_SEC = 0.5  # ZCR-only events need another channel firing within this window
+
+# ---------------------------------------------------------------------------
+# Identical channel (dual mono) detection thresholds
+# ---------------------------------------------------------------------------
+
+# Screening stage — runs off the astats/aphasemeter values already parsed from
+# the report, so it costs nothing. Two channels "match" on a frame when their
+# RMS levels agree within the tolerance; duplicated channels agree exactly, so
+# the tolerance only has to absorb astats' one-decimal rounding.
+IDENTICAL_RMS_TOLERANCE_DB = 0.1
+# aphasemeter reports the inter-channel correlation of a stereo pair: +1 is a
+# perfectly in-phase (duplicated) pair, -1 a polarity-inverted duplicate. Only
+# available for 2-channel audio; other channel counts screen on RMS alone.
+IDENTICAL_PHASE_THRESHOLD = 0.999
+# Frames whose loudest channel sits at or below this are silence — both
+# channels match trivially there, so they don't count toward the comparison.
+IDENTICAL_SILENCE_FLOOR_DB = SILENCE_THRESHOLD_DB
+# Too few frames with audio to say anything either way.
+IDENTICAL_MIN_ACTIVE_FRAMES = 10
+# Fraction of active frames that must match for a whole-file verdict, and the
+# floor below which a file is simply reported as having distinct channels.
+IDENTICAL_FULL_MATCH_FRACTION = 0.99
+IDENTICAL_PARTIAL_MATCH_FRACTION = 0.10
+# Matching runs shorter than this aren't reported as regions (a few frames of
+# coincidentally equal level prove nothing).
+IDENTICAL_MIN_SPAN_SEC = 5.0
+# At most this many channel pairs get the ffmpeg confirmation pass, so a
+# many-channel file can't turn into a pile of decodes. Stereo has one pair.
+IDENTICAL_MAX_CONFIRM_PAIRS = 3
+
+# Confirmation stage — sample-level comparison of the two channels.
+# A difference peak at or below this is digital silence for any practical bit
+# depth (true bit-identical channels measure -inf).
+IDENTICAL_BIT_IDENTICAL_PEAK_DB = -100.0
+# Otherwise the channels count as the same content when their difference peaks
+# this far below the louder channel's own peak. 30 dB is a ~3% residual: it
+# covers a duplicate carrying a hair of level offset or different dither (a 1%
+# gain difference alone puts the residual at exactly -40 dB, so a tighter
+# margin would contradict the screen's 0.1 dB RMS tolerance), while genuine
+# stereo program material leaves a residual within ~10 dB of program peak.
+IDENTICAL_EFFECTIVE_MARGIN_DB = 30.0
+# Confirmation reads this many sample frames per chunk from the ffmpeg pipe.
+_IDENTICAL_CHUNK_SAMPLES = 1 << 18
 
 
 @dataclass
@@ -1851,12 +1954,13 @@ def _write_chroma_phase_results(report_directory, results):
         )
 
 
-def analyzeAudio(startObj, pkt, report_directory, detect_clipping=False, detect_imbalance=False, detect_timecode=False, detect_dropout=False, signals=None, total_duration=None, fps=None, tc_start_frames=0, tc_drop_frame=False, bars_regions=None):
+def analyzeAudio(startObj, pkt, report_directory, detect_clipping=False, detect_imbalance=False, detect_timecode=False, detect_dropout=False, detect_identical=False, signals=None, total_duration=None, fps=None, tc_start_frames=0, tc_drop_frame=False, bars_regions=None, video_path=None, audio_stream_indexes=None, check_cancelled=None):
     """
     Analyzes audio frames in a QCTools report in a single pass. Optionally detects
     audio clipping (Peak_level >= threshold), channel imbalance (comparing
-    per-channel RMS_level values), audible timecode (LTC artifacts), and/or audio
-    dropout (sudden RMS drops indicative of tape dropout).
+    per-channel RMS_level values), audible timecode (LTC artifacts), audio
+    dropout (sudden RMS drops indicative of tape dropout), and/or identical
+    channels (the same audio duplicated across two channels — effectively mono).
 
     Parameters:
         startObj (str): Path to the QCTools report file (.qctools.xml.gz)
@@ -1866,6 +1970,7 @@ def analyzeAudio(startObj, pkt, report_directory, detect_clipping=False, detect_
         detect_imbalance (bool): Whether to run channel imbalance detection.
         detect_timecode (bool): Whether to run audible timecode detection.
         detect_dropout (bool): Whether to run audio dropout detection.
+        detect_identical (bool): Whether to run identical-channel (dual mono) detection.
         signals: Optional signals object for emitting progress updates.
         total_duration (float or None): Total video duration in seconds for progress reporting.
         fps (float or None): Video frame rate, used to format audible-timecode region
@@ -1874,20 +1979,29 @@ def analyzeAudio(startObj, pkt, report_directory, detect_clipping=False, detect_
             TIMECODE tag), added to every reported position.
         tc_drop_frame (bool): Whether the stream timecode is drop-frame, so positions
             are formatted as DF (HH:MM:SS;FF) rather than NDF.
+        video_path (str or None): Path to the video file. Identical-channel detection
+            uses it for its sample-level confirmation pass; without it the verdict
+            rests on the report metrics alone.
+        audio_stream_indexes (list or None): Audio-relative stream indexes (the N of
+            ``0:a:N``) behind the analyzed channels, in the order the audio stats
+            sidecar merged them, for multi-stream (discrete mono) inputs. None means
+            a single stream carries every channel.
+        check_cancelled (callable or None): Returns True when processing has been
+            cancelled; polled during the identical-channel confirmation decode.
 
     Returns:
-        tuple: (clipping_results, imbalance_results, timecode_results, dropout_results)
-            Each is a dict with analysis results, or None if that analysis was
-            not requested or no audio frames were found.
+        tuple: (clipping_results, imbalance_results, timecode_results, dropout_results,
+            identical_results). Each is a dict with analysis results, or None if that
+            analysis was not requested or no audio frames were found.
     """
     etree = load_etree()
     if etree is None:
-        return None, None, None, None
+        return None, None, None, None, None
 
     parser_iter = safe_gzip_iterparse(startObj, etree)
     if parser_iter is None:
         logger.error(f"Failed to parse {startObj} for audio analysis")
-        return None, None, None, None
+        return None, None, None, None, None
 
     total_audio_frames = 0
 
@@ -1907,6 +2021,9 @@ def analyzeAudio(startObj, pkt, report_directory, detect_clipping=False, detect_
     # Timecode detection state — per-frame data collected during parse
     tc_frames = []  # list of dicts: {time, tags}
     tc_metric_type = 'unknown'
+
+    # Identical-channel state — per channel pair, keyed by (ch_a, ch_b)
+    identical_pairs = {}
 
     # Dropout detection state — per-channel rolling windows and candidates
     dropout_candidates = []  # list of _DropoutCandidate
@@ -1935,6 +2052,7 @@ def analyzeAudio(startObj, pkt, report_directory, detect_clipping=False, detect_
                 peak_level = None
                 flat_factor = None
                 frame_channel_rms = {}
+                frame_phase = None
                 tc_frame_tags = {} if detect_timecode else None
                 # Dropout per-frame state: {ch_num: {metric: value}}
                 dropout_frame_data = {} if detect_dropout else None
@@ -1952,13 +2070,16 @@ def analyzeAudio(startObj, pkt, report_directory, detect_clipping=False, detect_
                         elif key.endswith('.Flat_factor') and 'Overall' in key:
                             flat_factor = val
 
-                    if detect_imbalance:
+                    if detect_imbalance or detect_identical:
                         # Match lavfi.astats.N.RMS_level for any channel number N
                         if key.endswith('.RMS_level') and 'Overall' not in key:
                             match = re.search(r'\.(\d+)\.RMS_level$', key)
                             if match:
                                 ch_num = int(match.group(1))
                                 frame_channel_rms[ch_num] = val
+
+                    if detect_identical and key == 'lavfi.aphasemeter.phase':
+                        frame_phase = val
 
                     if detect_timecode:
                         # Collect r128 and astats tags for timecode detection.
@@ -2012,6 +2133,17 @@ def analyzeAudio(startObj, pkt, report_directory, detect_clipping=False, detect_
                         if ch_num not in channel_rms_values:
                             channel_rms_values[ch_num] = []
                         channel_rms_values[ch_num].append(rms_val)
+
+                # Identical-channel screening — compare every channel pair on
+                # this frame against the RMS/phase match criteria
+                if detect_identical and len(frame_channel_rms) >= 2:
+                    try:
+                        frame_time = float(frame_pkt_dts_time)
+                    except ValueError:
+                        frame_time = 0.0
+                    _identical_update_pairs(
+                        identical_pairs, frame_time, frame_channel_rms, frame_phase
+                    )
 
                 # Timecode frame collection
                 if detect_timecode and tc_frame_tags:
@@ -2103,7 +2235,7 @@ def analyzeAudio(startObj, pkt, report_directory, detect_clipping=False, detect_
 
     if total_audio_frames == 0:
         logger.warning("No audio frames found in QCTools report for audio analysis\n")
-        return None, None, None, None
+        return None, None, None, None, None
 
     # Build clipping results
     clipping_results = None
@@ -2137,7 +2269,17 @@ def analyzeAudio(startObj, pkt, report_directory, detect_clipping=False, detect_
             bars_regions=bars_regions
         )
 
-    return clipping_results, imbalance_results, timecode_results, dropout_results
+    # Run identical-channel (dual mono) detection
+    identical_results = None
+    if detect_identical:
+        identical_results = _detect_and_write_identical_results(
+            identical_pairs, report_directory, total_audio_frames,
+            video_path=video_path, audio_stream_indexes=audio_stream_indexes,
+            fps=fps, tc_start_frames=tc_start_frames, tc_drop_frame=tc_drop_frame,
+            check_cancelled=check_cancelled
+        )
+
+    return clipping_results, imbalance_results, timecode_results, dropout_results, identical_results
 
 
 def _write_clipping_results(report_directory, total_audio_frames, clipped_frames, max_peak_level, max_flat_factor, clipping_events):
@@ -2327,6 +2469,436 @@ def _write_imbalance_results(report_directory, total_audio_frames, channel_rms_v
         logger.debug(f"Channel imbalance analysis: {overall_characterization} ({ch_summary})\n")
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Identical channel (dual mono) detection
+# ---------------------------------------------------------------------------
+#
+# Two-stage. The screen rides the audio parse that is already happening: on
+# every frame with audio, each channel pair is compared on its astats RMS
+# level and (for stereo) the aphasemeter phase correlation. Duplicated
+# channels agree on both, frame after frame. Because matching levels alone
+# are only circumstantial, a pair that screens as a match is then confirmed
+# by decoding the two channels and comparing them sample by sample — that is
+# what lets the report say "bit-identical" rather than "looks the same".
+# Comparing both the difference (A-B) and the sum (A+B) separates a straight
+# duplicate from a polarity-inverted one, which the astats metrics cannot
+# tell apart.
+
+
+def _identical_new_pair():
+    """Per-pair screening state."""
+    return {
+        'active_frames': 0,
+        'silent_frames': 0,
+        'matching_frames': 0,
+        'inverted_frames': 0,
+        'phase_sum': 0.0,
+        'phase_frames': 0,
+        'run_start': None,
+        'run_end': None,
+        'spans': [],
+    }
+
+
+def _identical_close_run(pair):
+    """Close the pair's open matching run, keeping it if it is long enough."""
+    start, end = pair['run_start'], pair['run_end']
+    pair['run_start'] = None
+    pair['run_end'] = None
+    if start is None or end is None:
+        return
+    if end - start >= IDENTICAL_MIN_SPAN_SEC:
+        pair['spans'].append((start, end))
+
+
+def _identical_update_pairs(pairs, frame_time, frame_channel_rms, frame_phase):
+    """Screen one audio frame: does each channel pair look duplicated here?
+
+    Frames where every channel is at or below the silence floor are skipped —
+    silence matches silence trivially, and a silent gap in the middle of a
+    duplicated passage shouldn't break the matching run either.
+    """
+    channels = sorted(frame_channel_rms)
+    # aphasemeter measures one stereo pair, so its phase value only describes
+    # the channels of a 2-channel file.
+    use_phase = len(channels) == 2 and frame_phase is not None
+
+    for i, ch_a in enumerate(channels):
+        for ch_b in channels[i + 1:]:
+            pair = pairs.setdefault((ch_a, ch_b), _identical_new_pair())
+            rms_a = frame_channel_rms[ch_a]
+            rms_b = frame_channel_rms[ch_b]
+
+            if max(rms_a, rms_b) <= IDENTICAL_SILENCE_FLOOR_DB:
+                pair['silent_frames'] += 1
+                continue
+
+            pair['active_frames'] += 1
+            if use_phase:
+                pair['phase_sum'] += frame_phase
+                pair['phase_frames'] += 1
+
+            level_match = abs(rms_a - rms_b) <= IDENTICAL_RMS_TOLERANCE_DB
+            # Phase near +1 is a duplicate, near -1 a polarity-inverted one;
+            # both are "the same audio twice" as far as the screen cares.
+            phase_match = not use_phase or abs(frame_phase) >= IDENTICAL_PHASE_THRESHOLD
+
+            if level_match and phase_match:
+                pair['matching_frames'] += 1
+                if use_phase and frame_phase < 0:
+                    pair['inverted_frames'] += 1
+                if pair['run_start'] is None:
+                    pair['run_start'] = frame_time
+                pair['run_end'] = frame_time
+            else:
+                _identical_close_run(pair)
+
+
+def _identical_db(amplitude):
+    """Convert a linear full-scale amplitude to dBFS (-inf for digital zero)."""
+    if amplitude <= 0:
+        return float('-inf')
+    return 20 * math.log10(amplitude)
+
+
+def _identical_db_str(value):
+    """Format a dBFS value for CSV output."""
+    if value is None:
+        return "N/A"
+    if value == float('-inf'):
+        return "-inf"
+    return f"{value:.1f}"
+
+
+def _measure_channel_difference(video_path, ch_a, ch_b, audio_stream_indexes=None,
+                                start=None, duration=None, check_cancelled=None):
+    """Compare two channels sample by sample by decoding them through ffmpeg.
+
+    The two channels are panned into a stereo pipe (for multi-stream sources
+    the streams are amerged first, in the same order the audio stats sidecar
+    used, so channel N is stream N here too) and read as float samples. No
+    resampling is applied — the comparison has to see the original samples.
+
+    Returns a dict of peak/RMS levels for the channels, their difference and
+    their sum, or None if the decode failed.
+    """
+    cmd = ["ffmpeg", "-v", "error"]
+    if start:
+        cmd += ["-ss", f"{start:.3f}"]
+    cmd += ["-i", video_path]
+    if duration:
+        cmd += ["-t", f"{duration:.3f}"]
+
+    pan = f"pan=stereo|c0=c{ch_a - 1}|c1=c{ch_b - 1}"
+    if audio_stream_indexes and len(audio_stream_indexes) > 1:
+        inputs = "".join(f"[0:a:{idx}]" for idx in audio_stream_indexes)
+        graph = f"{inputs}amerge=inputs={len(audio_stream_indexes)},{pan}[cmp]"
+        cmd += ["-filter_complex", graph, "-map", "[cmp]"]
+    else:
+        cmd += ["-map", "0:a:0", "-filter:a", pan]
+    cmd += ["-f", "f32le", "-acodec", "pcm_f32le", "pipe:1"]
+
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except (FileNotFoundError, subprocess.SubprocessError) as exc:
+        logger.warning(f"Identical-channel detection: ffmpeg invocation failed: {exc}")
+        return None
+
+    chunk_bytes = _IDENTICAL_CHUNK_SAMPLES * 2 * 4
+    samples = 0
+    peak_a = peak_b = peak_diff = peak_sum = 0.0
+    sumsq_diff = sumsq_sum = 0.0
+    cancelled = False
+    try:
+        while True:
+            if check_cancelled and check_cancelled():
+                cancelled = True
+                proc.kill()
+                break
+            buf = proc.stdout.read(chunk_bytes)
+            if not buf:
+                break
+            usable = len(buf) - (len(buf) % 8)
+            if usable == 0:
+                break
+            block = np.frombuffer(buf[:usable], dtype=np.float32).reshape(-1, 2).astype(np.float64)
+            a = block[:, 0]
+            b = block[:, 1]
+            diff = a - b
+            total = a + b
+            samples += block.shape[0]
+            peak_a = max(peak_a, float(np.max(np.abs(a))))
+            peak_b = max(peak_b, float(np.max(np.abs(b))))
+            peak_diff = max(peak_diff, float(np.max(np.abs(diff))))
+            peak_sum = max(peak_sum, float(np.max(np.abs(total))))
+            sumsq_diff += float(np.sum(diff ** 2))
+            sumsq_sum += float(np.sum(total ** 2))
+    finally:
+        proc.stdout.close()
+        stderr = proc.stderr.read().decode('utf-8', 'replace').strip()
+        proc.stderr.close()
+        proc.wait()
+
+    if cancelled:
+        return None
+    if samples == 0:
+        logger.warning(
+            f"Identical-channel detection: no audio decoded for channels {ch_a}/{ch_b}"
+            f"{': ' + stderr if stderr else ''}"
+        )
+        return None
+    if proc.returncode != 0:
+        logger.warning(f"Identical-channel detection: ffmpeg decode failed: {stderr}")
+        return None
+
+    return {
+        'samples': samples,
+        'peak_a_db': _identical_db(peak_a),
+        'peak_b_db': _identical_db(peak_b),
+        'program_peak_db': _identical_db(max(peak_a, peak_b)),
+        'difference_peak_db': _identical_db(peak_diff),
+        'difference_rms_db': _identical_db(math.sqrt(sumsq_diff / samples)),
+        'sum_peak_db': _identical_db(peak_sum),
+        'sum_rms_db': _identical_db(math.sqrt(sumsq_sum / samples)),
+    }
+
+
+def _characterize_identical(measurement, inverted_screen):
+    """Turn a sample-level measurement into a characterization.
+
+    Compares the residual (difference for a straight duplicate, sum for a
+    polarity-inverted one) against digital silence first, then against the
+    program's own peak — a residual 40 dB down is the same audio twice with
+    only rounding or a hair of level difference between the copies.
+    """
+    diff_peak = measurement['difference_peak_db']
+    sum_peak = measurement['sum_peak_db']
+    program_peak = measurement['program_peak_db']
+
+    inverted = sum_peak < diff_peak if inverted_screen else False
+    residual = sum_peak if inverted else diff_peak
+
+    if residual <= IDENTICAL_BIT_IDENTICAL_PEAK_DB:
+        base = "Bit-identical"
+    elif program_peak != float('-inf') and residual <= program_peak - IDENTICAL_EFFECTIVE_MARGIN_DB:
+        base = "Effectively identical"
+    else:
+        return "Distinct channels", inverted, residual
+
+    if inverted:
+        base = f"Polarity-inverted duplicate ({base.lower()})"
+    return base, inverted, residual
+
+
+def _detect_and_write_identical_results(identical_pairs, report_directory, total_audio_frames,
+                                        video_path=None, audio_stream_indexes=None,
+                                        fps=None, tc_start_frames=0, tc_drop_frame=False,
+                                        check_cancelled=None):
+    """Screen every channel pair, confirm the candidates, and write the CSV.
+
+    Returns the results dict, or None when there is nothing to compare (a mono
+    file, or a report with no per-channel audio stats).
+    """
+    if not identical_pairs:
+        logger.debug(
+            "Identical-channel detection: fewer than two audio channels to compare\n"
+        )
+        return None
+
+    pair_results = []
+    for (ch_a, ch_b), pair in sorted(identical_pairs.items()):
+        _identical_close_run(pair)
+        active = pair['active_frames']
+        matching = pair['matching_frames']
+        fraction = matching / active if active else 0.0
+        mean_phase = (pair['phase_sum'] / pair['phase_frames']
+                      if pair['phase_frames'] else None)
+        spans = sorted(pair['spans'], key=lambda s: s[1] - s[0], reverse=True)
+
+        if active < IDENTICAL_MIN_ACTIVE_FRAMES:
+            screen = 'insufficient'
+        elif fraction >= IDENTICAL_FULL_MATCH_FRACTION:
+            screen = 'full'
+        elif fraction >= IDENTICAL_PARTIAL_MATCH_FRACTION and spans:
+            screen = 'partial'
+        else:
+            screen = 'distinct'
+
+        pair_results.append({
+            'channel_a': ch_a,
+            'channel_b': ch_b,
+            'active_frames': active,
+            'silent_frames': pair['silent_frames'],
+            'matching_frames': matching,
+            'match_fraction': fraction,
+            'mean_phase': mean_phase,
+            'inverted_screen': pair['inverted_frames'] > matching / 2 if matching else False,
+            'spans': spans,
+            'screen': screen,
+            'measurement': None,
+            'compared_region': None,
+            'characterization': (
+                "Insufficient audio" if screen == 'insufficient' else "Distinct channels"
+            ),
+        })
+
+    # Confirm the most convincing candidates by comparing actual samples.
+    candidates = [p for p in pair_results if p['screen'] in ('full', 'partial')]
+    candidates.sort(key=lambda p: p['match_fraction'], reverse=True)
+    for pair in candidates[:IDENTICAL_MAX_CONFIRM_PAIRS]:
+        if pair['screen'] == 'full':
+            start = duration = None
+            region_label = "Whole file"
+        else:
+            span_start, span_end = pair['spans'][0]
+            start, duration = span_start, span_end - span_start
+            region_label = (
+                f"{_tc_format_timecode(span_start, fps, tc_start_frames, tc_drop_frame)}"
+                f"–{_tc_format_timecode(span_end, fps, tc_start_frames, tc_drop_frame)}"
+            )
+
+        measurement = None
+        if video_path:
+            measurement = _measure_channel_difference(
+                video_path, pair['channel_a'], pair['channel_b'],
+                audio_stream_indexes=audio_stream_indexes,
+                start=start, duration=duration, check_cancelled=check_cancelled
+            )
+
+        if measurement is None:
+            # No sample-level proof available — report what the metrics show,
+            # marked as unconfirmed rather than asserting the channels match.
+            pair['compared_region'] = "Not compared"
+            pair['characterization'] = (
+                "Polarity-inverted duplicate (unconfirmed)" if pair['inverted_screen']
+                else "Effectively identical (unconfirmed)"
+            )
+            continue
+
+        pair['measurement'] = measurement
+        pair['compared_region'] = region_label
+        characterization, inverted, residual = _characterize_identical(
+            measurement, pair['inverted_screen']
+        )
+        pair['inverted'] = inverted
+        pair['residual_peak_db'] = residual
+        if characterization == "Distinct channels":
+            # The screen's matching levels weren't backed by the samples.
+            pair['characterization'] = "Distinct channels"
+            pair['screen'] = 'distinct'
+        elif pair['screen'] == 'partial':
+            pair['characterization'] = f"Partially identical ({characterization.lower()})"
+        else:
+            pair['characterization'] = characterization
+
+    # Overall verdict — the strongest pair result wins.
+    identical_pairs_found = [p for p in pair_results if p['screen'] == 'full'
+                             and p['characterization'] != "Distinct channels"]
+    partial_pairs_found = [p for p in pair_results if p['screen'] == 'partial'
+                           and p['characterization'] != "Distinct channels"]
+    if identical_pairs_found:
+        strongest = identical_pairs_found[0]
+        if strongest.get('inverted'):
+            overall = "Polarity-inverted duplicate channels"
+        else:
+            overall = "Identical channels (dual mono)"
+    elif partial_pairs_found:
+        strongest = partial_pairs_found[0]
+        overall = "Partially identical channels"
+    elif all(p['screen'] == 'insufficient' for p in pair_results):
+        strongest = pair_results[0]
+        overall = "Insufficient audio to compare"
+    else:
+        strongest = max(pair_results, key=lambda p: p['match_fraction'])
+        overall = "Distinct channels"
+
+    results = {
+        'total_audio_frames': total_audio_frames,
+        'num_channels': len({ch for p in pair_results for ch in (p['channel_a'], p['channel_b'])}),
+        'overall_verdict': overall,
+        'overall_characterization': strongest['characterization'],
+        'identical_channel_pairs': [
+            (p['channel_a'], p['channel_b']) for p in identical_pairs_found
+        ],
+        'pairs': pair_results,
+    }
+
+    _write_identical_results_csv(
+        report_directory, results, fps=fps,
+        tc_start_frames=tc_start_frames, tc_drop_frame=tc_drop_frame
+    )
+
+    pair_summary = ", ".join(
+        f"Ch{p['channel_a']}/Ch{p['channel_b']}: {p['characterization']} "
+        f"({p['match_fraction'] * 100:.1f}% of active frames)"
+        for p in pair_results
+    )
+    if identical_pairs_found or partial_pairs_found:
+        logger.warning(f"Identical channel detection: {overall} — {pair_summary}\n")
+    else:
+        logger.debug(f"Identical channel detection: {overall} — {pair_summary}\n")
+
+    return results
+
+
+def _write_identical_results_csv(report_directory, results, fps=None,
+                                 tc_start_frames=0, tc_drop_frame=False):
+    """Write identical-channel results to qct-parse_identical_channels.csv."""
+    identical_csv = os.path.join(report_directory, "qct-parse_identical_channels.csv")
+    with open(identical_csv, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(["Identical Channel Detection Results"])
+        writer.writerow(["Total Audio Frames", results['total_audio_frames']])
+        writer.writerow(["Number of Channels", results['num_channels']])
+        writer.writerow(["Overall Verdict", results['overall_verdict']])
+        writer.writerow(["Overall Characterization", results['overall_characterization']])
+        writer.writerow([])
+
+        writer.writerow(["Channel Pair Comparisons"])
+        writer.writerow([
+            "Channel A", "Channel B", "Active Frames", "Matching Frames", "Matching (%)",
+            "Mean Phase Correlation", "Difference Peak (dBFS)", "Sum Peak (dBFS)",
+            "Program Peak (dBFS)", "Compared Region", "Characterization"
+        ])
+        for p in results['pairs']:
+            m = p['measurement'] or {}
+            phase = p['mean_phase']
+            writer.writerow([
+                f"Channel {p['channel_a']}",
+                f"Channel {p['channel_b']}",
+                p['active_frames'],
+                p['matching_frames'],
+                f"{p['match_fraction'] * 100:.2f}",
+                f"{phase:.3f}" if phase is not None else "N/A",
+                _identical_db_str(m.get('difference_peak_db')),
+                _identical_db_str(m.get('sum_peak_db')),
+                _identical_db_str(m.get('program_peak_db')),
+                p['compared_region'] or "Not compared",
+                p['characterization'],
+            ])
+
+        matching_regions = [
+            (p, span) for p in results['pairs'] for span in p['spans']
+            if p['characterization'] not in ("Distinct channels", "Insufficient audio")
+        ]
+        if matching_regions:
+            writer.writerow([])
+            writer.writerow(["Matching Regions"])
+            writer.writerow(["Channel A", "Channel B", "Start", "End", "Duration (s)"])
+            for p, (span_start, span_end) in sorted(
+                matching_regions, key=lambda item: item[1][0]
+            ):
+                writer.writerow([
+                    f"Channel {p['channel_a']}",
+                    f"Channel {p['channel_b']}",
+                    _tc_format_timecode(span_start, fps, tc_start_frames, tc_drop_frame),
+                    _tc_format_timecode(span_end, fps, tc_start_frames, tc_drop_frame),
+                    f"{span_end - span_start:.1f}",
+                ])
+
+    return identical_csv
 
 
 # ---------------------------------------------------------------------------
@@ -4096,10 +4668,11 @@ def run_qctparse(video_path, qctools_output_path, report_directory, check_cancel
     if signals and hasattr(signals, 'qctparse_progress'):
         signals.qctparse_progress.emit(64)
 
-    ######## Audio Analysis (Clipping Detection / Channel Imbalance / Audible Timecode) ########
+    ######## Audio Analysis (Clipping / Channel Imbalance / Audible Timecode / Dropout / Identical Channels) ########
     do_audio_analysis = qct_parse.get('audio_analysis', False)
     imbalance_results = None
     timecode_results = None
+    identical_results = None
 
     # Multi-stream inputs (e.g. broadcast MXF, where each audio channel is a
     # discrete mono stream): the QCTools report's audio frames describe a qcli
@@ -4111,6 +4684,7 @@ def run_qctparse(video_path, qctools_output_path, report_directory, check_cancel
     # on that file. Single-stream inputs still read the QCTools report.
     audio_stats_obj = None
     audio_pkt = pkt
+    audio_stream_indexes = None
     if do_audio_analysis:
         audio_stream_count = _get_audio_stream_count(video_path)
         if audio_stream_count and audio_stream_count > 1:
@@ -4140,18 +4714,24 @@ def run_qctparse(video_path, qctools_output_path, report_directory, check_cancel
                 do_audio_analysis = False
             else:
                 audio_pkt = _detect_audio_pkt(audio_stats_obj)
+                # The sidecar merged the audio streams in stream order, so
+                # analyzed channel N is the Nth audio stream (0:a:N-1).
+                audio_stream_indexes = list(range(audio_stream_count))
 
     if do_audio_analysis:
         logger.debug(f"Starting audio analysis on {baseName}\n")
-        clipping_results, imbalance_results, timecode_results, dropout_results = analyzeAudio(
+        clipping_results, imbalance_results, timecode_results, dropout_results, identical_results = analyzeAudio(
             audio_stats_obj or startObj, audio_pkt, report_directory,
             detect_clipping=True,
             detect_imbalance=True,
             detect_timecode=True,
             detect_dropout=True,
+            detect_identical=True,
             signals=signals, total_duration=total_duration, fps=video_fps,
             tc_start_frames=tc_start_frames, tc_drop_frame=tc_drop_frame,
-            bars_regions=all_bars_regions
+            bars_regions=all_bars_regions,
+            video_path=video_path, audio_stream_indexes=audio_stream_indexes,
+            check_cancelled=check_cancelled
         )
         if clipping_results is None:
             logger.warning("Audio clipping detection could not be performed\n")
@@ -4161,6 +4741,8 @@ def run_qctparse(video_path, qctools_output_path, report_directory, check_cancel
             logger.warning("Audible timecode detection could not be performed\n")
         if dropout_results is None:
             logger.warning("Audio dropout detection could not be performed\n")
+        if identical_results is None:
+            logger.debug("Identical-channel detection not applicable\n")
 
     if check_cancelled():
         return None

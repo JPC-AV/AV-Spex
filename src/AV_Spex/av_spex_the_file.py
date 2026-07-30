@@ -94,6 +94,7 @@ class ParsedArguments:
     export_file: Optional[str] 
     import_config: Optional[str]
     mediaconch_policy: Optional[str]
+    export_mediaconch_policy: Optional[Any]
     use_default_config: bool
     enable_bitplane_check: Optional[str]
     enable_border_detection: Optional[str]
@@ -193,6 +194,10 @@ The scripts will confirm that the digital files conform to predetermined specifi
                                  help='Specify export filename (default: auto-generated)')
     config_io_group.add_argument('--import-config',
                                  help='Import configs from JSON file')
+    config_io_group.add_argument('--export-mediaconch-policy', nargs='?', const=True, default=None,
+                                 metavar="DEST",
+                                 help='Export the current MediaConch policy XML so it can be shared. '
+                                      'Optionally provide a destination file or directory (default: current directory).')
     config_io_group.add_argument("--use-default-config", action="store_true",
                                  help="Reset to default config by removing any saved configurations")
 
@@ -210,7 +215,7 @@ The scripts will confirm that the digital files conform to predetermined specifi
     # qct-parse / CLAMS feature toggles
     qct_group = parser.add_argument_group("qct-parse / CLAMS")
     qct_group.add_argument('--enable-audio-analysis', choices=['on', 'off'],
-                           help='Enable/disable qct-parse audio analysis (clipping, channel imbalance, audible timecode, audio dropout). Auto-enables qct_parse.run_tool.')
+                           help='Enable/disable qct-parse audio analysis (clipping, channel imbalance, identical channels, audible timecode, audio dropout). Auto-enables qct_parse.run_tool.')
     qct_group.add_argument('--enable-clamped-levels', choices=['on', 'off'],
                            help='Enable/disable clamped video levels detection in qct-parse. Auto-enables qct_parse.run_tool.')
     qct_group.add_argument('--enable-clams-detection', choices=['on', 'off'],
@@ -313,6 +318,7 @@ The scripts will confirm that the digital files conform to predetermined specifi
         export_file=args.export_file,
         import_config=args.import_config,
         mediaconch_policy=args.mediaconch_policy,
+        export_mediaconch_policy=args.export_mediaconch_policy,
         use_default_config=args.use_default_config,
         enable_bitplane_check=getattr(args, 'enable_bitplane_check', None),
         enable_border_detection=getattr(args, 'enable_border_detection', None),
@@ -345,6 +351,43 @@ The scripts will confirm that the digital files conform to predetermined specifi
         mediainfo_from_file=args.mediainfo_from_file,
         ffprobe_from_file=args.ffprobe_from_file,
     )
+
+
+def export_mediaconch_policy(destination, config_mgr):
+    """Export the current MediaConch policy XML to a shareable location.
+
+    `destination` is either True (export to the current directory using the
+    policy's own filename) or a string destination file/directory path.
+    """
+    import shutil
+
+    checks_config = config_mgr.get_config('checks', ChecksConfig)
+    policy_name = checks_config.tools.mediaconch.mediaconch_policy
+
+    if not policy_name:
+        print("Error: no current MediaConch policy is set to export.")
+        return
+
+    source_path = config_mgr.get_policy_path(policy_name)
+    if not source_path or not os.path.exists(source_path):
+        print(f"Error: could not locate the policy file for '{policy_name}'.")
+        return
+
+    # Resolve the destination path
+    if destination is True:
+        dest_path = os.path.join(os.getcwd(), policy_name)
+    elif os.path.isdir(destination):
+        dest_path = os.path.join(destination, policy_name)
+    else:
+        dest_path = destination
+        if not dest_path.lower().endswith('.xml'):
+            dest_path += '.xml'
+
+    try:
+        shutil.copyfile(source_path, dest_path)
+        print(f"MediaConch policy '{policy_name}' exported to: {dest_path}")
+    except OSError as e:
+        print(f"Error: failed to export MediaConch policy file: {e}")
 
 
 def apply_filename_profile(config_type: str, profile_name: str):
@@ -497,7 +540,12 @@ def run_cli_mode(args):
         print(f"Configs exported to: {filename}")
         if args.dry_run_only:
             sys.exit(0)
-    
+
+    if args.export_mediaconch_policy is not None:
+        export_mediaconch_policy(args.export_mediaconch_policy, config_mgr)
+        if args.dry_run_only:
+            sys.exit(0)
+
     if args.import_config:
         config_io = ConfigIO(config_mgr)
         config_io.import_configs(args.import_config)

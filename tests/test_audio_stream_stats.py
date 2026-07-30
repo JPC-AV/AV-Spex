@@ -261,7 +261,7 @@ def test_analyze_audio_reads_generated_sidecar_shape(tmp_path):
             f.write('</frame>\n')
         f.write('</frames>\n</ffprobe>\n')
 
-    clipping, imbalance, _, _ = analyzeAudio(
+    clipping, imbalance, _, _, _ = analyzeAudio(
         sidecar, 'pkt_dts_time', str(report_dir),
         detect_clipping=True, detect_imbalance=True,
     )

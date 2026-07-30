@@ -121,6 +121,7 @@ class ParsedArguments:
     export_file: Optional[str]
     import_config: Optional[str]
     mediaconch_policy: Optional[str]
+    export_mediaconch_policy: Optional[Any]
     use_default_config: bool
     # Frame analysis sub-step toggles
     enable_bitplane_check: Optional[str]
@@ -166,6 +167,7 @@ Examples of supported CLI flags:
 * `--exiftool-profile` / `--mediainfo-profile` / `--ffprobe-profile`: apply named expected-value profiles for metadata tools
 * `--exiftool-from-file` / `--mediainfo-from-file` / `--ffprobe-from-file`: import a new expected-value profile from a raw tool-output file (saves the profile and applies it)
 * `--export-config` / `--import-config`: serialize and load JSON-based configurations
+* `--export-mediaconch-policy`: export the current MediaConch policy XML so it can be shared without digging through the user config dir. Bare, it writes the policy (under its own filename) to the current directory; given a directory it writes there; given a filename it uses that name (appending `.xml` if omitted). Honors `--dryrun` (exits after export). Mirrors the GUI's "Export Current MediaConch Policy" button.
 * `--dryrun`: skip processing and apply config changes only
 * `--printprofile`: print selected config values for review (e.g. `-pp checks,outputs` to see all frame_analysis fields)
 * `--enable-bitplane-check` / `--enable-border-detection` / `--enable-brng-analysis` / `--enable-signalstats` / `--enable-dropped-sample-detection` / `--enable-duplicate-frame-detection`: toggle individual frame analysis sub-steps on or off

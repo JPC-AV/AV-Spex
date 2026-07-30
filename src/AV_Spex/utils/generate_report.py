@@ -381,6 +381,7 @@ def find_report_csvs(report_directory):
     colorbars_eval_fails_csv = None
     audio_clipping_csv = None
     channel_imbalance_csv = None
+    identical_channels_csv = None
     audible_timecode_csv = None
     audio_dropout_csv = None
     clamped_levels_csv = None
@@ -421,6 +422,8 @@ def find_report_csvs(report_directory):
                         audio_clipping_csv = file_path
                     elif "qct-parse_channel_imbalance" in file:
                         channel_imbalance_csv = file_path
+                    elif "qct-parse_identical_channels" in file:
+                        identical_channels_csv = file_path
                     elif "qct-parse_audible_timecode" in file:
                         audible_timecode_csv = file_path
                     elif "qct-parse_audio_dropout" in file:
@@ -440,7 +443,7 @@ def find_report_csvs(report_directory):
                 elif "metadata_difference" in file:
                     difference_csv = file_path
 
-    return qctools_colorbars_duration_output, qctools_bars_eval_check_output, colorbars_values_output, windowed_colorbars_values, qctools_content_check_outputs, qctools_profile_check_output, profile_fails_csv, tags_check_output, tag_fails_csv, colorbars_eval_fails_csv, audio_clipping_csv, channel_imbalance_csv, audible_timecode_csv, audio_dropout_csv, clamped_levels_csv, clamped_traces_csv, chroma_phase_summary_csv, chroma_phase_events_csv, tone_leak_summary_csv, tone_leak_events_csv, difference_csv
+    return qctools_colorbars_duration_output, qctools_bars_eval_check_output, colorbars_values_output, windowed_colorbars_values, qctools_content_check_outputs, qctools_profile_check_output, profile_fails_csv, tags_check_output, tag_fails_csv, colorbars_eval_fails_csv, audio_clipping_csv, channel_imbalance_csv, identical_channels_csv, audible_timecode_csv, audio_dropout_csv, clamped_levels_csv, clamped_traces_csv, chroma_phase_summary_csv, chroma_phase_events_csv, tone_leak_summary_csv, tone_leak_events_csv, difference_csv
 
 
 def read_xml_file(xml_file_path):
@@ -487,6 +490,33 @@ def _get_video_duration(video_path):
         return float(result.stdout.strip())
     except Exception as e:
         logger.warning(f"Could not probe video duration: {e}")
+        return None
+
+
+def _get_video_frame_rate(video_path):
+    """
+    Probe the video frame rate in frames per second using ffprobe.
+
+    Returns:
+        float or None: Frame rate in fps, or None on failure.
+    """
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=r_frame_rate",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        video_path,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        rate = result.stdout.strip().splitlines()[0]
+        if '/' in rate:
+            num, den = rate.split('/')
+            return float(num) / float(den)
+        return float(rate)
+    except Exception as e:
+        logger.warning(f"Could not probe video frame rate: {e}")
         return None
 
 
@@ -1523,6 +1553,192 @@ def _tc_consensus_channel_summary(consensus_rows):
     if len(specific) == 1:
         return next(iter(specific))
     return "Not channel-specific (mix-based)"
+
+
+def _identical_status_colors(overall_verdict):
+    """Return (text_color, bg_color, border_color) for an identical-channel verdict."""
+    if overall_verdict.startswith("Polarity-inverted"):
+        # The channels cancel each other in a mono fold-down — a real defect.
+        return "#721c24", "#f8d7da", "#f5c6cb"
+    elif overall_verdict.startswith(("Identical", "Partially identical")):
+        return "#856404", "#fff3cd", "#ffeeba"
+    elif overall_verdict.startswith("Insufficient"):
+        return "#383d41", "#e2e3e5", "#d6d8db"
+    return "#155724", "#d4edda", "#c3e6cb"
+
+
+def _identical_csv_section(rows, header_first_cell):
+    """Return the data rows of the CSV block whose header row starts with the
+    given cell, stopping at the next blank line."""
+    section = []
+    header_idx = None
+    for i, row in enumerate(rows):
+        if row and row[0] == header_first_cell:
+            header_idx = i
+            break
+    if header_idx is None:
+        return section
+    for row in rows[header_idx + 1:]:
+        if not row or not row[0].strip():
+            break
+        section.append(row)
+    return section
+
+
+def make_identical_channels_html(identical_channels_csv):
+    """
+    Generates an HTML section summarizing identical-channel (dual mono) detection.
+
+    Args:
+        identical_channels_csv (str): Path to the identical channels CSV file.
+
+    Returns:
+        str: HTML string with identical-channel results, or None if the file
+        cannot be read.
+    """
+    if not identical_channels_csv or not os.path.isfile(identical_channels_csv):
+        return None
+
+    try:
+        with open(identical_channels_csv, 'r') as f:
+            reader = csv.reader(f)
+            rows = list(reader)
+    except Exception as e:
+        logger.error(f"Error reading identical channels CSV: {e}")
+        return None
+
+    if len(rows) < 3:
+        return None
+
+    csv_data = {}
+    for row in rows:
+        if len(row) >= 2:
+            csv_data.setdefault(row[0], row[1])
+
+    total_frames = csv_data.get("Total Audio Frames", "N/A")
+    num_channels = csv_data.get("Number of Channels", "N/A")
+    overall_verdict = csv_data.get("Overall Verdict", "N/A")
+    overall_characterization = csv_data.get("Overall Characterization", "N/A")
+
+    pair_rows = [r for r in _identical_csv_section(rows, "Channel A") if len(r) >= 11]
+    # The regions table reuses "Channel A" as its first header cell, so the
+    # second such block (if any) is the matching-regions one.
+    region_rows = [r for r in _identical_csv_section(rows, "Matching Regions") if len(r) >= 5
+                   and r[0] != "Channel A"]
+
+    status_color, status_bg, status_border = _identical_status_colors(overall_verdict)
+    status_text = overall_verdict
+    if overall_characterization not in ("N/A", overall_verdict):
+        status_text += f" — {overall_characterization}"
+
+    html = f'''
+    <a id="link_identical_methodology" href="javascript:void(0);"
+       onclick="toggleContent('identical_methodology', 'What is identical channel detection? ▼', 'What is identical channel detection? ▲')"
+       style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+       What is identical channel detection? ▼</a>
+    <div id="identical_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px;
+         margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+        <p style="margin: 0 0 10px 0;">
+            <strong>Identical channel detection</strong> looks for the same audio duplicated across two
+            channels &mdash; a file that is stereo on paper but effectively mono. That is common when a
+            mono source was patched to both inputs of the capture station, and it matters for
+            preservation: the second channel carries no additional information.
+        </p>
+        <p style="margin: 0 0 10px 0;">The check runs in two stages.</p>
+        <p style="margin: 0 0 10px 0;">
+            <strong>1. Screening.</strong> Every audio frame in the QCTools report is examined, comparing
+            the channels' <code>astats</code> RMS levels &mdash; duplicated channels sit at the same
+            level, frame after frame. On <strong>2-channel files</strong> this is backed up by the
+            <code>aphasemeter</code> phase correlation, a per-frame measure of how closely the two
+            channels track each other: <strong>+1</strong> means they move identically, <strong>0</strong>
+            that they are unrelated, <strong>&minus;1</strong> that one channel's polarity is flipped.
+            Readings at either +1 or &minus;1 mean "the same audio twice", so both nominate the pair for
+            the second stage. A file with more than two channels carries only one phase value covering
+            all of its channel pairs, so it can't be attributed to any single pair; those files are
+            screened on level alone.
+        </p>
+        <p style="margin: 0 0 10px 0;">
+            <strong>2. Confirmation.</strong> Matching levels on their own are only circumstantial, so a
+            nominated pair is confirmed by <strong>decoding the two channels and comparing them sample by
+            sample</strong>. Both the difference (A&minus;B) and the sum (A+B) are measured: a straight
+            duplicate cancels on the difference, a polarity-inverted one cancels on the sum. The sample
+            comparison is the authority &mdash; where it disagrees with the screening, the channels are
+            reported as distinct.
+        </p>
+        <p style="margin: 0 0 10px 0; font-weight: bold;">Characterization:</p>
+        <ul style="margin: 4px 0 10px 20px; padding: 0;">
+            <li style="margin-bottom: 4px;"><strong>Bit-identical</strong> &mdash; subtracting one channel from the other leaves exactly nothing. The two channels are the same samples.</li>
+            <li style="margin-bottom: 4px;"><strong>Effectively identical</strong> &mdash; what's left after subtracting the channels sits more than 30 dB below the program's own peak: the same audio twice, differing only by a hair of level or dither.</li>
+            <li style="margin-bottom: 4px;"><strong>Partially identical</strong> &mdash; the channels are duplicates over part of the runtime only (the matching regions are listed below). A mono segment inside an otherwise stereo program.</li>
+            <li style="margin-bottom: 4px;"><strong>Polarity-inverted duplicate</strong> &mdash; the same audio with one channel's polarity flipped. The channels cancel to silence in a mono fold-down, so this is worth correcting.</li>
+            <li style="margin-bottom: 4px;"><strong>Distinct channels</strong> &mdash; the channels carry different audio. Normal for a genuine stereo transfer.</li>
+        </ul>
+        <p style="margin: 0;">
+            Frames where every channel is silent are excluded from the comparison &mdash; silence matches
+            silence trivially. Region start and end positions are shown as the file's own timecode, so
+            they line up with an NLE; durations are elapsed seconds.
+        </p>
+    </div>
+    <div style="background-color: {status_bg}; padding: 15px; border: 1px solid {status_border}; margin: 10px 0; border-radius: 5px;">
+        <p style="margin: 0; color: {status_color};"><strong>{status_text}</strong></p>
+    </div>
+    <table style="border-collapse: collapse; margin: 10px 0;">
+        <tr><td style="padding: 4px 12px; border: 1px solid #ddd;"><strong>Total Audio Frames</strong></td><td style="padding: 4px 12px; border: 1px solid #ddd;">{total_frames}</td></tr>
+        <tr><td style="padding: 4px 12px; border: 1px solid #ddd;"><strong>Number of Channels</strong></td><td style="padding: 4px 12px; border: 1px solid #ddd;">{num_channels}</td></tr>
+    </table>
+    '''
+
+    if pair_rows:
+        html += '''
+        <table style="border-collapse: collapse; margin: 10px 0; font-size: 13px;">
+            <tr>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Channels</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Matching Frames</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Phase</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Difference Peak</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Program Peak</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Compared</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Result</th>
+            </tr>
+        '''
+        for row in pair_rows:
+            channels = f"{row[0]} / {row[1]}"
+            matching = f"{row[3]} of {row[2]} ({row[4]}%)"
+            # A polarity-inverted pair cancels on the sum, so show that residual
+            # instead of the difference, which stays at program level.
+            residual = row[7] if "Polarity-inverted" in row[10] else row[6]
+            html += f'''<tr>
+                <td style="padding: 4px 10px; border: 1px solid #ddd;">{channels}</td>
+                <td style="padding: 4px 10px; border: 1px solid #ddd;">{matching}</td>
+                <td style="padding: 4px 10px; border: 1px solid #ddd;">{row[5]}</td>
+                <td style="padding: 4px 10px; border: 1px solid #ddd;">{residual}</td>
+                <td style="padding: 4px 10px; border: 1px solid #ddd;">{row[8]}</td>
+                <td style="padding: 4px 10px; border: 1px solid #ddd;">{row[9]}</td>
+                <td style="padding: 4px 10px; border: 1px solid #ddd;">{row[10]}</td>
+            </tr>\n'''
+        html += '</table>\n'
+
+    if region_rows:
+        html += '''
+        <h4 style="margin-top: 16px;">Matching Regions</h4>
+        <table style="border-collapse: collapse; margin: 10px 0; font-size: 13px;">
+            <tr>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Channels</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Start</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">End</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Duration (s)</th>
+            </tr>
+        '''
+        for row in region_rows:
+            html += f'''<tr>
+                <td style="padding: 4px 10px; border: 1px solid #ddd;">{row[0]} / {row[1]}</td>
+                <td style="padding: 4px 10px; border: 1px solid #ddd;">{row[2]}</td>
+                <td style="padding: 4px 10px; border: 1px solid #ddd;">{row[3]}</td>
+                <td style="padding: 4px 10px; border: 1px solid #ddd;">{row[4]}</td>
+            </tr>\n'''
+        html += '</table>\n'
+
+    return html
 
 
 def make_audible_timecode_html(audible_timecode_csv):
@@ -3132,9 +3348,36 @@ def make_tone_detection_html(tone_csv_path):
     """
 
 
-def make_profile_piecharts(qctools_profile_check_output, sorted_thumbs_dict, failureInfoSummary, video_id, failure_csv_path=None, check_cancelled=None):
+# Shared by make_profile_piecharts and make_eval_bars_timeline_html — either
+# may appear without the other, and duplicate definitions are harmless.
+FAILURE_SECTION_JS = """
+    <script>
+    function openImage(imgData, caption) {
+        var newWindow = window.open('', '_blank');
+        newWindow.document.write('<html><head><title>' + caption + '</title></head><body style="margin:0; background:#000; display:flex; align-items:center; justify-content:center; height:100vh;">');
+        newWindow.document.write('<img src="' + imgData + '" style="max-width:100%; max-height:100%; object-fit:contain;">');
+        newWindow.document.write('</body></html>');
+        newWindow.document.close();
+    }
+
+    function toggleTable(tagId) {
+        var table = document.getElementById('table_' + tagId);
+        var link = document.getElementById('link_' + tagId);
+        if (table.style.display === 'none') {
+            table.style.display = 'block';
+            link.textContent = 'Hide all failures ▲';
+        } else {
+            table.style.display = 'none';
+            link.textContent = 'Show all failures ▼';
+        }
+    }
+    </script>
     """
-    Creates HTML visualizations showing pie charts of profile check results with thumbnails 
+
+
+def make_profile_piecharts(qctools_profile_check_output, sorted_thumbs_dict, failureInfoSummary, video_id, failure_csv_path=None, check_cancelled=None, failure_details=True):
+    """
+    Creates HTML visualizations showing pie charts of profile check results with thumbnails
     and detailed failure information for each failed profile check.
 
     Args:
@@ -3147,6 +3390,10 @@ def make_profile_piecharts(qctools_profile_check_output, sorted_thumbs_dict, fai
         failure_csv_path (str, optional): Path to the full failures CSV file.
         check_cancelled (callable, optional): Function to check if processing should be cancelled.
                                            Defaults to None.
+        failure_details (bool, optional): When False, render only the pie charts without the
+                                        per-tag failure lists, thumbnails, and expandable
+                                        failure tables (used when a failure timeline is
+                                        rendered alongside the pies). Defaults to True.
 
     Returns:
         str or None: HTML string containing the visualizations if successful, None if there are errors.
@@ -3211,29 +3458,7 @@ def make_profile_piecharts(qctools_profile_check_output, sorted_thumbs_dict, fai
             thumb_lookup[key] = (thumb_path, thumb_name)
 
     # Add JavaScript for toggling tables
-    javascript_code = """
-    <script>
-    function openImage(imgData, caption) {
-        var newWindow = window.open('', '_blank');
-        newWindow.document.write('<html><head><title>' + caption + '</title></head><body style="margin:0; background:#000; display:flex; align-items:center; justify-content:center; height:100vh;">');
-        newWindow.document.write('<img src="' + imgData + '" style="max-width:100%; max-height:100%; object-fit:contain;">');
-        newWindow.document.write('</body></html>');
-        newWindow.document.close();
-    }
-
-    function toggleTable(tagId) {
-        var table = document.getElementById('table_' + tagId);
-        var link = document.getElementById('link_' + tagId);
-        if (table.style.display === 'none') {
-            table.style.display = 'block';
-            link.textContent = 'Hide all failures ▲';
-        } else {
-            table.style.display = 'none';
-            link.textContent = 'Show all failures ▼';
-        }
-    }
-    </script>
-    """
+    javascript_code = FAILURE_SECTION_JS
 
     # Create pie charts for the profile summary
     tag_counter = 0  # Counter to create unique IDs
@@ -3250,7 +3475,14 @@ def make_profile_piecharts(qctools_profile_check_output, sorted_thumbs_dict, fai
             tag_id = f"tag_{tag_counter}"  # Create unique ID for this tag
             tag_counter += 1
             
-            if percentage > 0:
+            if percentage > 0 and not failure_details:
+                # Failure specifics are shown in the timeline below the pies
+                summary_html = f"""
+                <div style="display: flex; flex-direction: column; align-items: flex-start; background-color: #f5e9e3; padding: 10px;">
+                    <p><b>{failed_frames} frames outside threshold &mdash; see timeline below</b></p>
+                </div>
+                """
+            elif percentage > 0:
                 # Initialize variables for summary data
                 failure_entries_html = []
 
@@ -3377,6 +3609,504 @@ def make_profile_piecharts(qctools_profile_check_output, sorted_thumbs_dict, fai
     '''
 
     return profile_summary_html
+
+
+# Fixed tag → color mapping for the eval-bars failure timeline. Color follows
+# the tag (same tag = same color in every report), regardless of which tags
+# happen to fail. Order also fixes the trace/legend order. Palette validated
+# for CVD-safe adjacent separation on the report's #f5e9e3 surface.
+EVAL_BARS_TAG_COLORS = {
+    'YMAX': '#2a78d6',
+    'YMIN': '#eb6834',
+    'UMAX': '#1baf7a',
+    'UMIN': '#eda100',
+    'VMAX': '#e87ba4',
+    'VMIN': '#008300',
+    'SATMAX': '#4a3aa7',
+    'SATMIN': '#e34948',
+    # BRNG measures a different thing than the level tags above (share of
+    # out-of-range pixels rather than a signal level), so it also carries a
+    # dashed line — identity doesn't rest on hue alone. Teal echoes the cyan
+    # out-of-range highlight in the thumbnails. Validated with the eight above
+    # on #f5e9e3: no adjacent CVD pair or contrast result got worse.
+    'BRNG': '#00969e',
+}
+
+# Tags drawn dashed in the timeline because they aren't 0-1023 signal levels
+EVAL_BARS_DASHED_TAGS = ('BRNG',)
+
+
+def _read_failures_csv_rows(failure_csv_path):
+    """
+    Read a qct-parse failures CSV into a flat list of rows.
+
+    Returns:
+        list of tuples: (seconds, timestamp_str, tag, tag_value, threshold),
+        empty on error.
+    """
+    rows = []
+    try:
+        try:
+            with open(failure_csv_path, 'r', encoding='utf-8') as csvfile:
+                lines = csvfile.readlines()
+        except UnicodeDecodeError:
+            logger.warning(f"Used latin-1 encoding as fallback for CSV file {failure_csv_path}")
+            with open(failure_csv_path, 'r', encoding='latin-1') as csvfile:
+                lines = csvfile.readlines()
+        reader = csv.DictReader(lines)
+        for row in reader:
+            timestamp = row['Timestamp']
+            parts = timestamp.split(':')
+            seconds = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+            rows.append((seconds, timestamp, row['Tag'], float(row['Tag Value']), float(row['Threshold'])))
+    except Exception as e:
+        logger.error(f"Error reading failure CSV file {failure_csv_path}: {e}")
+        return []
+    return rows
+
+
+def select_failure_peaks(failure_csv_path, duration=None, max_peaks=5):
+    """
+    Pick representative failure peaks from a qct-parse failures CSV.
+
+    Bins the failing frames (all tags combined) over the video duration, then
+    greedily selects the highest-count bins — kept at least 10% of the duration
+    apart — so each selected peak marks a distinct cluster of failures. For each
+    peak, the frame with the largest relative excursion past its threshold is
+    returned as the representative frame to thumbnail.
+
+    Args:
+        failure_csv_path (str): Path to the failures CSV.
+        duration (float, optional): Video duration in seconds; falls back to the
+                                    last failure timestamp.
+        max_peaks (int, optional): Maximum number of peaks to return.
+
+    Returns:
+        list of dicts sorted by time, each with keys 'seconds', 'timestamp',
+        'tag', 'tagValue', 'threshold', 'count'.
+    """
+    rows = _read_failures_csv_rows(failure_csv_path)
+    if not rows:
+        return []
+
+    max_seconds = max(r[0] for r in rows)
+    if not duration or duration <= max_seconds:
+        duration = max_seconds + 1.0
+
+    bin_width = max(2.0, duration / 150.0)
+    n_bins = int(duration // bin_width) + 1
+    counts = [0] * n_bins
+    for seconds, *_ in rows:
+        counts[int(seconds // bin_width)] += 1
+
+    # Peaks must be far enough apart that their thumbnails don't pile up,
+    # and big enough (vs the largest cluster) to be worth a thumbnail.
+    min_gap = max(10.0, duration * 0.10)
+    floor = max(3, int(max(counts) * 0.05))
+    ranked = sorted(range(n_bins), key=lambda i: counts[i], reverse=True)
+
+    selected_centers = []
+    for i in ranked:
+        if len(selected_centers) >= max_peaks or counts[i] < floor:
+            break
+        center = (i + 0.5) * bin_width
+        if all(abs(center - other) >= min_gap for other in selected_centers):
+            selected_centers.append(center)
+
+    peaks = []
+    for center in sorted(selected_centers):
+        low = center - bin_width / 2.0
+        high = center + bin_width / 2.0
+        bin_rows = [r for r in rows if low <= r[0] < high]
+        if not bin_rows:
+            continue
+        worst = max(bin_rows, key=lambda r: abs(r[3] - r[4]) / max(abs(r[4]), 1.0))
+        peaks.append({
+            'seconds': worst[0],
+            'timestamp': worst[1],
+            'tag': worst[2],
+            'tagValue': worst[3],
+            'threshold': worst[4],
+            'count': counts[int(center // bin_width)],
+        })
+    return peaks
+
+
+def _load_enhanced_frame_analysis(frame_outputs):
+    """Load the enhanced frame analysis JSON from frame_outputs, or return None."""
+    if not frame_outputs or not frame_outputs.get('enhanced_frame_analysis'):
+        return None
+    try:
+        with open(frame_outputs['enhanced_frame_analysis'], 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"Error reading enhanced frame analysis JSON: {e}")
+        return None
+
+
+def get_frame_analysis_periods(frame_outputs):
+    """
+    Extract the frame-analysis sampling periods from the frame analysis outputs.
+
+    Reads analysis_periods ([start_seconds, duration] pairs) from the enhanced
+    frame analysis JSON (signalstats first, then brng_analysis), falling back to
+    the standalone signalstats/BRNG sidecars.
+
+    Args:
+        frame_outputs (dict): Output of find_frame_analysis_outputs(), or None.
+
+    Returns:
+        list of (start_seconds, end_seconds) tuples, sorted by start; empty if
+        no periods were recorded.
+    """
+    if not frame_outputs:
+        return []
+
+    candidates = []
+    enhanced_data = _load_enhanced_frame_analysis(frame_outputs)
+    if enhanced_data:
+        candidates.append((enhanced_data.get('signalstats') or {}).get('analysis_periods'))
+        candidates.append((enhanced_data.get('brng_analysis') or {}).get('analysis_periods'))
+
+    # Standalone sidecars: signalstats_analysis may already be a dict, brng_analysis is a path
+    for key in ('signalstats_analysis', 'brng_analysis'):
+        source = frame_outputs.get(key)
+        if not source:
+            continue
+        if isinstance(source, dict):
+            candidates.append(source.get('analysis_periods'))
+        else:
+            try:
+                with open(source, 'r') as f:
+                    candidates.append(json.load(f).get('analysis_periods'))
+            except Exception as e:
+                logger.error(f"Error reading frame analysis sidecar {source}: {e}")
+
+    for periods in candidates:
+        if periods:
+            try:
+                return sorted((float(start), float(start) + float(duration)) for start, duration in periods)
+            except (TypeError, ValueError) as e:
+                logger.error(f"Malformed analysis_periods in frame analysis output: {e}")
+    return []
+
+
+def get_frame_analysis_black_segments(frame_outputs):
+    """
+    Extract the detected black segments from the frame analysis outputs.
+
+    Reads black_segments ({'start', 'end', 'duration'} dicts) from the enhanced
+    frame analysis JSON. Frame analysis avoids these when placing its analysis
+    periods, so showing them alongside the periods explains the period placement.
+
+    Args:
+        frame_outputs (dict): Output of find_frame_analysis_outputs(), or None.
+
+    Returns:
+        list of (start_seconds, end_seconds) tuples, sorted by start; empty if
+        none were recorded.
+    """
+    enhanced_data = _load_enhanced_frame_analysis(frame_outputs)
+    if not enhanced_data:
+        return []
+    try:
+        return sorted((float(segment['start']), float(segment['end']))
+                      for segment in enhanced_data.get('black_segments') or [])
+    except (TypeError, ValueError, KeyError) as e:
+        logger.error(f"Malformed black_segments in frame analysis output: {e}")
+        return []
+
+
+def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_duration=None, frame_rate=None, analysis_periods=None, black_segments=None, bars_regions=None):
+    """
+    Build the failure-distribution timeline for the color bars evaluation.
+
+    One line per failing tag shows, per time bin, the percentage of that bin's
+    frames outside the tag's threshold — so clusters of failures read as peaks
+    over the tape's duration and clean stretches as valleys. Representative
+    thumbnails (from select_failure_peaks(), with a 'thumb_path' added) are
+    anchored above the plot at the clusters they illustrate, with a clickable
+    copy of each below the chart, followed by an expandable table of every
+    failing frame.
+
+    Args:
+        failure_csv_path (str): Path to the failures CSV.
+        video_id (str): The identifier for the video being analyzed.
+        peaks (list, optional): Output of select_failure_peaks(); entries may
+                                carry a 'thumb_path' key.
+        video_duration (float, optional): Duration in seconds (ffprobe); falls
+                                          back to the last failure timestamp.
+        frame_rate (float, optional): Frames per second (ffprobe); falls back
+                                      to 29.97.
+        analysis_periods (list, optional): (start_seconds, end_seconds) tuples
+                                           from get_frame_analysis_periods();
+                                           drawn as shaded bands on the plot.
+        black_segments (list, optional): (start_seconds, end_seconds) tuples
+                                         from get_frame_analysis_black_segments();
+                                         drawn as dark bands on the plot.
+        bars_regions (list, optional): (start_seconds, end_seconds) tuples of
+                                       detected color bars (head + additional,
+                                       from _parse_bars_durations_csv); drawn
+                                       as plum bands with a saturated rule
+                                       along the baseline.
+
+    Returns:
+        str or None: HTML string containing the timeline, None if there is no data.
+    """
+    try:
+        import plotly.graph_objs as go
+    except ImportError as e:
+        logger.critical(f"Error importing required libraries for graphs: {e}")
+        return None
+
+    rows = _read_failures_csv_rows(failure_csv_path)
+    if not rows:
+        return None
+    peaks = peaks or []
+
+    max_seconds = max(r[0] for r in rows)
+    duration = video_duration if video_duration and video_duration > max_seconds else max_seconds + 1.0
+    fps = frame_rate if frame_rate and frame_rate > 0 else 29.97
+
+    bin_width = max(0.5, duration / 600.0)
+    frames_per_bin = fps * bin_width
+    n_bins = int(duration // bin_width) + 1
+
+    tag_counts = {}
+    for seconds, _, tag, _, _ in rows:
+        tag_counts.setdefault(tag, [0] * n_bins)[int(seconds // bin_width)] += 1
+
+    bin_centers = [(i + 0.5) * bin_width for i in range(n_bins)]
+    bin_labels = [_seconds_to_display(center) for center in bin_centers]
+
+    # Fixed trace order: known tags in palette order, any others after
+    ordered_tags = [tag for tag in EVAL_BARS_TAG_COLORS if tag in tag_counts]
+    ordered_tags += [tag for tag in sorted(tag_counts) if tag not in EVAL_BARS_TAG_COLORS]
+
+    fig = go.Figure()
+    for tag in ordered_tags:
+        density = [min(100.0, count / frames_per_bin * 100.0) for count in tag_counts[tag]]
+        line_style = dict(width=2, color=EVAL_BARS_TAG_COLORS.get(tag, '#52514e'))
+        if tag in EVAL_BARS_DASHED_TAGS:
+            line_style['dash'] = 'dash'
+        fig.add_trace(go.Scatter(
+            x=bin_centers, y=density, mode='lines', name=tag,
+            line=line_style,
+            text=bin_labels,
+            hovertemplate='%{text} &middot; ' + tag + ': %{y:.0f}% of frames<extra></extra>',
+        ))
+
+    # Shaded bands mark the periods sampled by frame analysis, behind the traces
+    images = []
+    shapes = []
+    analysis_periods = analysis_periods or []
+    for period_start, period_end in analysis_periods:
+        shapes.append(dict(
+            type='rect', xref='x', yref='paper',
+            x0=period_start, x1=min(period_end, duration), y0=0, y1=1,
+            fillcolor='rgba(166,124,82,0.30)', line=dict(color='#a67c52', width=2),
+            layer='below',
+        ))
+    if analysis_periods:
+        # Legend-only proxy so the bands are identifiable (shapes don't get legend entries)
+        fig.add_trace(go.Scatter(
+            x=[None], y=[None], mode='markers',
+            marker=dict(symbol='square', size=12, color='rgba(166,124,82,0.30)',
+                        line=dict(color='#a67c52', width=2)),
+            name='Frame analysis period',
+        ))
+
+    # Detected black segments as dark bands — frame analysis avoids these when
+    # placing its periods, so they explain the period placement
+    black_segments = black_segments or []
+    for segment_start, segment_end in black_segments:
+        shapes.append(dict(
+            type='rect', xref='x', yref='paper',
+            x0=segment_start, x1=min(segment_end, duration), y0=0, y1=1,
+            fillcolor='rgba(70,70,70,0.35)', line=dict(color='#555555', width=1),
+            layer='below',
+        ))
+    if black_segments:
+        fig.add_trace(go.Scatter(
+            x=[None], y=[None], mode='markers',
+            marker=dict(symbol='square', size=12, color='rgba(70,70,70,0.35)',
+                        line=dict(color='#555555', width=1)),
+            name='Detected black segment',
+        ))
+
+    # Detected color bars (head + additional) — bars are excluded from the
+    # evaluation, so these explain zero-failure stretches. Translucent washes
+    # over the cream surface all converge on the same muddy pastel (the tan
+    # period band and the gray black-segment band are only OKLab ΔE ~7 apart
+    # as rendered), so identity here rides on the saturated plum rule drawn
+    # along the baseline rather than on the wash, which stays light enough to
+    # keep the traces readable.
+    bars_regions = bars_regions or []
+    for bars_start, bars_end in bars_regions:
+        bars_x1 = min(bars_end, duration)
+        shapes.append(dict(
+            type='rect', xref='x', yref='paper',
+            x0=bars_start, x1=bars_x1, y0=0, y1=1,
+            fillcolor='rgba(168,84,143,0.18)', line=dict(color='#a8548f', width=1),
+            layer='below',
+        ))
+        shapes.append(dict(
+            type='rect', xref='x', yref='paper',
+            x0=bars_start, x1=bars_x1, y0=0, y1=0.03,
+            fillcolor='#a8548f', line=dict(width=0),
+            layer='below',
+        ))
+    if bars_regions:
+        fig.add_trace(go.Scatter(
+            x=[None], y=[None], mode='markers',
+            marker=dict(symbol='square', size=12, color='#a8548f',
+                        line=dict(color='#a8548f', width=2)),
+            name='Detected color bars',
+        ))
+
+    # Dotted connector at each peak plus its thumbnail anchored in the top margin
+    thumb_sizex = duration * 0.085
+    for peak in peaks:
+        peak_x = peak['seconds']
+        shapes.append(dict(
+            type='line', xref='x', yref='paper', x0=peak_x, x1=peak_x, y0=0, y1=1.06,
+            line=dict(color='#4d2b12', width=1, dash='dot'),
+        ))
+        thumb_path = peak.get('thumb_path')
+        if thumb_path and os.path.isfile(thumb_path):
+            data_uri = image_file_to_jpeg_data_uri(thumb_path)
+            # Keep edge-of-tape thumbnails inside the plot's x-range
+            img_x = min(max(peak_x, thumb_sizex / 2.0), duration - thumb_sizex / 2.0)
+            images.append(dict(
+                source=data_uri, xref='x', yref='paper',
+                x=img_x, y=1.07, sizex=thumb_sizex, sizey=0.30,
+                xanchor='center', yanchor='bottom', sizing='contain', layer='above',
+            ))
+
+    # Time axis ticks at a readable interval, without fractional seconds
+    def _format_tick(seconds):
+        seconds = int(seconds)
+        hours, remainder = divmod(seconds, 3600)
+        minutes, secs = divmod(remainder, 60)
+        if hours > 0:
+            return f"{hours}:{minutes:02d}:{secs:02d}"
+        return f"{minutes}:{secs:02d}"
+
+    tick_interval = next((interval for interval in (10, 30, 60, 120, 300, 600, 1200, 1800, 3600)
+                          if duration / interval <= 10), 7200)
+    tickvals = list(range(0, int(duration) + 1, tick_interval))
+    ticktext = [_format_tick(val) for val in tickvals]
+
+    fig.update_layout(
+        height=620,
+        margin=dict(l=70, r=40, t=190, b=60),
+        paper_bgcolor='#f5e9e3',
+        plot_bgcolor='#f5e9e3',
+        images=images,
+        shapes=shapes,
+        legend=dict(orientation='h', yanchor='bottom', y=-0.28, x=0),
+        xaxis=dict(title='Time', range=[0, duration], tickvals=tickvals, ticktext=ticktext,
+                   gridcolor='#e3d5c9', zeroline=False),
+        yaxis=dict(title='% of frames outside threshold', range=[0, 105],
+                   ticksuffix='%', gridcolor='#e3d5c9', zeroline=False),
+    )
+
+    config = {
+        'toImageButtonOptions': {
+            'format': 'png',
+            'filename': f'{video_id}_eval_bars_timeline',
+            'height': 620,
+            'width': 1200,
+            'scale': 1
+        }
+    }
+    chart_html = fig.to_html(full_html=False, include_plotlyjs='cdn', config=config, default_width='100%')
+
+    # Clickable copies of the peak thumbnails, in time order
+    thumb_cards = []
+    for index, peak in enumerate(peaks, start=1):
+        caption = f"{peak['timestamp'].split('.')[0]} &mdash; {peak['tag']} {peak['tagValue']} (threshold {peak['threshold']})"
+        js_caption = f"{peak['tag']} at {peak['timestamp']} - Value: {peak['tagValue']}, Threshold: {peak['threshold']}"
+        thumb_path = peak.get('thumb_path')
+        if thumb_path and os.path.isfile(thumb_path):
+            data_uri = image_file_to_jpeg_data_uri(thumb_path)
+            img_html = f'''<img src="{data_uri}"
+                            onclick="openImage(this.src, '{js_caption}')"
+                            style="width: 200px; height: auto; cursor: pointer; border: 1px solid #ccc;"
+                            title="Click to enlarge" />'''
+        else:
+            img_html = ''
+        thumb_cards.append(f'''
+        <div style="display: flex; flex-direction: column; align-items: center; margin-right: 15px;">
+            {img_html}
+            <p style="margin: 5px 0 0 0; font-size: 12px;"><b>Peak {index}:</b> {caption}</p>
+        </div>
+        ''')
+    thumb_strip_html = ""
+    if thumb_cards:
+        thumb_strip_html = f'''
+        <p style="margin-bottom: 5px;"><b>Peak examples</b> (click to enlarge):</p>
+        <div style="display: flex; flex-wrap: wrap; align-items: flex-start;">
+            {''.join(thumb_cards)}
+        </div>
+        '''
+
+    # Expandable table of every failing frame (all tags combined)
+    table_rows = []
+    for _, timestamp, tag, tag_value, threshold in rows:
+        table_rows.append(f"""
+        <tr>
+            <td>{timestamp}</td>
+            <td>{tag}</td>
+            <td>{tag_value}</td>
+            <td>{threshold}</td>
+        </tr>
+        """)
+    full_table_html = f"""
+    <a id="link_evalbars_all" href="javascript:void(0);" onclick="toggleTable('evalbars_all')" style="color: #378d6a; text-decoration: underline; margin-top: 10px;">Show all failures ▼</a>
+    <div id="table_evalbars_all" style="display: none; margin-top: 10px; max-height: 400px; overflow-y: auto;">
+        <table style="border-collapse: collapse; width: 100%; border: 1px solid #4d2b12;">
+            <tr style="background-color: #fbe4eb;">
+                <th style="border: 1px solid #4d2b12; padding: 8px;">Timestamp</th>
+                <th style="border: 1px solid #4d2b12; padding: 8px;">Tag</th>
+                <th style="border: 1px solid #4d2b12; padding: 8px;">Value</th>
+                <th style="border: 1px solid #4d2b12; padding: 8px;">Threshold</th>
+            </tr>
+            {''.join(table_rows)}
+        </table>
+    </div>
+    """
+
+    bin_label = f"{bin_width:.1f}".rstrip('0').rstrip('.')
+    periods_note = ""
+    if analysis_periods:
+        periods_note = " Shaded bands mark the periods sampled by frame analysis (signalstats/BRNG)."
+    if black_segments:
+        periods_note += " Dark bands mark detected black segments, which frame analysis skips when placing its periods."
+    if bars_regions:
+        periods_note += " Plum bands, underlined by a solid rule, mark detected color bars, which are excluded from the evaluation."
+    # BRNG is the measure frame analysis uses to place its periods, so calling it
+    # out explains why the dashed trace and the shaded bands tend to coincide.
+    brng_note = ""
+    if 'BRNG' in tag_counts:
+        brng_note = (" The dashed BRNG line counts frames where a larger share of pixels fell outside"
+                     " broadcast range than in this tape's own color bars &mdash; the same measure frame"
+                     " analysis uses to choose where to place its analysis periods.")
+    timeline_html = f"""
+    {FAILURE_SECTION_JS}
+    <div style="background-color: #f5e9e3; padding: 10px; margin-top: 10px;">
+        <p><b>Failure distribution over the video's duration</b></p>
+        <p style="font-size: 13px;">Each line shows, per {bin_label}-second interval, the percentage of frames
+        whose value fell outside that tag's threshold.
+        Dotted lines mark the largest failure clusters; the thumbnail above each shows a representative frame
+        (out-of-range areas highlighted in cyan).{brng_note}{periods_note}</p>
+        {chart_html}
+        {thumb_strip_html}
+        {full_table_html}
+    </div>
+    """
+    return timeline_html
+
 
 def _seconds_to_display(seconds):
     """Convert seconds to a human-readable timecode string (HH:MM:SS.s)"""
@@ -3618,7 +4348,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
         if display_borders:
             # Display detection method
             detection_method = display_borders.get('detection_method', 'unknown')
-            method_label = "Simple (fixed borders)" if detection_method == 'simple_fixed' else "Sophisticated (quality-based detection)"
+            method_label = "Simple (fixed borders)" if detection_method.startswith('simple') else "Sophisticated (quality-based detection)"
             if 'refined' in detection_method:
                 method_label += " with iterative refinement"
             
@@ -3991,33 +4721,88 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     'mixed': ' (mixed: some periods active picture area, some full frame)',
                 }.get(analyzed_region, '')
 
+                # Example-frame thumbnails (representative / worst) rendered by
+                # frame analysis. Each is a side-by-side original | magenta BRNG
+                # overlay image cropped to the measured region; framed inside the
+                # stat card it illustrates.
+                def _signalstats_frame_figure(thumb_key, timecode_key, caption_label):
+                    thumb_path = signalstats_data.get(thumb_key)
+                    if not thumb_path or not os.path.exists(thumb_path):
+                        return ""
+                    uri = image_to_data_uri(thumb_path, 'image/jpeg')
+                    if not uri:
+                        return ""
+                    timecode = signalstats_data.get(timecode_key)
+                    badge_text = f"{caption_label} &middot; {timecode}" if timecode else caption_label
+                    return f"""
+                        <figure style="margin: 12px 0 0 0;">
+                            <img src="{uri}" alt="{caption_label}"
+                                 style="display: block; width: 100%; height: auto;
+                                        border: 1px solid #e0d0c0; border-radius: 5px;">
+                            <figcaption style="margin-top: 8px;">
+                                <span style="display: inline-block; font-size: 11px; font-weight: 600;
+                                             color: #4d2b12; background-color: #f8f6f3;
+                                             border: 1px solid #e0d0c0; border-radius: 10px;
+                                             padding: 2px 10px;">{badge_text}</span>
+                            </figcaption>
+                        </figure>
+                    """
+
+                representative_fig = _signalstats_frame_figure(
+                    'representative_frame_thumbnail', 'representative_frame_timecode',
+                    'Representative frame')
+                worst_fig = _signalstats_frame_figure(
+                    'worst_frame_thumbnail', 'worst_frame_timecode', 'Worst frame')
+
+                # Each metric is rendered as a clean card: a muted uppercase label,
+                # a prominent value with a smaller descriptor, and (for the two
+                # share metrics) the illustrative frame framed inside the card.
+                def _signalstats_stat_card(label, value_main, value_desc, figure_html=""):
+                    return f"""
+                    <div style="background-color: #ffffff; border: 1px solid #e8ddd0;
+                                border-radius: 8px; padding: 12px 16px;
+                                box-shadow: 0 1px 2px rgba(77, 43, 18, 0.06);">
+                        <div style="display: flex; justify-content: space-between;
+                                    align-items: baseline; gap: 16px;">
+                            <span style="font-size: 11px; text-transform: uppercase;
+                                         letter-spacing: 0.06em; color: #8a7a6d;
+                                         font-weight: 600;">{label}</span>
+                            <span style="font-size: 22px; font-weight: 700; color: #4d2b12;
+                                         white-space: nowrap;">{value_main}</span>
+                        </div>
+                        <div style="font-size: 12px; color: #9a8a7d; text-align: right;
+                                    margin-top: 2px;">{value_desc}</div>
+                        {figure_html}
+                    </div>
+                    """
+
+                cards = []
+                if violation_pct is not None:
+                    cards.append(_signalstats_stat_card(
+                        "Frames with out-of-range pixels",
+                        f"{violation_pct:.1f}%", "of analyzed frames"))
+                if avg_brng is not None:
+                    cards.append(_signalstats_stat_card(
+                        "Average out-of-range share",
+                        f"{avg_brng:.4f}%", "of pixels per analyzed frame",
+                        representative_fig))
+                if max_brng is not None:
+                    cards.append(_signalstats_stat_card(
+                        "Worst frame",
+                        f"{max_brng:.4f}%", "of pixels out of range",
+                        worst_fig))
+
+                source_text = "QCTools + FFprobe comparison" if used_qctools else "FFprobe signalstats"
+
                 html += f"""
                 <div style="margin: 16px 0;">
-                    <p style="font-weight: bold; margin-bottom: 8px; color: #4d2b12;">Overall Results{region_label}</p>
-                    <table style="border-collapse: collapse; width: auto; margin: 0;">
+                    <p style="font-weight: bold; margin-bottom: 10px; color: #4d2b12;">Overall Results{region_label}</p>
+                    <div style="display: flex; flex-direction: column; gap: 10px; max-width: 560px;">
+                        {''.join(cards)}
+                    </div>
+                    <p style="font-size: 11px; color: #9a8a7d; margin: 8px 2px 0;">Data source: {source_text}</p>
+                </div>
                 """
-
-                stat_rows = []
-                if violation_pct is not None:
-                    stat_rows.append(("Frames with any out-of-range pixels",
-                                      f"{violation_pct:.1f}% of analyzed frames"))
-                if avg_brng is not None:
-                    stat_rows.append(("Average out-of-range share",
-                                      f"{avg_brng:.4f}% of pixels per analyzed frame"))
-                if max_brng is not None:
-                    stat_rows.append(("Worst frame",
-                                      f"{max_brng:.4f}% of pixels out of range"))
-                stat_rows.append(("Data source", "QCTools + FFprobe comparison" if used_qctools else "FFprobe signalstats"))
-                
-                for label, value in stat_rows:
-                    html += f"""
-                    <tr>
-                        <td style="padding: 4px 12px 4px 0; color: #555; font-size: 13px; border: none; white-space: nowrap;">{label}</td>
-                        <td style="padding: 4px 0; font-weight: bold; font-size: 13px; border: none;">{value}</td>
-                    </tr>
-                    """
-                
-                html += "</table></div>"
             
             # Display results for active area (legacy format)
             if signalstats_data.get('results', {}).get('active_area'):
@@ -5445,7 +6230,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     if signals:
         signals.report_progress.emit(0)
 
-    qctools_colorbars_duration_output, qctools_bars_eval_check_output, colorbars_values_output, windowed_colorbars_values, qctools_content_check_outputs, qctools_profile_check_output, profile_fails_csv, tags_check_output, tag_fails_csv, colorbars_eval_fails_csv, audio_clipping_csv, channel_imbalance_csv, audible_timecode_csv, audio_dropout_csv, clamped_levels_csv, clamped_traces_csv, chroma_phase_summary_csv, chroma_phase_events_csv, tone_leak_summary_csv, tone_leak_events_csv, difference_csv = find_report_csvs(report_directory)
+    qctools_colorbars_duration_output, qctools_bars_eval_check_output, colorbars_values_output, windowed_colorbars_values, qctools_content_check_outputs, qctools_profile_check_output, profile_fails_csv, tags_check_output, tag_fails_csv, colorbars_eval_fails_csv, audio_clipping_csv, channel_imbalance_csv, identical_channels_csv, audible_timecode_csv, audio_dropout_csv, clamped_levels_csv, clamped_traces_csv, chroma_phase_summary_csv, chroma_phase_events_csv, tone_leak_summary_csv, tone_leak_events_csv, difference_csv = find_report_csvs(report_directory)
 
     # CLAMS bars-detection durations CSV (filename matches the writer in
     # checks/bars_detection_clams.py); present only when the parallel detector ran.
@@ -5499,12 +6284,19 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
             for info in info_list:
                 thumbnail_tasks.append((info['tag'], info['tagValue'], timestamp, 'tag_check'))
 
+    # Color bars evaluation thumbnails illustrate the peaks of the failure
+    # timeline, so they are picked by failure-cluster density rather than by
+    # worst value (summarize_failures).
+    colorbars_peaks = []
+    eval_video_duration = None
+    eval_video_fps = None
     if colorbars_eval_fails_csv and video_path:
         colorbars_eval_fails_csv_path = os.path.join(report_directory, colorbars_eval_fails_csv)
-        failureInfoSummary_colorbars = summarize_failures(colorbars_eval_fails_csv_path)
-        for timestamp, info_list in failureInfoSummary_colorbars.items():
-            for info in info_list:
-                thumbnail_tasks.append((info['tag'], info['tagValue'], timestamp, 'color_bars_evaluation'))
+        eval_video_duration = _get_video_duration(video_path)
+        eval_video_fps = _get_video_frame_rate(video_path)
+        colorbars_peaks = select_failure_peaks(colorbars_eval_fails_csv_path, duration=eval_video_duration)
+        for peak in colorbars_peaks:
+            thumbnail_tasks.append((peak['tag'], peak['tagValue'], peak['timestamp'], 'color_bars_evaluation'))
 
     total_thumbs = len(thumbnail_tasks)
     for i, (tag, tagValue, timestamp, profile_name) in enumerate(thumbnail_tasks):
@@ -5521,6 +6313,12 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
             generated_thumbs[thumb_key] = (thumb_path, tag, timestamp)
         if signals and total_thumbs > 0:
             signals.report_progress.emit(1 + int(9 * (i + 1) / total_thumbs))
+
+    # Attach the generated thumbnail paths to their peaks for the eval-bars timeline
+    for peak in colorbars_peaks:
+        thumb_key = f"Failed frame \n\n{peak['tag']}:{peak['tagValue']}\n\n{peak['timestamp']}"
+        if thumb_key in generated_thumbs:
+            peak['thumb_path'] = generated_thumbs[thumb_key][0]
 
     # Merge with existing thumbs (for things like color bars detection)
     existing_thumbs = find_qct_thumbs(report_directory)
@@ -5592,13 +6390,31 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     if check_cancelled():
         return
 
+    # Detected bars runs (head + additional). These are the regions the bars
+    # evaluation skips, so the timeline shades them; the windowed graphs below
+    # reuse the same parse for their timecode labels.
+    qct_duration_runs = _parse_bars_durations_csv(qctools_colorbars_duration_output)
+    bars_regions = [(bars_start, bars_end) for _, bars_start, bars_end in qct_duration_runs]
+
     # Create graphs for all existing csv files (existing code...)
+    # The timeline renders as its own titled section below the evaluation pies,
+    # so it stays a separate variable rather than being folded into
+    # colorbars_eval_html.
+    colorbars_timeline_html = None
     if qctools_bars_eval_check_output and failureInfoSummary_colorbars:
-        colorbars_eval_html = make_profile_piecharts(qctools_bars_eval_check_output, thumbs_dict, failureInfoSummary_colorbars, video_id, failure_csv_path=colorbars_eval_fails_csv_path, check_cancelled=check_cancelled)
+        # Pies summarize the per-tag failure share; the timeline below them
+        # carries the failure specifics (distribution + peak thumbnails)
+        colorbars_eval_html = make_profile_piecharts(qctools_bars_eval_check_output, thumbs_dict, failureInfoSummary_colorbars, video_id, failure_csv_path=colorbars_eval_fails_csv_path, check_cancelled=check_cancelled, failure_details=False)
+        colorbars_timeline_html = make_eval_bars_timeline_html(
+            colorbars_eval_fails_csv_path, video_id, peaks=colorbars_peaks,
+            video_duration=eval_video_duration, frame_rate=eval_video_fps,
+            analysis_periods=get_frame_analysis_periods(frame_outputs),
+            black_segments=get_frame_analysis_black_segments(frame_outputs),
+            bars_regions=bars_regions)
     elif qctools_bars_eval_check_output and failureInfoSummary_colorbars is None:
        color_bars_segment = f"""
         <div style="display: flex; flex-direction: column; align-items: start; background-color: #f5e9e3; padding: 10px;"> 
-            <p><b>All QCTools values of the video file are within the peak values of the color bars.</b></p>
+            <p><b>All QCTools values of the video file are within the median values of the color bars.</b></p>
         </div>
         """
        colorbars_eval_html = f"""
@@ -5662,8 +6478,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
 
     # Render bar graphs for windowed (mid-file) bars regions.
     # Build a lookup of region label → duration string from the qct-parse
-    # bars durations CSV so each graph shows the correct timecodes.
-    qct_duration_runs = _parse_bars_durations_csv(qctools_colorbars_duration_output)
+    # bars durations CSV (parsed above) so each graph shows the correct timecodes.
     windowed_duration_lookup = {}
     for label, start_s, end_s in qct_duration_runs:
         def _fmt(seconds):
@@ -5721,6 +6536,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
 
     audio_clipping_html = make_audio_clipping_html(audio_clipping_csv) if audio_clipping_csv else None
     channel_imbalance_html = make_channel_imbalance_html(channel_imbalance_csv) if channel_imbalance_csv else None
+    identical_channels_html = make_identical_channels_html(identical_channels_csv) if identical_channels_csv else None
     audible_timecode_html = make_audible_timecode_html(audible_timecode_csv) if audible_timecode_csv else None
     audio_dropout_html = make_audio_dropout_html(audio_dropout_csv) if audio_dropout_csv else None
     clamped_levels_html = make_clamped_levels_html(clamped_levels_csv, clamped_traces_csv) if clamped_levels_csv else None
@@ -5737,6 +6553,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         not colorbars_eval_fails_csv and
         not audio_clipping_csv and
         not channel_imbalance_csv and
+        not identical_channels_csv and
         not audible_timecode_csv and
         not audio_dropout_csv and
         not clamped_levels_csv and
@@ -5832,6 +6649,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     # render order below, so sections are listed the way they appear.
     _has_audio_results = bool(
         audio_clipping_html or channel_imbalance_html
+        or identical_channels_html
         or audible_timecode_html or audio_dropout_html
         or tone_leak_html
     )
@@ -5874,6 +6692,8 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         toc_entries.append(('section-clams-detection', 'CLAMS Detection'))
     if colorbars_eval_html:
         toc_entries.append(('section-colorbars-eval', 'Colorbars Threshold Evaluation'))
+    if colorbars_timeline_html:
+        toc_entries.append(('section-timeline', 'Timeline of Signal Distribution'))
     if clamped_levels_html:
         toc_entries.append(('section-clamped-levels', 'Clamped Levels Detection'))
     if chroma_phase_html:
@@ -6267,6 +7087,12 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         {colorbars_eval_html}
         """
 
+    if colorbars_timeline_html:
+        html_template += f"""
+        <h3 id="section-timeline">Timeline of Signal Distribution</h3>
+        {colorbars_timeline_html}
+        """
+
     if clamped_levels_html:
         html_template += f"""
         <h3 id="section-clamped-levels">Clamped Levels Detection</h3>
@@ -6281,6 +7107,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
 
     has_audio_results = bool(
         audio_clipping_html or channel_imbalance_html
+        or identical_channels_html
         or audible_timecode_html or audio_dropout_html
         or tone_leak_html
     )
@@ -6293,8 +7120,9 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         )
         html_template += waveform_divider
 
-        # Clipping + Channel Imbalance side-by-side
-        if audio_clipping_html or channel_imbalance_html:
+        # Clipping + Channel Imbalance + Identical Channels — the per-channel
+        # comparisons, wrapping two-up
+        if audio_clipping_html or channel_imbalance_html or identical_channels_html:
             html_template += (
                 '<div style="display: flex; flex-wrap: wrap; gap: 24px; '
                 'align-items: flex-start; margin: 16px 0;">'
@@ -6311,6 +7139,13 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
                 <div style="flex: 1 1 420px; min-width: 0;">
                     <h3>Channel Imbalance Analysis</h3>
                     {channel_imbalance_html}
+                </div>
+                """
+            if identical_channels_html:
+                html_template += f"""
+                <div id="section-identical-channels" style="flex: 1 1 420px; min-width: 0;">
+                    <h3>Identical Channels</h3>
+                    {identical_channels_html}
                 </div>
                 """
             html_template += '</div>'

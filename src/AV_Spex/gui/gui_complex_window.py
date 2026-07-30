@@ -420,8 +420,8 @@ class ComplexWindow(QWidget, ThemeableMixin):
 
         self.audio_analysis_cb = self._make_checkbox("Audio Analysis")
         self._add_option(layout, self.audio_analysis_cb, self._desc_label(
-            "Detect audio clipping, channel imbalance, audible timecode "
-            "(LTC), and audio dropout"))
+            "Detect audio clipping, channel imbalance, identical (dual mono) "
+            "channels, audible timecode (LTC), and audio dropout"))
 
         self.detect_tone_leak_cb = self._make_checkbox("Tone Leak Detection")
         self._add_option(layout, self.detect_tone_leak_cb, self._desc_label(

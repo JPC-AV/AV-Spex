@@ -275,7 +275,7 @@ Controls the `checks_config.tools.qct_parse` settings. Dependency logic is enfor
 - **Detect Color Bars** (`barsDetection`) — when unchecked, automatically unchecks and disables Evaluate Color Bars and Thumbnail Export
 - **Evaluate Color Bars** (`evaluateBars`) — compares detected bars against expected values
 - **Thumbnail Export** (`thumbExport`) — exports thumbnails of failed frames; enabled when at least one of bars detection or evaluate bars is active
-- **Perform Audio Analysis** (`audio_analysis`) — detects audio clipping, channel imbalance, audible timecode, and audio dropout
+- **Perform Audio Analysis** (`audio_analysis`) — detects audio clipping, channel imbalance, identical (dual mono) channels, audible timecode, and audio dropout
 - **Detect Clamped Levels** (`detect_clamped_levels`) — detects broadcast-range level clamping from the analog-to-digital converter
 
 #### 3. CLAMS Detection
