@@ -679,7 +679,7 @@ For each processed input directory `{video_id}/`:
 
 A per-file log is written inside each `_qc_metadata` directory:
 `{video_id}_qc_metadata/{video_id}_avspex_processing.log`
-These per-file logs are overwritten if a file is re-run.
+Re-running a file appends to its existing log rather than overwriting it, so the full processing history of the file is preserved in one place. Each new run is separated from the previous one by a `NEW PROCESSING RUN` banner, followed by the run's start timestamp.
 
 Each run also writes a timestamped application log:
 ```
