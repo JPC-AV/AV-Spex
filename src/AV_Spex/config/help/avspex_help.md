@@ -178,7 +178,7 @@ The Complex tab configures the advanced analysis steps — typically run during 
   - **BRNG Analysis**: Toggle on/off, set maximum analysis duration, and enable or disable automatic color bar skipping
   - **Analysis Periods**: The number and length of the time windows sampled across the video, shared by Signalstats and BRNG analysis
 - **Audio Checks** (each check is described in the Audio Checks section below):
-  - **Audio Analysis**: Clipping, channel imbalance, audible timecode (LTC), and audio dropout (via qct-parse)
+  - **Audio Analysis**: Clipping, channel imbalance, audible timecode (LTC), identical channel detection, and audio dropout (via qct-parse)
   - **Tone Leak Detection**: A 1 kHz reference tone leaking from the transfer chain, heard as a faint high-pitched whine or squeak in quiet passages (via qct-parse)
   - **Dropped Sample Detection**: Potential audio sample drops from TBC/framesync or ADC devices
 
@@ -246,12 +246,37 @@ When CLAMS Bars + Tone Detection is also enabled, the head-bars end time used fo
 
 ### Evaluate Color Bars
 
-Available when Detect Color Bars is on. Compares the program content against a reference set of color bar levels, flagging frames that exceed those levels. A summary and per-frame failures are written to CSVs and charted in the HTML report.
+Available when Detect Color Bars is on. Compares the program content against a reference set of color bar levels, flagging frames that exceed those levels. A summary and per-frame failures are written to CSVs and charted in the HTML report — as pie charts of the per-tag failure share, and as the timeline described below.
 
 Use **Compare against** to choose the reference:
 
 - **Bars detected in this video** (default): grades against the signal values measured from this file's own color bars. If no bars are found in the video, the standard SMPTE values are used as a fallback.
 - **Standard SMPTE values**: always grades against the standard SMPTE color bar values from the config, ignoring any bars detected in the video. When bars are also detected, the report still charts the file's measured bars alongside the SMPTE reference for comparison.
+
+### Timeline of Signal Distribution
+
+The **Timeline of Signal Distribution** section of the HTML report charts the results of the color bars evaluation across the whole tape. It appears below the evaluation pie charts whenever the evaluation ran and found failing frames — the pies summarize *which* tags failed and in what proportion, and the timeline shows *where* those failures fall.
+
+**Reading the chart**: The horizontal axis is elapsed time through the file; the vertical axis is the percentage of frames in each time interval whose value fell outside the reference threshold. Each failing tag gets its own line in a fixed color (the same tag is always the same color from report to report), so a cluster of failures reads as a peak and a clean stretch as a valley. Hovering over a line gives the time and the exact percentage for that interval.
+
+- **YMAX / YMIN / UMAX / UMIN / VMAX / VMIN / SATMAX / SATMIN** — solid lines, each the share of frames whose luma, chroma, or saturation level exceeded the reference bars (or standard SMPTE) threshold.
+- **BRNG** — a dashed line, drawn differently because it measures a different thing: the share of pixels in a frame that fell outside broadcast range, rather than a signal level. It is also the measure frame analysis uses to decide where to place its analysis periods, so the dashed line and the shaded bands below tend to coincide.
+
+**Shaded bands** provide context for what the lines are doing:
+
+- **Tan bands** — the periods sampled by frame analysis (Signalstats and BRNG analysis)
+- **Dark gray bands** — detected black segments, which frame analysis avoids when placing its periods
+- **Plum bands** (with a solid rule along the baseline) — detected color bars, which are excluded from the evaluation and therefore always read as zero failures
+
+**Peak thumbnails**: Dotted vertical lines mark the largest failure clusters, with a representative frame from each cluster shown above the chart — out-of-range areas are highlighted in cyan. Clusters are chosen by failure density and kept apart from one another so the thumbnails illustrate distinct events rather than the same moment repeatedly. Clickable copies of the same thumbnails appear below the chart in time order, captioned with the timestamp, tag, measured value, and threshold; click one to enlarge it.
+
+![The color bars evaluation timeline from the HTML report](eval_bars_timeline_example.png)
+
+*The timeline for a half-hour tape. The plum band at the head marks the detected color bars, which the evaluation skips; the gray bands are detected black segments and the three tan bands are the periods sampled by frame analysis. YMAX (blue) accounts for most of the failures here, spiking to 100% of frames in brief bursts, while the dashed teal BRNG line rises alongside it around 17:00 and 21:30. Thumbnails above the plot show a representative frame from each of the five largest failure clusters, with out-of-range areas highlighted in cyan.*
+
+**Show all failures**: An expandable table below the thumbnails lists every failing frame with its timestamp, tag, value, and threshold — the full contents of `qct-parse_colorbars_eval_failures.csv`.
+
+Times along the timeline are elapsed time from the start of the file, not the file's own embedded timecode, so they may not line up exactly with an NLE's timecode display. The chart can be saved as a PNG using the camera icon in the Plotly toolbar at the top right of the plot.
 
 ### Export Thumbnails
 
