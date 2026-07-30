@@ -381,6 +381,7 @@ def find_report_csvs(report_directory):
     colorbars_eval_fails_csv = None
     audio_clipping_csv = None
     channel_imbalance_csv = None
+    identical_channels_csv = None
     audible_timecode_csv = None
     audio_dropout_csv = None
     clamped_levels_csv = None
@@ -421,6 +422,8 @@ def find_report_csvs(report_directory):
                         audio_clipping_csv = file_path
                     elif "qct-parse_channel_imbalance" in file:
                         channel_imbalance_csv = file_path
+                    elif "qct-parse_identical_channels" in file:
+                        identical_channels_csv = file_path
                     elif "qct-parse_audible_timecode" in file:
                         audible_timecode_csv = file_path
                     elif "qct-parse_audio_dropout" in file:
@@ -440,7 +443,7 @@ def find_report_csvs(report_directory):
                 elif "metadata_difference" in file:
                     difference_csv = file_path
 
-    return qctools_colorbars_duration_output, qctools_bars_eval_check_output, colorbars_values_output, windowed_colorbars_values, qctools_content_check_outputs, qctools_profile_check_output, profile_fails_csv, tags_check_output, tag_fails_csv, colorbars_eval_fails_csv, audio_clipping_csv, channel_imbalance_csv, audible_timecode_csv, audio_dropout_csv, clamped_levels_csv, clamped_traces_csv, chroma_phase_summary_csv, chroma_phase_events_csv, tone_leak_summary_csv, tone_leak_events_csv, difference_csv
+    return qctools_colorbars_duration_output, qctools_bars_eval_check_output, colorbars_values_output, windowed_colorbars_values, qctools_content_check_outputs, qctools_profile_check_output, profile_fails_csv, tags_check_output, tag_fails_csv, colorbars_eval_fails_csv, audio_clipping_csv, channel_imbalance_csv, identical_channels_csv, audible_timecode_csv, audio_dropout_csv, clamped_levels_csv, clamped_traces_csv, chroma_phase_summary_csv, chroma_phase_events_csv, tone_leak_summary_csv, tone_leak_events_csv, difference_csv
 
 
 def read_xml_file(xml_file_path):
@@ -1550,6 +1553,180 @@ def _tc_consensus_channel_summary(consensus_rows):
     if len(specific) == 1:
         return next(iter(specific))
     return "Not channel-specific (mix-based)"
+
+
+def _identical_status_colors(overall_verdict):
+    """Return (text_color, bg_color, border_color) for an identical-channel verdict."""
+    if overall_verdict.startswith("Polarity-inverted"):
+        # The channels cancel each other in a mono fold-down — a real defect.
+        return "#721c24", "#f8d7da", "#f5c6cb"
+    elif overall_verdict.startswith(("Identical", "Partially identical")):
+        return "#856404", "#fff3cd", "#ffeeba"
+    elif overall_verdict.startswith("Insufficient"):
+        return "#383d41", "#e2e3e5", "#d6d8db"
+    return "#155724", "#d4edda", "#c3e6cb"
+
+
+def _identical_csv_section(rows, header_first_cell):
+    """Return the data rows of the CSV block whose header row starts with the
+    given cell, stopping at the next blank line."""
+    section = []
+    header_idx = None
+    for i, row in enumerate(rows):
+        if row and row[0] == header_first_cell:
+            header_idx = i
+            break
+    if header_idx is None:
+        return section
+    for row in rows[header_idx + 1:]:
+        if not row or not row[0].strip():
+            break
+        section.append(row)
+    return section
+
+
+def make_identical_channels_html(identical_channels_csv):
+    """
+    Generates an HTML section summarizing identical-channel (dual mono) detection.
+
+    Args:
+        identical_channels_csv (str): Path to the identical channels CSV file.
+
+    Returns:
+        str: HTML string with identical-channel results, or None if the file
+        cannot be read.
+    """
+    if not identical_channels_csv or not os.path.isfile(identical_channels_csv):
+        return None
+
+    try:
+        with open(identical_channels_csv, 'r') as f:
+            reader = csv.reader(f)
+            rows = list(reader)
+    except Exception as e:
+        logger.error(f"Error reading identical channels CSV: {e}")
+        return None
+
+    if len(rows) < 3:
+        return None
+
+    csv_data = {}
+    for row in rows:
+        if len(row) >= 2:
+            csv_data.setdefault(row[0], row[1])
+
+    total_frames = csv_data.get("Total Audio Frames", "N/A")
+    num_channels = csv_data.get("Number of Channels", "N/A")
+    overall_verdict = csv_data.get("Overall Verdict", "N/A")
+    overall_characterization = csv_data.get("Overall Characterization", "N/A")
+
+    pair_rows = [r for r in _identical_csv_section(rows, "Channel A") if len(r) >= 11]
+    # The regions table reuses "Channel A" as its first header cell, so the
+    # second such block (if any) is the matching-regions one.
+    region_rows = [r for r in _identical_csv_section(rows, "Matching Regions") if len(r) >= 5
+                   and r[0] != "Channel A"]
+
+    status_color, status_bg, status_border = _identical_status_colors(overall_verdict)
+    status_text = overall_verdict
+    if overall_characterization not in ("N/A", overall_verdict):
+        status_text += f" — {overall_characterization}"
+
+    html = f'''
+    <a id="link_identical_methodology" href="javascript:void(0);"
+       onclick="toggleContent('identical_methodology', 'What is identical channel detection? ▼', 'What is identical channel detection? ▲')"
+       style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+       What is identical channel detection? ▼</a>
+    <div id="identical_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px;
+         margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+        <p style="margin: 0 0 10px 0;">
+            <strong>Identical channel detection</strong> looks for the same audio duplicated across two
+            channels &mdash; a file that is stereo on paper but effectively mono. That is common when a
+            mono source was patched to both inputs of the capture station, and it matters for
+            preservation: the second channel carries no additional information.
+        </p>
+        <p style="margin: 0 0 10px 0;">
+            The check runs in two stages. First it screens every audio frame of the QCTools report,
+            comparing the channels' <code>astats</code> RMS levels and (for stereo) the
+            <code>aphasemeter</code> phase correlation &mdash; duplicated channels agree on both, frame
+            after frame. Matching levels alone are only circumstantial, so a pair that screens as a
+            match is then <strong>confirmed by decoding the two channels and comparing them sample by
+            sample</strong>. Both the difference (A&minus;B) and the sum (A+B) are measured, which is
+            what separates a straight duplicate from a polarity-inverted one.
+        </p>
+        <p style="margin: 0 0 10px 0; font-weight: bold;">Characterization:</p>
+        <ul style="margin: 4px 0 10px 20px; padding: 0;">
+            <li style="margin-bottom: 4px;"><strong>Bit-identical</strong> &mdash; the channels cancel exactly. The two channels are the same samples.</li>
+            <li style="margin-bottom: 4px;"><strong>Effectively identical</strong> &mdash; the residual sits more than 30 dB below program peak: the same audio twice, differing only by a hair of level or dither.</li>
+            <li style="margin-bottom: 4px;"><strong>Partially identical</strong> &mdash; the channels are duplicates over part of the runtime only (the matching regions are listed below). A mono segment inside an otherwise stereo program.</li>
+            <li style="margin-bottom: 4px;"><strong>Polarity-inverted duplicate</strong> &mdash; the same audio with one channel's polarity flipped. The channels cancel to silence in a mono fold-down, so this is worth correcting.</li>
+            <li style="margin-bottom: 4px;"><strong>Distinct channels</strong> &mdash; the channels carry different audio. Normal for a genuine stereo transfer.</li>
+        </ul>
+        <p style="margin: 0;">
+            Frames where every channel is silent are excluded from the comparison &mdash; silence matches
+            silence trivially. Region start and end positions are shown as the file's own timecode, so
+            they line up with an NLE; durations are elapsed seconds.
+        </p>
+    </div>
+    <div style="background-color: {status_bg}; padding: 15px; border: 1px solid {status_border}; margin: 10px 0; border-radius: 5px;">
+        <p style="margin: 0; color: {status_color};"><strong>{status_text}</strong></p>
+    </div>
+    <table style="border-collapse: collapse; margin: 10px 0;">
+        <tr><td style="padding: 4px 12px; border: 1px solid #ddd;"><strong>Total Audio Frames</strong></td><td style="padding: 4px 12px; border: 1px solid #ddd;">{total_frames}</td></tr>
+        <tr><td style="padding: 4px 12px; border: 1px solid #ddd;"><strong>Number of Channels</strong></td><td style="padding: 4px 12px; border: 1px solid #ddd;">{num_channels}</td></tr>
+    </table>
+    '''
+
+    if pair_rows:
+        html += '''
+        <table style="border-collapse: collapse; margin: 10px 0; font-size: 13px;">
+            <tr>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Channels</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Matching Frames</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Phase</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Difference Peak</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Program Peak</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Compared</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Result</th>
+            </tr>
+        '''
+        for row in pair_rows:
+            channels = f"{row[0]} / {row[1]}"
+            matching = f"{row[3]} of {row[2]} ({row[4]}%)"
+            # A polarity-inverted pair cancels on the sum, so show that residual
+            # instead of the difference, which stays at program level.
+            residual = row[7] if "Polarity-inverted" in row[10] else row[6]
+            html += f'''<tr>
+                <td style="padding: 4px 10px; border: 1px solid #ddd;">{channels}</td>
+                <td style="padding: 4px 10px; border: 1px solid #ddd;">{matching}</td>
+                <td style="padding: 4px 10px; border: 1px solid #ddd;">{row[5]}</td>
+                <td style="padding: 4px 10px; border: 1px solid #ddd;">{residual}</td>
+                <td style="padding: 4px 10px; border: 1px solid #ddd;">{row[8]}</td>
+                <td style="padding: 4px 10px; border: 1px solid #ddd;">{row[9]}</td>
+                <td style="padding: 4px 10px; border: 1px solid #ddd;">{row[10]}</td>
+            </tr>\n'''
+        html += '</table>\n'
+
+    if region_rows:
+        html += '''
+        <h4 style="margin-top: 16px;">Matching Regions</h4>
+        <table style="border-collapse: collapse; margin: 10px 0; font-size: 13px;">
+            <tr>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Channels</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Start</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">End</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Duration (s)</th>
+            </tr>
+        '''
+        for row in region_rows:
+            html += f'''<tr>
+                <td style="padding: 4px 10px; border: 1px solid #ddd;">{row[0]} / {row[1]}</td>
+                <td style="padding: 4px 10px; border: 1px solid #ddd;">{row[2]}</td>
+                <td style="padding: 4px 10px; border: 1px solid #ddd;">{row[3]}</td>
+                <td style="padding: 4px 10px; border: 1px solid #ddd;">{row[4]}</td>
+            </tr>\n'''
+        html += '</table>\n'
+
+    return html
 
 
 def make_audible_timecode_html(audible_timecode_csv):
@@ -6041,7 +6218,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     if signals:
         signals.report_progress.emit(0)
 
-    qctools_colorbars_duration_output, qctools_bars_eval_check_output, colorbars_values_output, windowed_colorbars_values, qctools_content_check_outputs, qctools_profile_check_output, profile_fails_csv, tags_check_output, tag_fails_csv, colorbars_eval_fails_csv, audio_clipping_csv, channel_imbalance_csv, audible_timecode_csv, audio_dropout_csv, clamped_levels_csv, clamped_traces_csv, chroma_phase_summary_csv, chroma_phase_events_csv, tone_leak_summary_csv, tone_leak_events_csv, difference_csv = find_report_csvs(report_directory)
+    qctools_colorbars_duration_output, qctools_bars_eval_check_output, colorbars_values_output, windowed_colorbars_values, qctools_content_check_outputs, qctools_profile_check_output, profile_fails_csv, tags_check_output, tag_fails_csv, colorbars_eval_fails_csv, audio_clipping_csv, channel_imbalance_csv, identical_channels_csv, audible_timecode_csv, audio_dropout_csv, clamped_levels_csv, clamped_traces_csv, chroma_phase_summary_csv, chroma_phase_events_csv, tone_leak_summary_csv, tone_leak_events_csv, difference_csv = find_report_csvs(report_directory)
 
     # CLAMS bars-detection durations CSV (filename matches the writer in
     # checks/bars_detection_clams.py); present only when the parallel detector ran.
@@ -6347,6 +6524,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
 
     audio_clipping_html = make_audio_clipping_html(audio_clipping_csv) if audio_clipping_csv else None
     channel_imbalance_html = make_channel_imbalance_html(channel_imbalance_csv) if channel_imbalance_csv else None
+    identical_channels_html = make_identical_channels_html(identical_channels_csv) if identical_channels_csv else None
     audible_timecode_html = make_audible_timecode_html(audible_timecode_csv) if audible_timecode_csv else None
     audio_dropout_html = make_audio_dropout_html(audio_dropout_csv) if audio_dropout_csv else None
     clamped_levels_html = make_clamped_levels_html(clamped_levels_csv, clamped_traces_csv) if clamped_levels_csv else None
@@ -6363,6 +6541,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         not colorbars_eval_fails_csv and
         not audio_clipping_csv and
         not channel_imbalance_csv and
+        not identical_channels_csv and
         not audible_timecode_csv and
         not audio_dropout_csv and
         not clamped_levels_csv and
@@ -6458,6 +6637,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     # render order below, so sections are listed the way they appear.
     _has_audio_results = bool(
         audio_clipping_html or channel_imbalance_html
+        or identical_channels_html
         or audible_timecode_html or audio_dropout_html
         or tone_leak_html
     )
@@ -6915,6 +7095,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
 
     has_audio_results = bool(
         audio_clipping_html or channel_imbalance_html
+        or identical_channels_html
         or audible_timecode_html or audio_dropout_html
         or tone_leak_html
     )
@@ -6927,8 +7108,9 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         )
         html_template += waveform_divider
 
-        # Clipping + Channel Imbalance side-by-side
-        if audio_clipping_html or channel_imbalance_html:
+        # Clipping + Channel Imbalance + Identical Channels — the per-channel
+        # comparisons, wrapping two-up
+        if audio_clipping_html or channel_imbalance_html or identical_channels_html:
             html_template += (
                 '<div style="display: flex; flex-wrap: wrap; gap: 24px; '
                 'align-items: flex-start; margin: 16px 0;">'
@@ -6945,6 +7127,13 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
                 <div style="flex: 1 1 420px; min-width: 0;">
                     <h3>Channel Imbalance Analysis</h3>
                     {channel_imbalance_html}
+                </div>
+                """
+            if identical_channels_html:
+                html_template += f"""
+                <div id="section-identical-channels" style="flex: 1 1 420px; min-width: 0;">
+                    <h3>Identical Channels</h3>
+                    {identical_channels_html}
                 </div>
                 """
             html_template += '</div>'
