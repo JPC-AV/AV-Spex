@@ -565,7 +565,7 @@ av-spex [path/to/directory]
 
 ### Options
 
-`av-spex --help` prints the full reference grouped by category (Config profiles, Config import/export, Tool toggles, qct-parse / CLAMS, Frame analysis, Output settings, Fixity).
+`av-spex --help` prints the full reference grouped by category (Config profiles, Config import/export, Tool toggles, qct-parse / CLAMS, Frame analysis, Input settings, Output settings, Fixity).
 
 **Processing profiles:**
 - `--profile {step1,step2,off}` — Apply a predefined processing profile (see the Checks Tab section above for details on each profile)
@@ -588,11 +588,28 @@ av-spex [path/to/directory]
 - `--enable-chroma-phase-detection {on,off}` — Toggle chroma phase error detection. Auto-enables qct-parse if needed.
 - `--enable-tone-leak-detection {on,off}` — Toggle 1 kHz reference-tone leak detection. Auto-enables qct-parse if needed.
 - `--enable-clams-detection {on,off}` — Toggle CLAMS SSIM bars + cross-correlation tone detector
+- `--evaluate-bars-reference {detected,smpte}` — What Evaluate Color Bars grades against: this file's own detected bars (default) or standard SMPTE values. Only takes effect when Evaluate Color Bars is on.
+
+**Frame analysis:**
+- `--enable-bitplane-check {on,off}` — Toggle the 9th/10th bit verification
+- `--enable-border-detection {on,off}` — Toggle active picture area detection
+- `--enable-brng-analysis {on,off}` — Toggle differential BRNG analysis
+- `--enable-signalstats {on,off}` — Toggle signalstats analysis (requires border detection)
+- `--enable-dropped-sample-detection {on,off}` — Toggle dropped audio sample detection
+- `--enable-duplicate-frame-detection {on,off}` — Toggle duplicate/frozen frame detection
+- `--frame-borders {simple,sophisticated}` — Border detection mode
+- `--frame-border-pixels N` — Pixels cropped from each edge in simple border mode (default: 25)
+- `--frame-brng-duration SECONDS` — Maximum duration analyzed by BRNG analysis (default: 300)
+- `--frame-no-colorbar-skip` — Analyze the detected color bars instead of skipping them
+
+**Input settings:**
+- `--video-file-extension {mkv,mov,mp4,avi,mxf}` — Which container to look for in the input directory (default: `mkv`). A non-MKV selection automatically turns off embedded stream fixity and the mediatrace custom-tag check, and skips the ffprobe signal flow (`ENCODER_SETTINGS`) check, since those only work on Matroska.
 
 **Output settings:**
 - `--access-trim-color-bars {on,off}` — Skip head color bars in the access file
 - `--access-crop-borders {on,off}` — Crop the access file to the active picture area (requires `--access-crop-to-480 on`)
 - `--access-crop-to-480 {on,off}` — Trim NTSC sources to 720x480; off keeps native 720x486
+- `--access-exclude-flagged-audio {on,off}` — Exclude a channel flagged as silent or carrying audible timecode from the access file, outputting the good channel as dual mono (default: off; requires `--enable-audio-analysis on`)
 - `--qctools-ext {qctools.xml.gz,qctools.mkv}` — QCTools output extension
 
 **Fixity:**
@@ -604,11 +621,15 @@ av-spex [path/to/directory]
 - `--export-config {all,spex,checks}` — Export current config(s) to JSON
 - `--export-file FILENAME` — Specify output filename for `--export-config`
 - `--import-config FILE` — Import config from a previously exported JSON file
+- `--export-mediaconch-policy [DEST]` — Export the current MediaConch policy XML so it can be shared. Takes an optional destination file or directory; with no argument it writes to the current directory.
 - `--use-default-config` — Reset all configs to defaults
 
 **Other:**
+- `-d / --directory` — Indicate that the input paths are directories
+- `-f / --file` — Indicate that the input paths are video files
 - `-dr / --dryrun` — Apply config changes without processing any video files
 - `--gui` — Force launch in GUI mode
+- `--version` — Print the AV Spex version and exit
 
 ---
 
