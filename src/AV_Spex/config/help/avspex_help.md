@@ -449,7 +449,7 @@ Both settings are configured on the Complex tab; they are not exposed as CLI fla
 
 ### Audio Analysis
 
-Enables four audio detections that read the QCTools report (via qct-parse): **clipping**, **channel imbalance**, **audible timecode**, and **audio dropout** — each described below. Results are written to CSVs in `_report_csvs/`, the per-file log, and the HTML report.
+Enables five audio detections that read the QCTools report (via qct-parse): **clipping**, **channel imbalance**, **identical channels**, **audible timecode**, and **audio dropout** — each described below. Results are written to CSVs in `_report_csvs/`, the per-file log, and the HTML report.
 
 For inputs with more than one audio stream (e.g. discrete mono tracks), the QCTools report only carries a downmix, so AV Spex generates a per-stream audio stats sidecar (`{video_id}.audio_stats.xml.gz` in `_qc_metadata/`) and analyzes that instead, so every stream is covered.
 
@@ -482,6 +482,31 @@ Characterization:
 It is not uncommon for one channel to be somewhat louder than the other on analog source material. This analysis is informational — it characterizes the file rather than flagging an error.
 
 ![A channel imbalance result from the HTML report — a significant imbalance with a silent channel](channel_imbalance_example.png)
+
+### Identical Channels (Dual Mono)
+
+Detects audio channels that carry the same content — a file that is stereo in form but mono in substance. This is common on analog transfers where a mono source was patched to both inputs, or where one channel was duplicated during the transfer. Knowing a file is dual mono matters when deciding whether both channels need to be preserved and when excluding channels from the access copy. The detection runs as part of Audio Analysis; there is no separate toggle.
+
+Detection is two-stage, because matching levels alone are only circumstantial evidence:
+
+**1. Screening** — Every pair of channels is compared on measurements already present in the QCTools report: the per-channel RMS level from `astats` and, for stereo files, the inter-channel phase correlation from `aphasemeter`. A frame counts as matching when the two channels' levels agree within 0.1 dB and the phase correlation is essentially ±1. Frames where the loudest channel is at or below the silence floor are skipped — silence matches silence trivially — and matching runs shorter than 5 seconds are not reported as regions. If 99% or more of the frames with audio match, the pair is a whole-file candidate; between 10% and 99%, it is a partial candidate and the longest matching run is carried forward.
+
+**2. Confirmation** — Candidate pairs are decoded through FFmpeg and compared sample by sample, measuring both the **difference** (A−B) and the **sum** (A+B) of the two channels. The sum is what separates a straight duplicate from a polarity-inverted one, which the QCTools measurements cannot tell apart. Whole-file candidates are compared across the entire file; partial candidates only over their longest matching region. Confirmation is authoritative — if the samples show the channels genuinely differ, the result is *Distinct channels* despite the matching levels. On files with many channels, at most three pairs are confirmed this way so the check can't turn into a pile of decodes.
+
+Results:
+
+- **Bit-identical** — the difference between the channels is digital silence; the two channels are the same samples
+- **Effectively identical** — the difference sits at least 30 dB below the program's own peak: the same audio twice, with only rounding or a hair of level offset between the copies
+- **Polarity-inverted duplicate** — the same audio with the polarity of one channel flipped, so the two sum to silence rather than cancelling in the difference
+- **Partially identical** — the channels duplicate each other over part of the file only; the matching regions are listed with start and end positions in the file's own timecode
+- **Distinct channels** — genuinely different content on each channel
+- **Insufficient audio** — too few frames with audio above the silence floor to say either way
+
+![The identical channels section of the HTML report](identical_channels_example.png)
+
+*The Identical Channels section of the HTML report, here for a file with genuine stereo content: none of the 40,753 frames with audio showed matching levels, so the pair never reached the confirmation stage — hence the "Not compared" region and the N/A measurement columns. A dual mono file would instead report a verdict of "Identical channels (dual mono)", with a difference peak at or near digital silence.*
+
+Full results, including the per-pair measurements and any matching regions, are written to `qct-parse_identical_channels.csv`.
 
 ### Audible Timecode (LTC)
 
