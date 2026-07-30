@@ -14,7 +14,7 @@ Coverage:
 * parse_timestamp — valid + malformed → placeholder tuple
 * parse_profile — prefix mapping + default
 * find_qct_thumbs — filename parsing into sorted dict
-* find_report_csvs — directory scanning into the 15-tuple
+* find_report_csvs — directory scanning into the 22-tuple
 * read_xml_file — UTF-8 + latin-1 fallback + missing-file
 * _get_video_duration / _get_audio_channel_count — ffprobe wrappers
 * _build_waveform_filter — mono / stereo / multi-channel filter graph
@@ -530,12 +530,12 @@ def test_find_qct_thumbs_sorts_by_timestamp_when_tag_names_unknown(tmp_path):
 
 def test_find_report_csvs_empty_directory_returns_all_none(tmp_path):
     out = gr.find_report_csvs(str(tmp_path))
-    # 21-tuple: all None except 2 list fields (content_check_outputs, windowed_colorbars_values)
+    # 22-tuple: all None except 2 list fields (content_check_outputs, windowed_colorbars_values)
     assert isinstance(out, tuple)
-    assert len(out) == 21
+    assert len(out) == 22
     none_count = sum(1 for x in out if x is None)
     list_count = sum(1 for x in out if x == [])
-    assert none_count == 19
+    assert none_count == 20
     assert list_count == 2
 
 
@@ -551,6 +551,7 @@ def test_find_report_csvs_picks_up_known_filenames(tmp_path):
         "qct-parse_tags_failures.csv":          "tag_fails_csv",
         "qct-parse_audio_clipping.csv":         "audio_clipping_csv",
         "qct-parse_channel_imbalance.csv":      "channel_imbalance_csv",
+        "qct-parse_identical_channels.csv":     "identical_channels_csv",
         "qct-parse_audible_timecode.csv":       "audible_timecode_csv",
         "qct-parse_audio_dropout.csv":          "audio_dropout_csv",
         "qct-parse_clamped_levels.csv":         "clamped_levels_csv",
@@ -565,12 +566,13 @@ def test_find_report_csvs_picks_up_known_filenames(tmp_path):
         (tmp_path / name).write_text("")
 
     out = gr.find_report_csvs(str(tmp_path))
-    # Unpack the 21-tuple in the order the function returns it
+    # Unpack the 22-tuple in the order the function returns it
     (
         colorbars_duration_output, bars_eval_check_output, colorbars_values_output,
         windowed_colorbars_values, content_check_outputs, profile_check_output,
         profile_fails_csv, tags_check_output, tag_fails_csv, colorbars_eval_fails_csv,
-        audio_clipping_csv, channel_imbalance_csv, audible_timecode_csv,
+        audio_clipping_csv, channel_imbalance_csv, identical_channels_csv,
+        audible_timecode_csv,
         audio_dropout_csv, clamped_levels_csv, clamped_traces_csv,
         chroma_phase_summary_csv, chroma_phase_events_csv,
         tone_leak_summary_csv, tone_leak_events_csv, difference_csv,
@@ -584,6 +586,7 @@ def test_find_report_csvs_picks_up_known_filenames(tmp_path):
     assert tag_fails_csv.endswith("qct-parse_tags_failures.csv")
     assert audio_clipping_csv.endswith("qct-parse_audio_clipping.csv")
     assert channel_imbalance_csv.endswith("qct-parse_channel_imbalance.csv")
+    assert identical_channels_csv.endswith("qct-parse_identical_channels.csv")
     assert audible_timecode_csv.endswith("qct-parse_audible_timecode.csv")
     assert audio_dropout_csv.endswith("qct-parse_audio_dropout.csv")
     assert clamped_levels_csv.endswith("qct-parse_clamped_levels.csv")
@@ -757,6 +760,75 @@ def test_imbalance_status_colors_default_red_for_unknown():
         text, bg, border = gr._imbalance_status_colors(c)
         assert text == "#721c24"
         assert bg == "#f8d7da"
+
+
+# ===========================================================================
+# Section 9b — identical channels section
+# ===========================================================================
+
+def _identical_csv_rows(verdict, characterization, pair_row, regions=()):
+    rows = [
+        ["Identical Channel Detection Results"],
+        ["Total Audio Frames", "5394"],
+        ["Number of Channels", "2"],
+        ["Overall Verdict", verdict],
+        ["Overall Characterization", characterization],
+        [],
+        ["Channel Pair Comparisons"],
+        ["Channel A", "Channel B", "Active Frames", "Matching Frames", "Matching (%)",
+         "Mean Phase Correlation", "Difference Peak (dBFS)", "Sum Peak (dBFS)",
+         "Program Peak (dBFS)", "Compared Region", "Characterization"],
+        pair_row,
+    ]
+    if regions:
+        rows += [[], ["Matching Regions"],
+                 ["Channel A", "Channel B", "Start", "End", "Duration (s)"]]
+        rows += list(regions)
+    return rows
+
+
+def test_identical_status_colors_by_verdict():
+    assert gr._identical_status_colors("Distinct channels")[1] == "#d4edda"          # green
+    assert gr._identical_status_colors("Identical channels (dual mono)")[1] == "#fff3cd"  # yellow
+    assert gr._identical_status_colors("Partially identical channels")[1] == "#fff3cd"
+    assert gr._identical_status_colors("Polarity-inverted duplicate channels")[1] == "#f8d7da"  # red
+    assert gr._identical_status_colors("Insufficient audio to compare")[1] == "#e2e3e5"
+
+
+def test_make_identical_channels_html_renders_pair_and_regions(tmp_path):
+    csv_path = tmp_path / "qct-parse_identical_channels.csv"
+    _write_csv(csv_path, _identical_csv_rows(
+        "Identical channels (dual mono)", "Bit-identical",
+        ["Channel 1", "Channel 2", "5390", "5390", "100.00", "1.000",
+         "-inf", "-12.0", "-18.1", "Whole file", "Bit-identical"],
+        regions=[["Channel 1", "Channel 2", "00:00:00:00", "00:29:58:11", "1798.4"]],
+    ))
+    html = gr.make_identical_channels_html(str(csv_path))
+    assert "Identical channels (dual mono) — Bit-identical" in html
+    assert "Channel 1 / Channel 2" in html
+    assert "5390 of 5390 (100.00%)" in html
+    assert "Matching Regions" in html
+    assert "00:29:58:11" in html
+
+
+def test_make_identical_channels_html_shows_sum_residual_when_inverted(tmp_path):
+    """An inverted duplicate cancels on the sum, so that's the residual shown."""
+    csv_path = tmp_path / "qct-parse_identical_channels.csv"
+    _write_csv(csv_path, _identical_csv_rows(
+        "Polarity-inverted duplicate channels", "Polarity-inverted duplicate (bit-identical)",
+        ["Channel 1", "Channel 2", "5390", "5390", "100.00", "-1.000",
+         "-12.0", "-inf", "-18.1", "Whole file", "Polarity-inverted duplicate (bit-identical)"],
+    ))
+    html = gr.make_identical_channels_html(str(csv_path))
+    # the -inf sum residual is displayed, not the program-level difference peak
+    difference_cells = [line for line in html.splitlines() if "-inf" in line]
+    assert difference_cells
+    assert "Matching Regions" not in html
+
+
+def test_make_identical_channels_html_missing_file_returns_none(tmp_path):
+    assert gr.make_identical_channels_html(str(tmp_path / "nope.csv")) is None
+    assert gr.make_identical_channels_html(None) is None
 
 
 # ===========================================================================

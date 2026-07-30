@@ -215,7 +215,7 @@ The scripts will confirm that the digital files conform to predetermined specifi
     # qct-parse / CLAMS feature toggles
     qct_group = parser.add_argument_group("qct-parse / CLAMS")
     qct_group.add_argument('--enable-audio-analysis', choices=['on', 'off'],
-                           help='Enable/disable qct-parse audio analysis (clipping, channel imbalance, audible timecode, audio dropout). Auto-enables qct_parse.run_tool.')
+                           help='Enable/disable qct-parse audio analysis (clipping, channel imbalance, identical channels, audible timecode, audio dropout). Auto-enables qct_parse.run_tool.')
     qct_group.add_argument('--enable-clamped-levels', choices=['on', 'off'],
                            help='Enable/disable clamped video levels detection in qct-parse. Auto-enables qct_parse.run_tool.')
     qct_group.add_argument('--enable-clams-detection', choices=['on', 'off'],
