@@ -425,7 +425,23 @@ CLI: `av-spex --enable-brng-analysis {on,off}`, `--frame-brng-duration 300`, `--
 
 ### Analysis Periods
 
-The number and length of the time windows sampled across the video, shared by Signalstats Analysis and BRNG Analysis (default: 3 periods of 60 seconds each). Because the differential BRNG detector decodes and compares video frames with computer-vision analysis on every sample, this targeted sampling keeps processing time manageable while concentrating analysis on the frames most likely to contain violations.
+The number and length of the time windows sampled across the video, shared by Signalstats Analysis and BRNG Analysis (default: 3 periods of 60 seconds each). Because the differential BRNG detector decodes and compares video frames with computer-vision analysis on every sample, neither check examines the whole tape — this targeted sampling keeps processing time manageable while concentrating analysis on the frames most likely to contain violations. Period count multiplied by period duration is effectively the runtime dial for frame analysis: every period costs two full decodes of its length.
+
+Because only a few minutes of a tape are actually examined, *where* those periods land determines whether the report describes the tape's real problems or an arbitrary slice of it. The guiding principle is that periods should land where the QCTools report says the out-of-range pixels actually are, and never on content that can't be meaningfully analyzed.
+
+**How periods are placed**: The QCTools report is scanned once and every frame with out-of-range pixels (BRNG above a small threshold) is tallied into 10-second bins. Bins are ranked by how severe their violations are — total severity rather than a simple frame count, because on a noisy tape nearly every frame in many bins violates and counts all tie at the top. Periods are then placed on the densest bins first, centered on the bin. A first pass requires each new period to sit at least two period-lengths away from the ones already chosen, so the periods cover distinct problem areas instead of stacking on a single burst; if that leaves too few periods — a tape whose problems really are all in one place — the spacing requirement relaxes to simple non-overlap.
+
+**What is excluded**: Detected head color bars plus a 10-second margin, mid-file color bars, detected all-black segments, and the last 30 seconds of the file (end-of-tape static). Black is excluded because analog tape black carries sub-black noise that would otherwise dominate every violation list, and bars are excluded because standard SMPTE bars themselves measure marginally outside broadcast range — left in, a test pattern reads as a dense violation cluster and attracts every period.
+
+**Repairs**: A period that ends up overlapping bars or black by more than a quarter of its length is shifted outward in 5-second steps, alternating forward and backward, until it finds a position that overlaps by 10% or less and stays clear of the other periods. If no such position exists, the period is shrunk to fit the largest clean gap in the content (down to a 10-second minimum) — this is what happens on short tapes whose entire non-black content is shorter than one configured period. A period that can't be repaired either way is dropped.
+
+**When there are no violations to aim at**: On a clean tape the placement falls back to periods centered on frames that border detection found visually clean, and failing that to periods spread evenly across the content. If violation clustering or the repair pass left fewer periods than requested, the count is topped up with evenly spaced periods that avoid the existing ones, so the report always samples the requested number of places.
+
+**Refinement**: Signalstats runs on the selected periods first, and its findings can revise the periods before BRNG analysis runs. A period whose active picture area turns out to hold essentially no out-of-range signal — nothing for the differential detector to find — is swapped for the next-best unused candidate. Each period's diagnosis also sets how densely BRNG analysis samples it: periods with real content violations are sampled heavily, near-clean periods lightly.
+
+**Where the periods appear**: In `{video_id}_enhanced_frame_analysis.json` (alongside the detected black segments) and as the shaded tan bands on the color bars evaluation timeline in the HTML report. The timeline's dashed BRNG trace is the same measure that drives period placement, so the trace's peaks and the shaded bands should visibly coincide.
+
+Both settings are configured on the Complex tab; they are not exposed as CLI flags — to change them outside the GUI, edit the saved config file.
 
 ---
 
