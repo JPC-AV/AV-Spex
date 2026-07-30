@@ -1644,19 +1644,31 @@ def make_identical_channels_html(identical_channels_csv):
             mono source was patched to both inputs of the capture station, and it matters for
             preservation: the second channel carries no additional information.
         </p>
+        <p style="margin: 0 0 10px 0;">The check runs in two stages.</p>
         <p style="margin: 0 0 10px 0;">
-            The check runs in two stages. First it screens every audio frame of the QCTools report,
-            comparing the channels' <code>astats</code> RMS levels and (for stereo) the
-            <code>aphasemeter</code> phase correlation &mdash; duplicated channels agree on both, frame
-            after frame. Matching levels alone are only circumstantial, so a pair that screens as a
-            match is then <strong>confirmed by decoding the two channels and comparing them sample by
-            sample</strong>. Both the difference (A&minus;B) and the sum (A+B) are measured, which is
-            what separates a straight duplicate from a polarity-inverted one.
+            <strong>1. Screening.</strong> Every audio frame in the QCTools report is examined, comparing
+            the channels' <code>astats</code> RMS levels &mdash; duplicated channels sit at the same
+            level, frame after frame. On <strong>2-channel files</strong> this is backed up by the
+            <code>aphasemeter</code> phase correlation, a per-frame measure of how closely the two
+            channels track each other: <strong>+1</strong> means they move identically, <strong>0</strong>
+            that they are unrelated, <strong>&minus;1</strong> that one channel's polarity is flipped.
+            Readings at either +1 or &minus;1 mean "the same audio twice", so both nominate the pair for
+            the second stage. A file with more than two channels carries only one phase value covering
+            all of its channel pairs, so it can't be attributed to any single pair; those files are
+            screened on level alone.
+        </p>
+        <p style="margin: 0 0 10px 0;">
+            <strong>2. Confirmation.</strong> Matching levels on their own are only circumstantial, so a
+            nominated pair is confirmed by <strong>decoding the two channels and comparing them sample by
+            sample</strong>. Both the difference (A&minus;B) and the sum (A+B) are measured: a straight
+            duplicate cancels on the difference, a polarity-inverted one cancels on the sum. The sample
+            comparison is the authority &mdash; where it disagrees with the screening, the channels are
+            reported as distinct.
         </p>
         <p style="margin: 0 0 10px 0; font-weight: bold;">Characterization:</p>
         <ul style="margin: 4px 0 10px 20px; padding: 0;">
-            <li style="margin-bottom: 4px;"><strong>Bit-identical</strong> &mdash; the channels cancel exactly. The two channels are the same samples.</li>
-            <li style="margin-bottom: 4px;"><strong>Effectively identical</strong> &mdash; the residual sits more than 30 dB below program peak: the same audio twice, differing only by a hair of level or dither.</li>
+            <li style="margin-bottom: 4px;"><strong>Bit-identical</strong> &mdash; subtracting one channel from the other leaves exactly nothing. The two channels are the same samples.</li>
+            <li style="margin-bottom: 4px;"><strong>Effectively identical</strong> &mdash; what's left after subtracting the channels sits more than 30 dB below the program's own peak: the same audio twice, differing only by a hair of level or dither.</li>
             <li style="margin-bottom: 4px;"><strong>Partially identical</strong> &mdash; the channels are duplicates over part of the runtime only (the matching regions are listed below). A mono segment inside an otherwise stereo program.</li>
             <li style="margin-bottom: 4px;"><strong>Polarity-inverted duplicate</strong> &mdash; the same audio with one channel's polarity flipped. The channels cancel to silence in a mono fold-down, so this is worth correcting.</li>
             <li style="margin-bottom: 4px;"><strong>Distinct channels</strong> &mdash; the channels carry different audio. Normal for a genuine stereo transfer.</li>
