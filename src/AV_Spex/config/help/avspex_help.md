@@ -691,6 +691,54 @@ av-spex --import-config my_config.json
 
 Configs can also be imported, exported, and reset from the Import tab in the GUI.
 
+**Example: editing a setting that isn't in the GUI or CLI.** Some tuning parameters are deliberately JSON-only — the sophisticated border detection parameters, the CLAMS bars and tone numerics, and the duplicate frame detector's minimum run length. The export/import round trip is the safest way to change one: export the current settings, edit the file, and import it back.
+
+Suppose duplicate frame detection is reporting too many short freezes and you want it to flag only runs of five or more identical frames. First export the Checks config:
+
+```bash
+av-spex --export-config checks --export-file my_checks.json
+```
+
+The exported file wraps everything in a top-level key naming the config, so `my_checks.json` looks like this (abridged):
+
+```json
+{
+  "checks": {
+    "outputs": {
+      "access_file": false,
+      "report": true,
+      "qctools_ext": "qctools.xml.gz",
+      "frame_analysis": {
+        "enable_duplicate_frame_detection": true,
+        "duplicate_min_run_length": 2
+      }
+    },
+    "fixity": { "...": "..." },
+    "tools": { "...": "..." }
+  }
+}
+```
+
+Change `duplicate_min_run_length` from `2` to `4` — the value is the number of consecutive low-difference frames, so a run of 4 means a freeze of 5 identical frames — save the file, and import it:
+
+```bash
+av-spex --import-config my_checks.json
+```
+
+Confirm the change took effect, then process as usual:
+
+```bash
+av-spex -pp checks,outputs
+av-spex /path/to/video_files
+```
+
+A few things to keep in mind when editing a config by hand:
+
+- **Edit an exported file rather than writing one from scratch.** Importing replaces the whole section it contains, so starting from a full export keeps every field you didn't mean to change.
+- **Booleans are `true` and `false`**, not `"yes"` and `"no"` — older configs using the string form are converted automatically on load, but new edits should use real JSON booleans.
+- **The top-level key has to match the config type** (`checks` or `spex`); a file exported with `--export-config all` contains both.
+- **An import is applied immediately and persists**, exactly as if you had made the change in the GUI. Use `--use-default-config` to get back to the shipped defaults if an edit goes wrong.
+
 ---
 
 ## Outputs
