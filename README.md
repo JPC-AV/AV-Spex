@@ -233,6 +233,7 @@ When **Audio Analysis** is enabled (Audio Checks section of the Complex tab), AV
 
 - **Clipping** — samples at or near 0 dBFS that indicate the signal exceeded the digital ceiling
 - **Channel imbalance** — significant level differences between left and right channels
+- **Identical channels** — channels carrying the same content (dual mono), screened on level and phase agreement and confirmed by a sample-level comparison
 - **Audible timecode** — timecode signal bleed into the audio track
 - **Audio dropout** — extended silent or near-silent gaps that may indicate a tape or capture problem
 
@@ -340,7 +341,7 @@ av-spex [path/to/directory]
 
 ### Options
 
-`av-spex --help` prints the full reference grouped by category (Config profiles, Config import/export, Tool toggles, qct-parse / CLAMS, Frame analysis, Output settings, Fixity).
+`av-spex --help` prints the full reference grouped by category (Config profiles, Config import/export, Tool toggles, qct-parse / CLAMS, Frame analysis, Input settings, Output settings, Fixity).
 
 **Processing profiles:**
 - `--profile {step1,step2,off}` — Apply a predefined processing profile (see [Checks Tab](#checks-tab) for details on each profile)
@@ -358,14 +359,24 @@ av-spex [path/to/directory]
 - `--exiftool-from-file FILE` / `--mediainfo-from-file FILE` / `--ffprobe-from-file FILE` — Create a new expected-values profile from a tool's raw output file (saves and applies it)
 
 **qct-parse / CLAMS feature toggles:**
-- `--enable-audio-analysis {on,off}` — Toggle qct-parse audio analysis (clipping, channel imbalance, audible timecode, dropout). Auto-enables qct-parse if needed.
+- `--enable-audio-analysis {on,off}` — Toggle qct-parse audio analysis (clipping, channel imbalance, identical channels, audible timecode, dropout). Auto-enables qct-parse if needed.
 - `--enable-clamped-levels {on,off}` — Toggle broadcast-range level clamping detection. Auto-enables qct-parse if needed.
+- `--enable-chroma-phase-detection {on,off}` — Toggle chroma phase error detection (tape tracking artifacts where chroma collapses toward cyan/magenta). Auto-enables qct-parse if needed.
+- `--enable-tone-leak-detection {on,off}` — Toggle 1 kHz reference-tone leak detection. Auto-enables qct-parse if needed.
 - `--enable-clams-detection {on,off}` — Toggle CLAMS SSIM bars + cross-correlation tone detector
+- `--evaluate-bars-reference {detected,smpte}` — What Evaluate Color Bars grades against: this file's own detected bars (default) or standard SMPTE values. Only takes effect when `evaluateBars` is on.
+
+**Frame analysis:**
+- Six `--enable-*` sub-step toggles plus `--frame-borders`, `--frame-border-pixels`, `--frame-brng-duration`, and `--frame-no-colorbar-skip` — see [Frame Analysis CLI Flags](#frame-analysis-cli-flags) above
+
+**Input settings:**
+- `--video-file-extension {mkv,mov,mp4,avi,mxf}` — Which container to look for in the input directory (default: `mkv`). A non-MKV selection automatically turns off embedded stream fixity and the mediatrace custom-tag check, and skips the ffprobe signal flow (`ENCODER_SETTINGS`) check, since those only work on Matroska.
 
 **Output settings:**
 - `--access-trim-color-bars {on,off}` — Skip head color bars in the access file
 - `--access-crop-borders {on,off}` — Crop the access file to the active picture area (requires `--access-crop-to-480 on`)
 - `--access-crop-to-480 {on,off}` — Trim NTSC sources to 720x480; off keeps native 720x486
+- `--access-exclude-flagged-audio {on,off}` — Exclude a channel flagged as silent or carrying audible timecode from the access file, outputting the good channel as dual mono (default: off; requires `--enable-audio-analysis on`)
 - `--qctools-ext {qctools.xml.gz,qctools.mkv}` — QCTools output extension
 
 **Fixity:**
@@ -377,17 +388,21 @@ av-spex [path/to/directory]
 - `--export-config {all,spex,checks}` — Export current config(s) to JSON
 - `--export-file FILENAME` — Specify output filename for `--export-config`
 - `--import-config FILE` — Import config from a previously exported JSON file
+- `--export-mediaconch-policy [DEST]` — Export the current MediaConch policy XML so it can be shared. Takes an optional destination file or directory; with no argument it writes to the current directory.
 - `--use-default-config` — Reset all configs to defaults
 
 **Other:**
+- `-d / --directory` — Indicate that the input paths are directories
+- `-f / --file` — Indicate that the input paths are video files
 - `-dr / --dryrun` — Apply config changes without processing any video files
 - `--gui` — Force launch in GUI mode
+- `--version` — Print the AV Spex version and exit
 
 ---
 
 ## Configuration
 
-AV Spex's settings are stored in two primary JSON config files, editable through the GUI or CLI.
+AV Spex's settings are stored in two primary JSON config files, editable through the GUI or CLI: the Checks config and the Spex config. Custom profiles live in their own files alongside them — filename profiles, signal flow profiles, and any custom ExifTool, MediaInfo, or FFprobe expected-value profiles. All of them are saved in the user config directory, so settings persist across sessions and survive an application update.
 
 ### Checks Config
 
@@ -398,9 +413,10 @@ Controls which tools run and what outputs are generated.
 - `access_file_trim_color_bars` — Skip head color bars in the access file (requires qct-parse bars detection)
 - `access_file_crop_borders` — Crop the access file to the detected active picture area (requires `access_file_crop_to_480: true`)
 - `access_file_crop_to_480` — Trim NTSC to 720x480 (default `true`); set to `false` to keep native 720x486
+- `access_file_exclude_flagged_audio` — Leave flagged audio channels out of the access copy: a channel found silent or carrying audible timecode is dropped, and dual mono is built from the good channel (default `false`; requires audio analysis)
 - `report` — Generate an HTML summary report
 - `qctools_ext` — Output extension for QCTools files (`qctools.xml.gz` or `qctools.mkv`)
-- **Frame Analysis** settings: `enable_bitplane_check`, `enable_border_detection`, `enable_brng_analysis`, `enable_signalstats`, `enable_dropped_sample_detection`, `enable_duplicate_frame_detection`, `border_detection_mode` (simple/sophisticated), `simple_border_pixels` (default: 25), `brng_duration_limit` (default: 300 seconds), `analysis_period_duration` and `analysis_period_count` (signalstats sampling), plus sophisticated-border tuning fields
+- **Frame Analysis** settings: `enable_bitplane_check`, `enable_border_detection`, `enable_brng_analysis`, `enable_signalstats`, `enable_dropped_sample_detection`, `enable_duplicate_frame_detection`, `border_detection_mode` (simple/sophisticated), `simple_border_pixels` (default: 25), `brng_duration_limit` (default: 300 seconds), `brng_skip_color_bars`, `analysis_period_duration` and `analysis_period_count` (the periods shared by signalstats and BRNG analysis), `duplicate_min_run_length` (default: 2), plus sophisticated-border tuning fields and the border retry settings `auto_retry_borders` / `max_border_retries`
 
 **Fixity**
 - `output_fixity` — Write checksums to a fixity text file
@@ -412,11 +428,15 @@ Controls which tools run and what outputs are generated.
 - `stream_hash_algorithm` — Hash algorithm for embedded stream fixity (`md5` or `sha256`)
 
 **Tools** — Each tool has `run_tool` and/or `check_tool` toggles:
-- `exiftool`, `ffprobe`, `mediainfo`, `mediatrace`: `run_tool` and `check_tool`
+- `exiftool`, `ffprobe`, `mediainfo`, `mediatrace`, `mkvalidator`: `run_tool` and `check_tool` (mkvalidator only applies to MKV inputs and is skipped for other containers)
 - `mediaconch`: `run_mediaconch` and `mediaconch_policy` (path to XML policy file)
 - `qctools`: `run_tool`
-- `qct_parse`: `run_tool`, `barsDetection`, `evaluateBars`, `thumbExport`, `audio_analysis`, `detect_clamped_levels`
+- `qct_parse`: `run_tool`, `barsDetection`, `evaluateBars`, `evaluateBarsReference` (`detected` or `smpte`), `thumbExport`, `audio_analysis`, `detect_clamped_levels`, `detect_chroma_phase_errors`, `detect_tone_leak`
 - `clams_detection`: `run_tool` (numeric `bars` and `tone` sub-parameters are JSON-only)
+
+**Input settings**
+- `video_file_extension` — Which container AV Spex looks for in an input directory: `mkv` (default), `mov`, `mp4`, `avi`, or `mxf`. Embedded stream fixity and the custom Matroska tag checks only apply to MKV.
+- `validate_filename` — Check input filenames against the active filename profile
 
 ### Spex Config
 
@@ -425,7 +445,7 @@ Stores expected metadata values organized by tool. Multiple acceptable values ar
 "codec_name": ["flac", "pcm_s24le"]
 ```
 
-Sections include: `filename_values`, `mediainfo_values` (general, video, audio track values), `exiftool_values`, `ffmpeg_values` (video stream, audio stream, format values), `mediatrace_values` (custom MKV tags like `ENCODER_SETTINGS`), and `qct_parse_values` (color bar thresholds and content filter definitions).
+Sections include: `filename_values`, `mediainfo_values` (general, video, audio track values), `exiftool_values`, `ffmpeg_values` (video stream, audio stream, format values), `mediatrace_values` (custom MKV tags like `ENCODER_SETTINGS`), `qct_parse_values` (color bar thresholds and content filter definitions), and `signalflow_profiles` (the equipment signal chain profiles selectable from the Spex tab).
 
 ### Managing Configs
 
@@ -450,13 +470,13 @@ For each processed input directory `{video_id}/`:
 
 ### Logging
 
-A per-file log is written inside each `_qc_metadata` directory.
-`video_id}_qc_metadata/{video_id}_avspex_processing.log`
-These per-file logs are overwritten if a file is re-run. 
+A per-file log is written inside each `_qc_metadata` directory:
+`{video_id}_qc_metadata/{video_id}_avspex_processing.log`
+Re-running a file appends to its existing log rather than overwriting it, so the full processing history of the file is preserved in one place. Each new run is separated from the previous one by a `NEW PROCESSING RUN` banner, followed by the run's start timestamp.
 
 Each run also writes a timestamped application log:
 ```
-/.../Library/Logs/AVSpex/YYY-MM-DD/YYYY-MM-DD_HH-MM-SS_JPC_AV_log.log
+/.../Library/Logs/AVSpex/YYYY-MM-DD/YYYY-MM-DD_HH-MM-SS_JPC_AV_log.log
 ```
 
 ---
