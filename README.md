@@ -245,12 +245,32 @@ Audio analysis runs inside qct-parse, so `qct_parse.run_tool` must be on. Both t
 av-spex --enable-audio-analysis on
 ```
 
+### Tone Leak Detection
+
+The **Tone Leak Detection** option (Audio Checks section of the Complex tab) flags a continuous ~1 kHz calibration tone leaking from the transfer chain into the recorded audio, heard as a faint high-pitched whine or squeak during quiet passages. Because the leaked tone is distorted, it leaves a harmonic comb at exact multiples of 1 kHz that stands above the surrounding spectral floor even when the tone is well below program level. Audio is decoded directly from the video file rather than read from the QCTools report, and every stream and channel is analyzed independently.
+
+```bash
+av-spex --enable-tone-leak-detection on
+```
+
+Like audio analysis, this runs inside qct-parse and the CLI auto-enables `qct_parse.run_tool` if needed.
+
 ### Clamped Levels Detection
 
 The **Detect Clamped Levels** option (Video Signal Checks section of the Complex tab) detects broadcast-range level clamping introduced by some analog-to-digital converters, where signal that exceeded broadcast-legal range was hard-limited rather than preserved. It runs via qct-parse.
 
 ```bash
 av-spex --enable-clamped-levels on
+```
+
+Like audio analysis, this runs inside qct-parse and the CLI auto-enables `qct_parse.run_tool` if needed.
+
+### Chroma Phase Error Detection
+
+The **Detect Chroma Phase Errors** option (Video Signal Checks section of the Complex tab) flags frames where the chroma signal has collapsed toward a single hue — typically cyan or magenta — usually caused by helical-scan tracking failures on tape sources, and often accompanied by horizontal displacement and a brief picture "swerve" at onset. Frames are flagged when both U and V span nearly the full chroma range, or when maximum saturation exceeds a bit-depth-aware threshold; consecutive flagged frames are merged into events, isolated transients are suppressed, and detected color bars are skipped. Events are reported with a thumbnail and the median hue at the peak-saturation frame.
+
+```bash
+av-spex --enable-chroma-phase-detection on
 ```
 
 Like audio analysis, this runs inside qct-parse and the CLI auto-enables `qct_parse.run_tool` if needed.
