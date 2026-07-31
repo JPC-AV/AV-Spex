@@ -138,9 +138,10 @@ The **Reset to Default** button restores all settings to the application's built
 
 The Checks tab controls which tools and processing steps are run. It includes:
 
-- **Checks Profiles**: Apply a preset profile (Step 1, Step 2, or Off) that configures a predefined set of tool options.
-  - **Step 1**: Run and check ExifTool, FFprobe, MediaInfo, MediaTrace, and MediaConch; embed and output fixity
-  - **Step 2**: Run QCTools and qct-parse (bar detection, evaluate bars, thumbnail export); validate fixity; generate HTML report
+- **Checks Profiles**: Apply a preset profile that configures a predefined set of tool options.
+  - **Step 1**: Run and check ExifTool, FFprobe, MediaInfo, MediaTrace, mkvalidator, and MediaConch; embed and output fixity
+  - **Step 2**: Run QCTools and qct-parse (bar detection, evaluate bars, thumbnail export, audio analysis, clamped levels, chroma phase errors) plus CLAMS bars/tone detection and frame analysis (bitplane check, border detection, BRNG, signalstats); check fixity and validate stream fixity; generate the HTML report
+  - **Vendor**: Run the metadata tools and MediaConch without comparing them against Spex values, embed stream fixity, and generate the HTML report — for checking vendor-supplied files before the full QC pass
   - **Off**: Turn off all tools
 - **Checks Options**: Enable or disable individual tools and checks using checkboxes. Each tool has a **Run Tool** option (generates a sidecar file) and a **Check Tool** option (compares the sidecar output against expected Spex values).
 
@@ -568,7 +569,7 @@ av-spex [path/to/directory]
 `av-spex --help` prints the full reference grouped by category (Config profiles, Config import/export, Tool toggles, qct-parse / CLAMS, Frame analysis, Input settings, Output settings, Fixity).
 
 **Processing profiles:**
-- `--profile {step1,step2,off}` — Apply a predefined processing profile (see the Checks Tab section above for details on each profile)
+- `--profile {step1,step2,off,vendor}` — Apply a predefined processing profile (see the Checks Tab section above for details on each profile)
 
 **Tool toggles:**
 - `--on / --off` — Enable or disable individual tool options without affecting others. Format: `tool.run_tool` or `tool.check_tool` (e.g., `--on mediainfo.run_tool --on mediainfo.check_tool`)
