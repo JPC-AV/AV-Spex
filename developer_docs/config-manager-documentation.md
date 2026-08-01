@@ -203,7 +203,7 @@ class ClamsDetectionConfig:
     tone: ClamsToneParams = field(default_factory=ClamsToneParams)
 ```
 
-CLAMS detection runs the bars detector in parallel with qct-parse for side-by-side comparison; the tone detector identifies spans of monotonic audio. qct-parse remains authoritative for downstream BRNG-skip and access-file trim. Numeric tuning of `bars`/`tone` parameters is JSON-only — only `clams_detection.run_tool` is settable from the CLI.
+CLAMS detection runs before qct-parse; the tone detector identifies spans of monotonic audio, and detected bars/tone regions are passed to `run_qctparse()` to guide additional windowed bars scans. The head-bars end time used for downstream BRNG-skip and access-file trim is merged across both detectors ("longest/latest wins" — see `developer_docs/processing-internals.md`). Numeric tuning of `bars`/`tone` parameters is JSON-only — only `clams_detection.run_tool` is settable from the CLI.
 
 **FrameAnalysisConfig** — controls all per-frame analysis sub-steps under `outputs.frame_analysis`:
 
