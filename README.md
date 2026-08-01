@@ -509,9 +509,17 @@ Contributions that enhance script functionality are welcome. Please ensure compa
 
 ---
 
+## License
+
+AV Spex is free software, distributed under the terms of the [GNU General Public License v3.0](LICENSE). The full license text is in the `LICENSE` file at the root of this repository.
+
+Third-party code incorporated into AV Spex remains under its own license — see [Acknowledgements](#acknowledgements) below.
+
+---
+
 ## Acknowledgements
 
-AV Spex makes use of code from several open source projects. Attribution and copyright notices are included as comments inline where open source code is used.
+AV Spex makes use of code from several open source projects. Attribution and copyright notices are included as comments inline where open source code is used, and each project's license terms are reproduced below.
 
 [loglog](https://github.com/amiaopensource/loglog)
 ```
