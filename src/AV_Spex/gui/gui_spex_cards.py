@@ -11,8 +11,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from PyQt6.QtWidgets import (
-    QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QPushButton,
-    QSizePolicy
+    QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QPushButton
 )
 from PyQt6.QtCore import pyqtSignal
 
@@ -50,7 +49,8 @@ class ProfileCard(QGroupBox):
     def __init__(self, spec: DomainSpec, parent=None):
         super().__init__(spec.title, parent)
         self.spec = spec
-        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        # Vertical policy stays the default Preferred so the grid can stretch
+        # side-by-side cards to a shared row height.
 
         layout = QVBoxLayout(self)
         layout.setSpacing(6)
@@ -81,6 +81,10 @@ class ProfileCard(QGroupBox):
         self.summary_label.setWordWrap(True)
         self.summary_label.setStyleSheet("font-weight: bold;")
         layout.addWidget(self.summary_label)
+
+        # When the row partner is taller, absorb the extra height here so the
+        # content stays at the top and the buttons pin to the bottom edge.
+        layout.addStretch(1)
 
         # Button row
         button_row = QHBoxLayout()
