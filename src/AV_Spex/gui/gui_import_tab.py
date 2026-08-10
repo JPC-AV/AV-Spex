@@ -80,9 +80,6 @@ class ImportTab(ThemeableMixin):
 
                     # Ensure recent config ref
                     checks_config = config_mgr.get_config('checks', ChecksConfig)
-                    spex_config = config_mgr.get_config('spex', SpexConfig)
-                    signalflow_config = config_mgr.get_config('signalflow', SignalflowConfig)
-                    filename_config = config_mgr.get_config('filename', FilenameConfig)
 
                     # Checks Tab dropdowns 
                     # Refresh the checks profile dropdown (includes custom profiles)
@@ -105,75 +102,11 @@ class ImportTab(ThemeableMixin):
                         
                         self.main_window.checks_profile_dropdown.blockSignals(False)
 
-                    # Spex Tab dropdowns
-                    # Refresh filename profile dropdown
-                    if hasattr(self.spex_tab, 'filename_profile_dropdown'):
-                        # Block signals to prevent triggering change events
-                        self.spex_tab.filename_profile_dropdown.blockSignals(True)
+                    # Spex Tab — one call re-syncs every card (dropdowns,
+                    # active-profile state lines, and summaries)
+                    if hasattr(self.spex_tab, 'refresh'):
+                        self.spex_tab.refresh()
 
-                        self.spex_tab.filename_profile_dropdown.clear()
-
-                        # Add any custom filename profiles from the config
-                        if hasattr(filename_config, 'filename_profiles') and filename_config.filename_profiles:
-                            for profile_name in filename_config.filename_profiles.keys():
-                                self.spex_tab.filename_profile_dropdown.addItem(profile_name)
-                        
-                        # Get the current section1 value from the reset config
-                        section1_value = spex_config.filename_values.fn_sections.get("section1", {}).value
-                        
-                        # Set the dropdown based on the config value
-                        if section1_value == "JPC":
-                            self.spex_tab.filename_profile_dropdown.setCurrentText("JPC Filename Profile")
-                        elif section1_value == "2012":
-                            self.spex_tab.filename_profile_dropdown.setCurrentText("Bowser Filename Profile")
-                        else:
-                            self.spex_tab.filename_profile_dropdown.setCurrentText("Select a profile...")
-                        
-                        # Re-enable signals
-                        self.spex_tab.filename_profile_dropdown.blockSignals(False)
-                    
-                    # Signalflow profile dropdown
-                    # Refresh signalflow profile dropdown
-                    if hasattr(self.main_window, 'signalflow_profile_dropdown'):
-                        # Block signals to prevent triggering change events
-                        self.main_window.signalflow_profile_dropdown.blockSignals(True)
-
-                        self.main_window.signalflow_profile_dropdown.clear()
-
-                        # Try to load profiles from the dedicated signalflow config
-                        try:
-                            if hasattr(signalflow_config, 'signalflow_profiles') and signalflow_config.signalflow_profiles:
-                                for profile_name in signalflow_config.signalflow_profiles.keys():
-                                    self.main_window.signalflow_profile_dropdown.addItem(profile_name)
-                        except Exception as e:
-                            logger.warning(f"Could not load signalflow config: {e}")
-                        
-                        # Get encoder settings
-                        encoder_settings = spex_config.mediatrace_values.ENCODER_SETTINGS
-                        source_vtr = []
-                        
-                        if isinstance(encoder_settings, dict):
-                            source_vtr = encoder_settings.get('Source_VTR', [])
-                        else:
-                            # Handle case where encoder_settings is an object
-                            source_vtr = getattr(encoder_settings, 'Source_VTR', [])
-                        
-                        # Set the dropdown based on VTR values
-                        if any(isinstance(vtr, str) and "SVO5800" in vtr for vtr in source_vtr):
-                            self.main_window.signalflow_profile_dropdown.setCurrentText("JPC_AV_SVHS Signal Flow")
-                        elif any(isinstance(vtr, str) and "Sony BVH3100" in vtr for vtr in source_vtr):
-                            self.main_window.signalflow_profile_dropdown.setCurrentText("BVH3100 Signal Flow")
-                        else:
-                            # Default option
-                            self.main_window.signalflow_profile_dropdown.setCurrentText("Select a profile...")
-                        
-                        # Re-enable signals
-                        self.main_window.signalflow_profile_dropdown.blockSignals(False)
-
-                        # Spex Tab — refresh exiftool and mediainfo profile dropdowns
-                        if hasattr(self.spex_tab, 'refresh_profile_dropdowns'):
-                            self.spex_tab.refresh_profile_dropdowns()
-                    
                     # Show result to user — with rename notification if applicable
                     renamed = import_results.get('renamed_profiles', [])
                     errors = import_results.get('errors', [])
@@ -291,9 +224,6 @@ class ImportTab(ThemeableMixin):
 
                     # Get fresh copies of configs after reset
                     checks_config = config_mgr.get_config('checks', ChecksConfig)
-                    spex_config = config_mgr.get_config('spex', SpexConfig)
-                    filename_config = config_mgr.get_config('filename', FilenameConfig)
-                    signalflow_config = config_mgr.get_config("signalflow", SignalflowConfig)
 
                     # Checks Tab dropdowns
                     # Refresh the checks profile dropdown (includes custom profiles)
@@ -316,53 +246,10 @@ class ImportTab(ThemeableMixin):
                         
                         self.main_window.checks_profile_dropdown.blockSignals(False)
 
-                    # Spex Tab dropdowns
-                    # Refresh filename profile dropdown
-                    if hasattr(self.spex_tab, 'filename_profile_dropdown'):
-                        # Block signals to prevent triggering change events
-                        self.spex_tab.filename_profile_dropdown.blockSignals(True)
-                        
-                        # Get the current section1 value from the reset config
-                        section1_value = spex_config.filename_values.fn_sections.get("section1", {}).value
-                        
-                        # Set the dropdown based on the config value
-                        if section1_value == "JPC":
-                            self.spex_tab.filename_profile_dropdown.setCurrentText("JPC Filename Profile")
-                        elif section1_value == "2012":
-                            self.spex_tab.filename_profile_dropdown.setCurrentText("Bowser Filename Profile")
-                        else:
-                            self.spex_tab.filename_profile_dropdown.setCurrentText("Select a profile...")
-                        
-                        # Re-enable signals
-                        self.spex_tab.filename_profile_dropdown.blockSignals(False)
-                    
-                    # Signalflow profile dropdown
-                    # Refresh signalflow profile dropdown
-                    if hasattr(self.main_window, 'signalflow_profile_dropdown'):
-                        # Block signals to prevent triggering change events
-                        self.main_window.signalflow_profile_dropdown.blockSignals(True)
-                        
-                        # Get encoder settings
-                        encoder_settings = spex_config.mediatrace_values.ENCODER_SETTINGS
-                        source_vtr = []
-                        
-                        if isinstance(encoder_settings, dict):
-                            source_vtr = encoder_settings.get('Source_VTR', [])
-                        else:
-                            # Handle case where encoder_settings is an object
-                            source_vtr = getattr(encoder_settings, 'Source_VTR', [])
-                        
-                        # Set the dropdown based on VTR values
-                        if any(isinstance(vtr, str) and "SVO5800" in vtr for vtr in source_vtr):
-                            self.main_window.signalflow_profile_dropdown.setCurrentText("JPC_AV_SVHS Signal Flow")
-                        elif any(isinstance(vtr, str) and "Sony BVH3100" in vtr for vtr in source_vtr):
-                            self.main_window.signalflow_profile_dropdown.setCurrentText("BVH3100 Signal Flow")
-                        else:
-                            # Default option
-                            self.main_window.signalflow_profile_dropdown.setCurrentText("Select a profile...")
-                        
-                        # Re-enable signals
-                        self.main_window.signalflow_profile_dropdown.blockSignals(False)
+                    # Spex Tab — one call re-syncs every card (dropdowns,
+                    # active-profile state lines, and summaries)
+                    if hasattr(self.spex_tab, 'refresh'):
+                        self.spex_tab.refresh()
 
                     QMessageBox.information(self.main_window, "Success", "Configuration has been reset to default values")
                 except Exception as e:

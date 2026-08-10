@@ -1,19 +1,22 @@
+from dataclasses import asdict
+
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QLabel, 
-    QScrollArea, QPushButton, QComboBox, 
+    QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QLabel,
+    QScrollArea, QPushButton, QComboBox,
     QMessageBox, QDialog, QCheckBox, QGridLayout
 )
 
-from AV_Spex.utils import config_edit
 from AV_Spex.utils.config_setup import SpexConfig, EncoderSettings
 
 from AV_Spex.gui.gui_theme_manager import ThemeManager, ThemeableMixin
 
 class CustomSignalflowDialog(QDialog, ThemeableMixin):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, edit_mode=False, profile_name=None):
         super().__init__(parent)
         self.profile = None
-        self.setWindowTitle("Custom Signal Flow Profile")
+        self.edit_mode = edit_mode
+        self.original_profile_name = profile_name
+        self.setWindowTitle("Edit Signal Flow Profile" if edit_mode else "Custom Signal Flow Profile")
         self.setModal(True)
 
         # Add theme handling
@@ -61,6 +64,9 @@ class CustomSignalflowDialog(QDialog, ThemeableMixin):
         self.profile_name_label = QLabel("Profile Name:")
         self.profile_name_input = QLineEdit()
         self.profile_name_input.setPlaceholderText("Enter a name for this profile")
+        if edit_mode and profile_name:
+            self.profile_name_input.setText(profile_name)
+            self.profile_name_input.setEnabled(False)  # Don't allow renaming in edit mode
         
         save_button = QPushButton("Save Profile")
         save_button.clicked.connect(self.on_save_clicked)
@@ -538,12 +544,12 @@ class CustomSignalflowDialog(QDialog, ThemeableMixin):
         preview_text = "\n".join(preview_parts)
         self.preview_label.setText(preview_text)
         
-    def get_profile(self):
-        """Get the signal flow profile as a dictionary structure"""
+    def _build_profile_dict(self):
+        """Build the signal flow profile dict from the current control state"""
         if not self.profile_name_input.text():
             QMessageBox.warning(self, "Validation Error", "Profile name is required.")
             return None
-            
+
         # Create the profile dictionary
         profile = {
             "name": self.profile_name_input.text()
@@ -634,28 +640,177 @@ class CustomSignalflowDialog(QDialog, ThemeableMixin):
         return profile
         
     def on_save_clicked(self):
-        """Handle the save button click event"""
-        # Validate and get the profile data
-        profile = self.get_profile()
+        """Validate and accept. The caller saves and applies the profile —
+        this dialog no longer writes config itself."""
+        profile = self._build_profile_dict()
         if profile is None:
             return  # Validation failed
-        
-        try:
-            # Save the profile using config_edit.add_signalflow_profile utility
-            config_edit.apply_signalflow_profile(profile)
-            
-            # Store the profile and close the dialog with success
-            self.profile = profile
-            self.accept()  # This will trigger QDialog.accepted
-            
-        except Exception as e:
-            # Show error message if save fails
-            QMessageBox.critical(
-                self, 
-                "Error", 
-                f"Failed to save profile: {str(e)}"
-            )
-    
+        self.profile = profile
+        self.accept()  # This will trigger QDialog.accepted
+
+    def get_profile(self):
+        """Return {'name', 'data', 'is_edit'} for the caller to save/apply."""
+        if self.profile is None:
+            return None
+        name = self.original_profile_name if self.edit_mode else self.profile_name_input.text().strip()
+        return {
+            'name': name,
+            'data': self.profile,
+            'is_edit': self.edit_mode,
+        }
+
     def get_result(self):
         """Return the created/edited profile"""
         return self.profile
+
+    # --- loading an existing profile ---------------------------------------
+
+    def _select_combo_entry(self, combo, custom_input, text):
+        """Select the combo item matching `text` (exact or exact-without-
+        parenthetical, case-insensitive). Unmatched text falls back to the
+        "Other" item with the raw string in the custom input, so saving
+        re-emits exactly what was loaded."""
+        text_lower = text.strip().lower()
+        for index in range(combo.count()):
+            item = combo.itemText(index)
+            base = item.split(" (")[0]
+            if text_lower in (item.lower(), base.lower()):
+                combo.setCurrentIndex(index)
+                return True
+        other_index = combo.findText("Other")
+        if other_index >= 0 and custom_input is not None:
+            combo.setCurrentIndex(other_index)
+            custom_input.setText(text.strip())
+            return True
+        return False
+
+    @staticmethod
+    def _stage_entries(stages, key):
+        value = stages.get(key) or []
+        if isinstance(value, str):
+            value = [part.strip() for part in value.split(',')]
+        return [str(entry) for entry in value]
+
+    @staticmethod
+    def _split_extras(entries):
+        """Split a stage's trailing entries into (serial number, others)."""
+        serial = None
+        others = []
+        for entry in entries:
+            if entry.strip().upper().startswith("SN "):
+                serial = entry.strip()[3:].strip()
+            else:
+                others.append(entry.strip())
+        return serial, others
+
+    def load_profile_data(self, profile):
+        """Load an existing profile (SignalflowProfile dataclass, profile
+        dict, or MediaTraceValues with ENCODER_SETTINGS) into the controls.
+
+        The stored form is a list of free strings per stage, so this is a
+        best-effort reverse of _build_profile_dict: recognized entries land
+        in the matching combos/fields, unrecognized device names fall back
+        to "Other" with the raw string preserved in the custom input, and
+        unrecognized connection/audio entries keep the combo defaults.
+        Round-tripping is lossy-tolerant — worst case, saving re-emits the
+        loaded device strings verbatim via the Other/custom path.
+        """
+        if profile is None:
+            return
+        if hasattr(profile, '__dataclass_fields__'):
+            profile = asdict(profile)
+        elif not isinstance(profile, dict):
+            profile = {k: v for k, v in getattr(profile, '__dict__', {}).items()
+                       if not k.startswith('_')}
+
+        # Accept MediaTraceValues-shaped input (current spex values)
+        stages = profile.get('ENCODER_SETTINGS', profile)
+        if hasattr(stages, '__dataclass_fields__'):
+            stages = asdict(stages)
+        elif not isinstance(stages, dict):
+            stages = {k: v for k, v in getattr(stages, '__dict__', {}).items()
+                      if not k.startswith('_')}
+
+        if profile.get('name') and not self.edit_mode and not self.profile_name_input.text():
+            self.profile_name_input.setText(str(profile['name']))
+
+        # Source VTR
+        vtr_entries = self._stage_entries(stages, 'Source_VTR')
+        vtr_model = vtr_entries[0] if vtr_entries else ''
+        if vtr_model:
+            self._select_combo_entry(self.vtr_model_combo, self.custom_vtr_input, vtr_model)
+        serial, others = self._split_extras(vtr_entries[1:])
+        if serial:
+            self.vtr_sn_input.setText(serial)
+        for entry in others:
+            self._select_combo_entry(self.vtr_connection_combo, None, entry)
+            self._select_combo_entry(self.vtr_audio_combo, None, entry)
+
+        # TBC / Framesync
+        tbc_entries = self._stage_entries(stages, 'TBC_Framesync')
+        if not tbc_entries:
+            none_index = self.tbc_model_combo.findText("None")
+            if none_index >= 0:
+                self.tbc_model_combo.setCurrentIndex(none_index)
+        else:
+            tbc_model = tbc_entries[0]
+            if " with flash firmware " in tbc_model:
+                tbc_model, firmware = tbc_model.split(" with flash firmware ", 1)
+                self.tbc_firmware_input.setText(firmware.strip())
+            if tbc_model.strip().lower() == vtr_model.strip().lower():
+                internal_index = self.tbc_model_combo.findText("Internal TBC (same as VTR)")
+                if internal_index >= 0:
+                    self.tbc_model_combo.setCurrentIndex(internal_index)
+            else:
+                self._select_combo_entry(self.tbc_model_combo, self.custom_tbc_input, tbc_model)
+            serial, others = self._split_extras(tbc_entries[1:])
+            if serial:
+                self.tbc_sn_input.setText(serial)
+            for entry in others:
+                self._select_combo_entry(self.tbc_connection_combo, None, entry)
+                self._select_combo_entry(self.tbc_audio_combo, None, entry)
+
+        # ADC — only treated as separate when it differs from the TBC chain
+        adc_entries = self._stage_entries(stages, 'ADC')
+        if adc_entries and adc_entries != tbc_entries:
+            self.separate_adc_check.setChecked(True)
+            self._select_combo_entry(self.adc_model_combo, self.custom_adc_input, adc_entries[0])
+            serial, others = self._split_extras(adc_entries[1:])
+            if serial:
+                self.adc_sn_input.setText(serial)
+            for entry in others:
+                self._select_combo_entry(self.adc_connection_combo, None, entry)
+
+        # Capture device
+        capture_entries = self._stage_entries(stages, 'Capture_Device')
+        if capture_entries:
+            self._select_combo_entry(self.capture_model_combo, self.custom_capture_input,
+                                     capture_entries[0])
+            serial, others = self._split_extras(capture_entries[1:])
+            if serial:
+                self.capture_sn_input.setText(serial)
+            for entry in others:
+                self._select_combo_entry(self.capture_interface_combo, None, entry)
+
+        # Computer: model, then CPU / SN / OS / software in stored order
+        computer_entries = self._stage_entries(stages, 'Computer')
+        if computer_entries:
+            self._select_combo_entry(self.computer_model_combo, self.custom_computer_input,
+                                     computer_entries[0])
+            software_parts = []
+            cpu_set = False
+            for entry in computer_entries[1:]:
+                stripped = entry.strip()
+                if stripped.upper().startswith("SN "):
+                    self.computer_sn_input.setText(stripped[3:].strip())
+                elif stripped.upper().startswith("OS "):
+                    self.computer_os_input.setText(stripped[3:].strip())
+                elif not cpu_set:
+                    self.computer_cpu_input.setText(stripped)
+                    cpu_set = True
+                else:
+                    software_parts.append(stripped)
+            if software_parts:
+                self.computer_software_input.setText(", ".join(software_parts))
+
+        self.update_preview()

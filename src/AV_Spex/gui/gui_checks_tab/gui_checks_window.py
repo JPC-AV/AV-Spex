@@ -785,7 +785,7 @@ class ChecksWindow(QWidget, ThemeableMixin):
         Stream fixity (mkvextract/mkvpropedit) and the mediatrace custom Matroska
         tag check only work on Matroska containers, and signal flow is embedded as
         an MKV tag — so gray them out for non-MKV input. Also grays the signal-flow
-        dropdown on the Spex tab when a MainWindow reference is available.
+        card on the Spex tab when a MainWindow reference is available.
         """
         self.embed_stream_cb.setEnabled(is_mkv)
         self.overwrite_stream_cb.setEnabled(is_mkv)
@@ -796,10 +796,10 @@ class ChecksWindow(QWidget, ThemeableMixin):
             mediatrace_widgets['check'].setEnabled(is_mkv)
             mediatrace_widgets['run'].setEnabled(is_mkv)
 
-        # Cross-tab: gray the signal-flow dropdown on the Spex tab if it exists.
-        signalflow_dropdown = getattr(self.main_window, 'signalflow_profile_dropdown', None)
-        if signalflow_dropdown is not None:
-            signalflow_dropdown.setEnabled(is_mkv)
+        # Cross-tab: gray the signal-flow card on the Spex tab if it exists.
+        spex_tab = getattr(self.main_window, 'spex_tab', None)
+        if spex_tab is not None and hasattr(spex_tab, 'set_signalflow_enabled'):
+            spex_tab.set_signalflow_enabled(is_mkv)
 
     def on_video_extension_changed(self, ext):
         """Persist the selected extension and auto-disable MKV-only features.
