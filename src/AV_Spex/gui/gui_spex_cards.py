@@ -55,10 +55,9 @@ class ProfileCard(QGroupBox):
         layout = QVBoxLayout(self)
         layout.setSpacing(6)
 
-        description = QLabel(spec.description)
-        description.setWordWrap(True)
-        description.setStyleSheet("color: gray; font-size: 11px;")
-        layout.addWidget(description)
+        self.description_label = QLabel(spec.description)
+        self.description_label.setWordWrap(True)
+        layout.addWidget(self.description_label)
 
         # Profile dropdown row
         self.profile_dropdown = None
@@ -73,13 +72,11 @@ class ProfileCard(QGroupBox):
         # State line (inline explanation, never a tooltip)
         self.state_label = QLabel(spec.readonly_note if not spec.has_profiles else "")
         self.state_label.setWordWrap(True)
-        self.state_label.setStyleSheet("color: gray; font-style: italic; font-size: 11px;")
         layout.addWidget(self.state_label)
 
         # Summary line
         self.summary_label = QLabel("")
         self.summary_label.setWordWrap(True)
-        self.summary_label.setStyleSheet("font-weight: bold;")
         layout.addWidget(self.summary_label)
 
         # When the row partner is taller, absorb the extra height here so the
@@ -110,6 +107,27 @@ class ProfileCard(QGroupBox):
 
         button_row.addStretch()
         layout.addLayout(button_row)
+
+        self._style_labels()
+
+    def _style_labels(self):
+        """Style the card's text rows.
+
+        Each rule carries an explicit :disabled variant: a QLabel with a
+        stylesheet color ignores the palette's disabled rendering entirely,
+        so without these the text stays fully lit on a disabled card.
+        """
+        theme_manager = ThemeManager.instance()
+        _, disabled_text, _ = theme_manager.disabled_colors()
+        self.description_label.setStyleSheet(
+            f"QLabel {{ color: gray; font-size: 11px; }}"
+            f"QLabel:disabled {{ color: {disabled_text}; }}")
+        self.state_label.setStyleSheet(
+            f"QLabel {{ color: gray; font-style: italic; font-size: 11px; }}"
+            f"QLabel:disabled {{ color: {disabled_text}; }}")
+        self.summary_label.setStyleSheet(
+            f"QLabel {{ font-weight: bold; }}"
+            f"QLabel:disabled {{ color: {disabled_text}; }}")
 
     # --- signal plumbing ----------------------------------------------------
 
@@ -154,13 +172,12 @@ class ProfileCard(QGroupBox):
             self.delete_button.setEnabled(not protected and self.selected_profile() is not None)
 
     def set_card_enabled(self, enabled):
-        """Enable/disable the interactive controls (used for the signal-flow
-        card when the configured input extension is not MKV)."""
-        if self.profile_dropdown is not None:
-            self.profile_dropdown.setEnabled(enabled)
-        for button in (self.edit_button, self.new_button, self.delete_button):
-            if button is not None:
-                button.setEnabled(enabled)
+        """Enable/disable the whole card (used for the signal-flow card when
+        the configured input extension is not MKV). Disabling the group box
+        itself grays the title, summary, and every control in one visible
+        state; children with their own disabled flags (e.g. a protected
+        profile's Delete button) keep them when the card re-enables."""
+        self.setEnabled(enabled)
 
     def restyle(self):
         """Re-apply theme-managed styling (called from on_theme_changed)."""
@@ -168,3 +185,4 @@ class ProfileCard(QGroupBox):
         theme_manager.style_buttons(self)
         if self.profile_dropdown is not None:
             theme_manager.style_combobox(self.profile_dropdown)
+        self._style_labels()

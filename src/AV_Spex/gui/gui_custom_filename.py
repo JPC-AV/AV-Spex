@@ -241,10 +241,16 @@ class CustomFilenameDialog(QDialog, ThemeableMixin):
 
     def _clear_sections(self):
         """Remove every section row without the keep-one-row backfill that
-        remove_section() applies."""
+        remove_section() applies. Rows are detached from the layout
+        synchronously — deleteLater() alone leaves the old widgets visible
+        until the event loop runs, which showed up as a duplicate empty
+        "Section 1" row when loading a profile into a fresh dialog."""
         while self.sections:
             section = self.sections.pop()
-            section['widget'].deleteLater()
+            widget = section['widget']
+            self.sections_layout.removeWidget(widget)
+            widget.setParent(None)
+            widget.deleteLater()
 
     def load_profile_data(self, profile):
         """Load an existing filename profile (dataclass or dict) into the dialog."""

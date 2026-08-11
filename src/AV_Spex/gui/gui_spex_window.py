@@ -315,8 +315,14 @@ class SpexWindow(QWidget, ThemeableMixin):
     def set_signalflow_enabled(self, is_mkv: bool):
         """Gray the signal-flow card for non-MKV input (its tags are
         Matroska-only). Called by the Checks tab when the extension changes."""
+        was_enabled = self._signalflow_enabled
         self._signalflow_enabled = bool(is_mkv)
-        self._apply_signalflow_enabled_state()
+        if self._signalflow_enabled and not was_enabled:
+            # Re-enabling: recompute the real state line, which the disabled
+            # message replaced. refresh_card re-applies the enabled state.
+            self.refresh_card('signalflow')
+        else:
+            self._apply_signalflow_enabled_state()
 
     def _apply_signalflow_enabled_state(self):
         card = self.cards.get('signalflow')
@@ -329,6 +335,9 @@ class SpexWindow(QWidget, ThemeableMixin):
     # --- generic card handlers ---------------------------------------------
 
     def on_profile_selected(self, spec, name):
+        # Re-read from disk so an externally edited profile store (hand-edited
+        # JSON, another process) is applied as it actually is on disk.
+        config_mgr.refresh_configs()
         profile = config_edit.get_domain_profiles(spec.key).get(name)
         if profile is None:
             return
@@ -341,6 +350,9 @@ class SpexWindow(QWidget, ThemeableMixin):
         self.refresh_card(spec.key)
 
     def on_view(self, spec):
+        # Re-read from disk so the dialog always shows the values as they
+        # exist on disk, even after external edits while the app is open.
+        config_mgr.refresh_configs()
         spex_config = config_mgr.get_config('spex', SpexConfig)
         try:
             sections = spec.view_fn(spex_config)
