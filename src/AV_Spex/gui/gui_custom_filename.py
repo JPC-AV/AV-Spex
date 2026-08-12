@@ -1,19 +1,22 @@
+from dataclasses import asdict
+
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QLabel, 
-    QScrollArea, QPushButton, QComboBox, 
+    QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QLabel,
+    QScrollArea, QPushButton, QComboBox,
     QMessageBox, QDialog
 )
 
-from AV_Spex.utils import config_edit
 from AV_Spex.utils.config_setup import FilenameSection, FilenameProfile
 
 from AV_Spex.gui.gui_theme_manager import ThemeManager, ThemeableMixin
 
 class CustomFilenameDialog(QDialog, ThemeableMixin):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, edit_mode=False, profile_name=None):
         super().__init__(parent)
         self.pattern = None
-        self.setWindowTitle("Custom Filename Pattern")
+        self.edit_mode = edit_mode
+        self.original_profile_name = profile_name
+        self.setWindowTitle("Edit Filename Profile" if edit_mode else "Custom Filename Pattern")
         self.setModal(True)
 
         # Add theme handling
@@ -21,15 +24,26 @@ class CustomFilenameDialog(QDialog, ThemeableMixin):
 
         # Set minimum size for the dialog
         self.setMinimumSize(500, 600)  # Width: 500px, Height: 600px
-        
+
         # Initialize layout
         layout = QVBoxLayout()
         layout.setSpacing(10)  # Reduce overall vertical spacing
-        
+
         # Add description
         description = QLabel("Define your filename pattern using 1-8 sections separated by underscores.")
         description.setWordWrap(True)
         layout.addWidget(description)
+
+        # Profile name input
+        name_layout = QHBoxLayout()
+        name_layout.addWidget(QLabel("Profile Name:"))
+        self.profile_name_input = QLineEdit()
+        self.profile_name_input.setPlaceholderText("e.g., My Filename Profile")
+        if edit_mode and profile_name:
+            self.profile_name_input.setText(profile_name)
+            self.profile_name_input.setEnabled(False)  # Don't allow renaming in edit mode
+        name_layout.addWidget(self.profile_name_input)
+        layout.addLayout(name_layout)
         
         # Scrollable area for sections
         scroll = QScrollArea()
@@ -196,50 +210,88 @@ class CustomFilenameDialog(QDialog, ThemeableMixin):
         )
 
     def on_save_clicked(self):
-        """Handle save button click"""
+        """Validate and accept. The caller saves and applies the profile —
+        this dialog no longer writes config itself."""
         pattern = self.get_filename_pattern()
-        if pattern:
-            try:
-                config_edit.apply_filename_profile(pattern)
-                self.pattern = pattern
-                self.accept()  # This will trigger QDialog.accepted
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to apply filename pattern: {str(e)}")
+        if not pattern:
+            return
+        if not self.edit_mode and not self.profile_name_input.text().strip():
+            # Suggest a name from the first section, matching the old
+            # auto-generated "Custom (<section1>)" naming.
+            first_section = pattern.fn_sections.get('section1') if pattern.fn_sections else None
+            first_value = first_section.value if first_section else ''
+            self.profile_name_input.setText(f"Custom ({first_value})")
+        self.pattern = pattern
+        self.accept()  # This will trigger QDialog.accepted
+
+    def get_profile(self):
+        """Return {'name', 'data', 'is_edit'} for the caller to save/apply."""
+        if self.pattern is None:
+            return None
+        name = self.original_profile_name if self.edit_mode else self.profile_name_input.text().strip()
+        return {
+            'name': name,
+            'data': self.pattern,
+            'is_edit': self.edit_mode,
+        }
 
     def get_pattern(self):
         """Return the stored pattern"""
         return self.pattern
-            
-    def load_existing_pattern(self, pattern):
-        """Load an existing filename pattern into the dialog"""
-        if not pattern or 'fn_sections' not in pattern:
-            return
-            
-        # Clear existing sections
+
+    def _clear_sections(self):
+        """Remove every section row without the keep-one-row backfill that
+        remove_section() applies. Rows are detached from the layout
+        synchronously — deleteLater() alone leaves the old widgets visible
+        until the event loop runs, which showed up as a duplicate empty
+        "Section 1" row when loading a profile into a fresh dialog."""
         while self.sections:
-            self.remove_section()
-            
-        # Load sections
-        for section_key, section_data in pattern['fn_sections'].items():
+            section = self.sections.pop()
+            widget = section['widget']
+            self.sections_layout.removeWidget(widget)
+            widget.setParent(None)
+            widget.deleteLater()
+
+    def load_profile_data(self, profile):
+        """Load an existing filename profile (dataclass or dict) into the dialog."""
+        if profile is None:
+            return
+        if hasattr(profile, '__dataclass_fields__'):
+            profile = asdict(profile)
+        fn_sections = profile.get('fn_sections') or {}
+
+        self._clear_sections()
+
+        for section_key in sorted(fn_sections.keys()):
+            section_data = fn_sections[section_key]
+            if hasattr(section_data, '__dataclass_fields__'):
+                section_data = asdict(section_data)
             self.add_section()
             section = self.sections[-1]
-            
+
             # Set section type
             type_index = {
                 'literal': 0,
                 'wildcard': 1,
                 'regex': 2
-            }.get(section_data['section_type'].lower(), 0)
+            }.get(str(section_data.get('section_type', 'literal')).lower(), 0)
             section['type_combo'].setCurrentIndex(type_index)
-            
+
             # Set value
-            section['value_input'].setText(section_data['value'])
-                
+            section['value_input'].setText(str(section_data.get('value', '')))
+
+        if not self.sections:
+            self.add_section()  # Ensure at least one section exists
+
         # Load extension
-        if 'FileExtension' in pattern:
-            self.extension_input.setText(pattern['FileExtension'])
-            
+        if profile.get('FileExtension'):
+            self.extension_input.setText(profile['FileExtension'])
+
         self.update_preview()
+
+    # Backward-compatible alias for the pre-redesign method name
+    def load_existing_pattern(self, pattern):
+        self.load_profile_data(pattern)
 
     def on_theme_changed(self, palette):
         # Apply the theme changes to this dialog only

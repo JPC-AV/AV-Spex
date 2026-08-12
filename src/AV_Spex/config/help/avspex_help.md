@@ -151,13 +151,21 @@ Click **Check Spex!** to start processing.
 
 ### Spex Tab
 
-The Spex tab displays the expected metadata values that AV Spex validates against, organized by tool. It includes:
+The Spex tab shows the expected metadata values that AV Spex validates against, as a grid of cards — one per category: **Filename**, **Signal Flow**, **MediaInfo**, **Exiftool**, **FFprobe**, and **qct-parse Thresholds**. Each card displays:
 
-- **Filename / Signal Flow**: Dropdown menus to select the active filename convention and signal flow equipment profiles
-- **ExifTool / MediaInfo / FFprobe**: Dropdown menus to select named expected-values profiles for each metadata tool (see the Custom Metadata Profiles section below)
-- **Open Section**: View the current expected values for any section (read-only for default profiles)
+- A **profile dropdown** to select which saved profile is active for that category
+- A **status line** stating the active profile. If you change expected values after applying a profile, the card honestly reports *Modified from "profile name"* rather than silently deselecting; if no profile has been recorded yet it reads *No profile recorded — showing current values*
+- A one-line **summary** of the key expected values (e.g. `FFV1 · 720×486 · Interlaced BFF`)
+- **View** — opens a structured, read-only window listing every expected value for that category
+- **Edit...** — modifies the selected custom profile. For the built-in default profiles this button becomes **Duplicate...**, which copies the profile's values into a new custom profile
+- **New...** — creates a custom profile, starting from the current expected values
+- **Delete** — removes the selected custom profile (disabled for built-in profiles)
 
-The built-in default profiles are read-only, but you can edit the expected values by creating your own custom profile for the ExifTool, MediaInfo, or FFprobe sections — for example, to validate PAL transfers or a different audio codec. Each of those sections includes **Create Custom Profile...** and **Edit Selected Profile...** buttons for defining and modifying your own expected values. See the [Custom Metadata Profiles](#custom-metadata-profiles) section below for details.
+The built-in default profiles cannot be overwritten or deleted. To change expected values — for example, to validate PAL transfers or a different audio codec — create your own custom profile with **New...** or **Duplicate...**. See the [Custom Metadata Profiles](#custom-metadata-profiles) section below for details.
+
+The qct-parse Thresholds card is read-only; it summarizes the content thresholds and SMPTE color bars limits used by the qct-parse analyses.
+
+The Signal Flow card is only available for MKV input, since the signal flow equipment chain is validated against embedded Matroska tags.
 
 ![The Spex tab](spex_tab_example.png)
 
@@ -195,12 +203,13 @@ Once your Spex selections are complete, navigate to the Checks tab and click **C
 
 AV Spex supports custom profiles for ExifTool, MediaInfo, and FFprobe. This is useful when processing collections with different technical specifications — for example, PAL vs. NTSC transfers, or FLAC vs. PCM audio.
 
-Each tool's section in the Spex tab includes:
+Each card in the Spex tab includes:
 - A **profile dropdown** to select from saved profiles
-- **Create Custom Profile...** to define a new set of expected values
-- **Edit Selected Profile...** to modify an existing custom profile
+- **New...** to define a new set of expected values (pre-filled from the current ones)
+- **Edit...** to modify an existing custom profile — or **Duplicate...** to copy a built-in profile into an editable custom one
+- **Delete** to remove a custom profile
 
-Default profiles are protected from accidental modification or deletion. Custom profiles are saved to the user config directory and persist across sessions.
+Default profiles are protected from modification and deletion — Edit becomes Duplicate and Delete is disabled for them. Custom profiles are saved to the user config directory and persist across sessions. Custom filename and signal flow profiles can be created, edited, and deleted the same way as the metadata tool profiles.
 
 Multiple acceptable values can be defined for any field. For example, if a collection includes both FLAC and PCM audio, the expected `codec_name` can be set to `["flac", "pcm_s24le"]`.
 
