@@ -236,6 +236,19 @@ class ChecksWindow(QWidget, ThemeableMixin):
         outputs_layout.addWidget(self.report_cb)
         outputs_layout.addWidget(report_desc)
 
+        # Console PDF row - saves the same output as the processing window's
+        # "Save as PDF" button, automatically, once per video.
+        self.save_console_pdf_cb = QCheckBox("Save Console Log as PDF")
+        self.save_console_pdf_cb.setStyleSheet("font-weight: bold;")
+        save_console_pdf_desc = QLabel(
+            "Saves the processing window's console output for each video to "
+            "its qc_metadata directory"
+        )
+        save_console_pdf_desc.setIndent(20)
+
+        outputs_layout.addWidget(self.save_console_pdf_cb)
+        outputs_layout.addWidget(save_console_pdf_desc)
+
         self.outputs_group.setLayout(outputs_layout)
         main_layout.addWidget(self.outputs_group)
     
@@ -562,6 +575,9 @@ class ChecksWindow(QWidget, ThemeableMixin):
         self.report_cb.stateChanged.connect(
             lambda state: self.on_checkbox_changed(state, ['outputs', 'report'])
         )
+        self.save_console_pdf_cb.stateChanged.connect(
+            lambda state: self.on_checkbox_changed(state, ['outputs', 'save_console_pdf'])
+        )
         
         # Fixity section - handle most checkboxes normally
         fixity_checkboxes = {
@@ -641,6 +657,9 @@ class ChecksWindow(QWidget, ThemeableMixin):
         )
         self._update_access_suboptions_enabled(checks_config.outputs.access_file)
         self.report_cb.setChecked(checks_config.outputs.report)
+        self.save_console_pdf_cb.setChecked(
+            getattr(checks_config.outputs, 'save_console_pdf', False)
+        )
         
         # Fixity - now using booleans directly
         self.check_fixity_cb.setChecked(checks_config.fixity.check_fixity)

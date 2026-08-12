@@ -272,6 +272,39 @@ def test_process_single_directory_stops_file_log_on_exception(monkeypatch):
     stop_mock.assert_called_once()
 
 
+def test_process_single_directory_emits_file_completed(monkeypatch):
+    """file_completed carries (video_id, destination_directory) for the console PDF."""
+    _stub_directory_init(monkeypatch)
+    _stub_per_file_logging(monkeypatch)
+    signals = MagicMock()
+
+    proc = ap.AVSpexProcessor(signals=signals)
+    monkeypatch.setattr(proc, "_process_directory_contents", lambda *a, **kw: True)
+
+    proc.process_single_directory("/some/dir")
+
+    signals.file_completed.emit.assert_called_once_with("vid_x", "/tmp/dest")
+
+
+def test_process_single_directory_emits_file_completed_on_exception(monkeypatch):
+    """The emit lives in the finally block, so a failed file still gets saved."""
+    _stub_directory_init(monkeypatch)
+    _stub_per_file_logging(monkeypatch)
+    signals = MagicMock()
+
+    proc = ap.AVSpexProcessor(signals=signals)
+
+    def boom(*a, **kw):
+        raise RuntimeError("processing exploded")
+
+    monkeypatch.setattr(proc, "_process_directory_contents", boom)
+
+    with pytest.raises(RuntimeError):
+        proc.process_single_directory("/some/dir")
+
+    signals.file_completed.emit.assert_called_once_with("vid_x", "/tmp/dest")
+
+
 # ===========================================================================
 # _process_directory_contents — branching
 # ===========================================================================

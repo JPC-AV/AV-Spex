@@ -488,6 +488,7 @@ class ProcessingSignals(QObject):
     progress = pyqtSignal(int, int)         # Numerical progress (current, total)
 
     file_started = pyqtSignal(str, int, int)  # File processing started (path, current_idx, total)
+    file_completed = pyqtSignal(str, str)     # File processing ended (video_id, qc_metadata dir)
     tool_started = pyqtSignal(str)            # Tool processing started
     tool_completed = pyqtSignal(str)          # Tool processing completed
     step_completed = pyqtSignal(str)          # Processing step completed

@@ -113,6 +113,11 @@ class MainWindowProcessing:
         # reset steps list when a new file starts
         self.main_window.signals.file_started.connect(self.main_window.processing_window.reset_steps_list)
 
+        # Console PDF: mark where each file's console output begins, then save
+        # that slice to the file's qc_metadata dir when it finishes
+        self.main_window.signals.file_started.connect(self.main_window.processing_window.mark_file_console_start)
+        self.main_window.signals.file_completed.connect(self.main_window.processing_window.save_file_console_pdf)
+
         # Progress bar signal connections
         self.main_window.signals.stream_hash_progress.connect(self.main_window.processing_window.update_detail_progress)
         self.main_window.signals.md5_progress.connect(self.main_window.processing_window.update_detail_progress)
