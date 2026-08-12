@@ -1705,6 +1705,7 @@ profile_step1 = {
     "outputs": {
         "access_file": False,
         "report": False,
+        "save_console_pdf": False,
         "qctools_ext": "qctools.xml.gz",
         "frame_analysis": {
             "enable_border_detection": False,
@@ -1780,6 +1781,7 @@ profile_step2 = {
     "outputs": {
         "access_file": False,
         "report": True,
+        "save_console_pdf": False,
         "qctools_ext": "qctools.xml.gz",
         "frame_analysis": {
             "enable_bitplane_check": True,
@@ -1857,6 +1859,7 @@ profile_allOff = {
     "outputs": {
         "access_file": False,
         "report": False,
+        "save_console_pdf": False,
         "qctools_ext": "qctools.xml.gz",
         "frame_analysis": {
             "enable_bitplane_check": False,
@@ -1935,6 +1938,7 @@ profile_vendor = {
     "outputs": {
         "access_file": False,
         "report": True,
+        "save_console_pdf": True,
         "qctools_ext": "qctools.xml.gz",
         "frame_analysis": {
             "enable_bitplane_check": False,

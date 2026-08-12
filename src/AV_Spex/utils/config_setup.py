@@ -328,6 +328,7 @@ class OutputsConfig:
     access_file_crop_borders: bool = True
     access_file_crop_to_480: bool = True
     access_file_exclude_flagged_audio: bool = False
+    save_console_pdf: bool = False
 
 @dataclass
 class ChecksumAlgorithm(Enum):

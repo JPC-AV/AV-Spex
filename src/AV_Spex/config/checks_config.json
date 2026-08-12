@@ -6,6 +6,7 @@
     "access_file_crop_to_480": true,
     "access_file_exclude_flagged_audio": false,
     "report": false,
+    "save_console_pdf": false,
     "qctools_ext": "qctools.xml.gz",
     "frame_analysis": {
       "enable_bitplane_check": true,

@@ -146,6 +146,13 @@ class AVSpexProcessor:
             # Always stop the per-file log, even if processing fails or is cancelled
             stop_file_log()
 
+            # Tell the GUI this file is done and where its qc_metadata dir is,
+            # so the console output can be saved alongside the per-file log.
+            # Emitted even on failure/cancel, matching the per-file log, which
+            # keeps whatever was written up to that point.
+            if self.signals:
+                self.signals.file_completed.emit(video_id, destination_directory)
+
     def _process_directory_contents(self, source_directory, video_path, video_id, 
                                      destination_directory, access_file_found):
         """
