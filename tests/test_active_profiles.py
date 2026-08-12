@@ -260,6 +260,59 @@ def test_signalflow_matcher_compares_stages():
 # Backward compatibility
 # ---------------------------------------------------------------------------
 
+class TestProtectedProfileRestore:
+    """A user-config copy of a built-in profile must never redefine it.
+
+    save_config writes built-ins into last_used_*_config.json, so that copy
+    shadows the bundle; without this restore, editing it silently changes
+    what a "protected" profile means.
+    """
+
+    def _bundled(self, name):
+        path = os.path.join(os.path.dirname(config_edit.__file__), '..', 'config',
+                            f'{name}_config.json')
+        with open(path) as f:
+            return json.load(f)
+
+    def test_tampered_builtin_is_restored_from_bundle(self):
+        data = self._bundled('mediainfo')
+        pristine = json.loads(json.dumps(
+            data['mediainfo_profiles']['Standard MKV Profile']))
+        data['mediainfo_profiles']['Standard MKV Profile']['video']['Width'] = "0"
+
+        restored = ConfigManager()._restore_protected_profiles(data, 'mediainfo')
+        assert restored['mediainfo_profiles']['Standard MKV Profile'] == pristine
+
+    def test_custom_profiles_are_left_alone(self):
+        data = self._bundled('mediainfo')
+        custom = json.loads(json.dumps(
+            data['mediainfo_profiles']['Standard MKV Profile']))
+        custom['video']['Width'] = "999"
+        data['mediainfo_profiles']['My Custom Profile'] = custom
+
+        restored = ConfigManager()._restore_protected_profiles(data, 'mediainfo')
+        assert restored['mediainfo_profiles']['My Custom Profile']['video']['Width'] == "999"
+
+    @pytest.mark.parametrize("config_name", ['filename', 'signalflow', 'exiftool', 'ffprobe'])
+    def test_every_profile_domain_is_covered(self, config_name):
+        data = self._bundled(config_name)
+        key = ConfigManager._PROFILE_CONFIG_KEYS[config_name]
+        name = PROTECTED_PROFILES[config_name][0]
+        pristine = json.loads(json.dumps(data[key][name]))
+        data[key][name] = {"tampered": True}
+
+        restored = ConfigManager()._restore_protected_profiles(data, config_name)
+        assert restored[key][name] == pristine
+
+    def test_non_profile_config_is_untouched(self):
+        data = {'mediainfo_values': {'expected_video': {'Width': '640'}}}
+        assert ConfigManager()._restore_protected_profiles(dict(data), 'spex') == data
+
+    def test_malformed_profiles_section_does_not_raise(self):
+        for bad in ({'mediainfo_profiles': None}, {'mediainfo_profiles': []}, {}):
+            assert ConfigManager()._restore_protected_profiles(bad, 'mediainfo') == bad
+
+
 def test_old_spex_json_without_active_profiles_loads_with_empty_dict():
     """A last_used_spex_config.json written before the active_profiles field
     existed must deserialize cleanly with the default empty dict."""

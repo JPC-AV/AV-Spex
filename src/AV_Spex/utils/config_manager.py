@@ -8,6 +8,7 @@ import appdirs
 import sys
 
 from AV_Spex.utils.log_setup import logger
+from AV_Spex.utils.config_setup import PROTECTED_PROFILES
 
 T = TypeVar('T')
 
@@ -278,29 +279,81 @@ class ConfigManager:
         
         return config_data
 
+    # Profile-bearing configs, mapped to the key holding their profiles dict.
+    _PROFILE_CONFIG_KEYS = {
+        'exiftool': 'exiftool_profiles',
+        'mediainfo': 'mediainfo_profiles',
+        'ffprobe': 'ffprobe_profiles',
+        'filename': 'filename_profiles',
+        'signalflow': 'signalflow_profiles',
+    }
+
+    def _restore_protected_profiles(self, config_data: dict, config_name: str) -> dict:
+        """Re-seed built-in profiles from the bundled config.
+
+        save_config writes every profile — built-ins included — into the
+        user's last_used_*_config.json, so from the first save onward that
+        copy shadows the bundle. Any drift in it (a hand-edit, or a stale
+        copy left by an older release) would silently redefine a profile the
+        app documents and enforces as protected, and selecting that profile
+        would apply the altered values. Sourcing the built-ins from the
+        bundle on every load keeps "protected" true end to end. Custom
+        profiles are never touched.
+        """
+        profiles_key = self._PROFILE_CONFIG_KEYS.get(config_name)
+        protected_names = PROTECTED_PROFILES.get(config_name, ())
+        if not profiles_key or not protected_names:
+            return config_data
+
+        profiles = config_data.get(profiles_key)
+        if not isinstance(profiles, dict):
+            return config_data
+
+        try:
+            bundled_path = os.path.join(self._bundle_dir, 'config', f"{config_name}_config.json")
+            with open(bundled_path, 'r') as f:
+                bundled = json.load(f).get(profiles_key) or {}
+        except Exception as e:
+            logger.warning(f"Could not read bundled {config_name} profiles: {str(e)}")
+            return config_data
+
+        for name in protected_names:
+            if name in bundled and profiles.get(name) != bundled[name]:
+                logger.warning(
+                    f"Built-in {config_name} profile '{name}' differed from the bundled "
+                    "definition and was restored (built-in profiles are read-only)")
+                profiles[name] = bundled[name]
+        return config_data
+
     def _load_json_config(self, config_name: str, use_last_used: bool = False) -> dict:
         """Load JSON config from file with migration support."""
         config_path = None
-        
+        loaded_last_used = False
+
         if use_last_used:
             last_used_path = os.path.join(self._user_config_dir, f"last_used_{config_name}_config.json")
             if os.path.exists(last_used_path):
                 config_path = last_used_path
-        
+                loaded_last_used = True
+
         if not config_path:
             # Use bundled config
             config_path = os.path.join(self._bundle_dir, 'config', f"{config_name}_config.json")
-            
+
         if not os.path.exists(config_path):
             raise FileNotFoundError(f"Config file not found at {config_path}")
-            
+
         try:
             with open(config_path, 'r') as f:
                 config_data = json.load(f)
-                
+
             # Apply migration for backward compatibility
             config_data = self._migrate_config_data(config_data, config_name)
-            
+
+            # The bundled copy is authoritative for built-in profiles.
+            if loaded_last_used:
+                config_data = self._restore_protected_profiles(config_data, config_name)
+
             return config_data
         except json.JSONDecodeError as e:
             raise ValueError(f"Error parsing config file {config_path}: {str(e)}")
