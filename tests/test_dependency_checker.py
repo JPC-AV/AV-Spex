@@ -151,7 +151,8 @@ def test_check_dependencies_cli_missing_logs_install_hint(monkeypatch, capsys):
 def test_get_cli_dependencies_includes_all_expected_tools():
     deps = dc.DependencyManager._get_cli_dependencies()
     names = {d.name for d in deps}
-    assert names == {"FFmpeg", "MediaInfo", "ExifTool", "MediaConch", "QCTools", "MKVToolNix"}
+    assert names == {"FFmpeg", "MediaInfo", "ExifTool", "MediaConch", "QCTools",
+                     "MKVToolNix", "mkvalidator"}
     # Each entry must have a real command + install hint to be useful in CLI output
     for d in deps:
         assert d.command
@@ -163,7 +164,8 @@ def test_gui_required_dependencies_have_version_commands():
     # Call the unbound method on a stand-in `self` to avoid building an actual QDialog
     deps = dc.DependencyCheckDialog._get_required_dependencies(self=MagicMock())
     names = {d.name for d in deps}
-    assert names == {"FFmpeg", "MediaInfo", "ExifTool", "MediaConch", "QCTools", "MKVToolNix"}
+    assert names == {"FFmpeg", "MediaInfo", "ExifTool", "MediaConch", "QCTools",
+                     "MKVToolNix", "mkvalidator"}
     for d in deps:
         assert d.version_command, f"{d.name} should declare a version_command for the GUI checker"
 
