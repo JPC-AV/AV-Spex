@@ -12,7 +12,7 @@ from dataclasses import asdict
 
 from AV_Spex.processing.processing_mgmt import ProcessingManager
 from AV_Spex.utils import dir_setup
-from AV_Spex.utils.log_setup import logger, start_file_log, stop_file_log
+from AV_Spex.utils.log_setup import logger, start_file_log, stop_file_log, format_elapsed
 from AV_Spex.utils.config_setup import ChecksConfig, SpexConfig
 from AV_Spex.utils.config_manager import ConfigManager
 
@@ -50,7 +50,9 @@ def print_nmaahc_logo():
 def log_overall_time(overall_start_time, overall_end_time):
     logger.warning(f'All files processed!\n')
     overall_total_time = overall_end_time - overall_start_time
-    formatted_overall_time = time.strftime("%H:%M:%S", time.gmtime(overall_total_time))
+    # format_elapsed() rather than strftime/gmtime, which wraps a >24 hour run
+    # back to 00:xx:xx (batches of full-length tapes routinely run past a day)
+    formatted_overall_time = format_elapsed(overall_total_time)
     logger.info(f"Overall processing time for all directories: {formatted_overall_time}\n")
 
     return formatted_overall_time

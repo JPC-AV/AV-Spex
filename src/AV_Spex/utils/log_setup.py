@@ -4,6 +4,7 @@
 import logging
 import os
 import sys
+import time
 import colorlog
 from datetime import datetime
 from colorlog import ColoredFormatter
@@ -193,8 +194,25 @@ def report_ffmpeg_stderr(stderr_text, operation, *, failure=False):
             logger.warning(f"ffmpeg [{operation}] stderr: {joined}\n")
 
 
+def format_elapsed(seconds):
+    """
+    Format an elapsed duration in seconds as HH:MM:SS.
+
+    Hours accumulate past 24 rather than wrapping — a 36 hour run reads
+    "36:23:40", not "12:23:40". (time.strftime/time.gmtime would wrap, since
+    they format a calendar time rather than a duration.)
+    """
+    total_seconds = int(seconds)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
 # Store reference to the current per-file handler so we can remove it later
 _current_file_handler = None
+# Monotonic start time of the current per-file log, for the elapsed line
+_current_file_start = None
 
 def start_file_log(output_directory, video_id, log_level=logging.DEBUG):
     """
@@ -212,8 +230,8 @@ def start_file_log(output_directory, video_id, log_level=logging.DEBUG):
     Returns:
         str: Path to the created log file
     """
-    global _current_file_handler
-    
+    global _current_file_handler, _current_file_start
+
     # Remove any existing per-file handler first
     stop_file_log()
     
@@ -244,7 +262,8 @@ def start_file_log(output_directory, video_id, log_level=logging.DEBUG):
     # Add to the logger
     logger.addHandler(file_handler)
     _current_file_handler = file_handler
-    
+    _current_file_start = time.monotonic()
+
     # Log the start of processing
     logger.info(f"=== Processing log for: {video_id} ===")
     logger.info(f"Processing started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -259,18 +278,23 @@ def stop_file_log():
     This removes the per-file handler from the logger, ensuring subsequent
     logs don't go to the old file.
     """
-    global _current_file_handler
-    
+    global _current_file_handler, _current_file_start
+
     if _current_file_handler is not None:
         # Log completion before removing
         logger.info(f"Processing completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        if _current_file_start is not None:
+            elapsed = format_elapsed(time.monotonic() - _current_file_start)
+            logger.info(f"Processing time for this file: {elapsed}")
         logger.info("=== End of processing log ===")
-        
+
         # Remove from logger and close
         logger.removeHandler(_current_file_handler)
         _current_file_handler.close()
         _current_file_handler = None
-    
+
+    _current_file_start = None
+
     # Also check for any orphaned per-file handlers (safety cleanup)
     for handler in logger.handlers[:]:  # Use slice copy to avoid modification during iteration
         if getattr(handler, '_is_per_file_handler', False):
