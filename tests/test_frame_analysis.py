@@ -773,3 +773,125 @@ def test_analyze_frame_quality_returns_none_when_cancelled_after_init(monkeypatc
 
     assert result is None
     fake_analyzer.analyze.assert_not_called()
+
+
+# ===========================================================================
+# probe_video_properties — OpenCV-without-FFmpeg fallback
+# ===========================================================================
+
+class _DeadCapture:
+    """An OpenCV build with no usable backend: open fails, every property is -1."""
+
+    def isOpened(self):
+        return False
+
+    def get(self, prop):
+        return -1.0
+
+    def release(self):
+        pass
+
+
+class _LiveCapture:
+    def __init__(self, props):
+        self._props = props
+
+    def isOpened(self):
+        return True
+
+    def get(self, prop):
+        return self._props[prop]
+
+    def release(self):
+        pass
+
+
+def _live_720x486():
+    import cv2
+    return _LiveCapture({
+        cv2.CAP_PROP_FRAME_WIDTH: 720.0,
+        cv2.CAP_PROP_FRAME_HEIGHT: 486.0,
+        cv2.CAP_PROP_FPS: 30000 / 1001,
+        cv2.CAP_PROP_FRAME_COUNT: 53489.0,
+    })
+
+
+def test_probe_video_properties_uses_opencv_when_it_opens(monkeypatch):
+    monkeypatch.setattr(fa.cv2, "VideoCapture", lambda *a, **kw: _live_720x486())
+    props = fa.probe_video_properties("/v/in.mkv")
+
+    assert (props["width"], props["height"]) == (720, 486)
+    assert props["total_frames"] == 53489
+    assert props["opencv_usable"] is True
+
+
+def test_probe_video_properties_falls_back_to_ffprobe(monkeypatch):
+    """The George Blood failure: cv2 can't open FFV1/MKV, ffprobe still can."""
+    monkeypatch.setattr(fa.cv2, "VideoCapture", lambda *a, **kw: _DeadCapture())
+    monkeypatch.setattr(fa, "_ffprobe_video_properties", lambda p: {
+        "width": 720, "height": 486, "fps": 30000 / 1001,
+        "total_frames": 53488, "duration": 1784.747,
+    })
+
+    props = fa.probe_video_properties("/v/in.mkv")
+
+    assert (props["width"], props["height"]) == (720, 486)
+    assert props["opencv_usable"] is False
+
+
+def test_probe_video_properties_never_returns_minus_one(monkeypatch):
+    """-1 dimensions became crop=-1:-1:0:0; zeros are what guards can catch."""
+    monkeypatch.setattr(fa.cv2, "VideoCapture", lambda *a, **kw: _DeadCapture())
+    monkeypatch.setattr(fa, "_ffprobe_video_properties", lambda p: None)
+
+    props = fa.probe_video_properties("/v/in.mkv")
+
+    assert props["width"] == 0
+    assert props["height"] == 0
+    assert props["width"] != -1 and props["height"] != -1
+    assert props["opencv_usable"] is False
+
+
+def test_simple_borders_stay_positive_when_opencv_is_broken(monkeypatch):
+    """End-to-end guard: the ffprobe fallback keeps the crop filter valid."""
+    monkeypatch.setattr(fa.cv2, "VideoCapture", lambda *a, **kw: _DeadCapture())
+    monkeypatch.setattr(fa, "_ffprobe_video_properties", lambda p: {
+        "width": 720, "height": 486, "fps": 30000 / 1001,
+        "total_frames": 53488, "duration": 1784.747,
+    })
+
+    det = fa.SophisticatedBorderDetector.__new__(fa.SophisticatedBorderDetector)
+    det.video_path = "/v/in.mkv"
+    det.signals = None
+    det.check_cancelled = lambda: False
+    det._init_video_properties()
+
+    x, y, w, h = det._detect_simple_borders().active_area
+
+    assert (x, y, w, h) == (25, 25, 670, 436)
+    assert w > 0 and h > 0, "a non-positive crop reaches ffmpeg as crop=-1:-1:0:0"
+
+
+def test_ffprobe_video_properties_derives_frame_count_from_duration(monkeypatch):
+    """Matroska omits nb_frames, so it has to come from duration * fps."""
+    completed = MagicMock()
+    completed.stdout = (
+        '{"streams": [{"width": 720, "height": 486, '
+        '"avg_frame_rate": "30000/1001", "duration": "100.0"}], '
+        '"format": {"duration": "100.0"}}'
+    )
+    monkeypatch.setattr(fa.subprocess, "run", lambda *a, **kw: completed)
+
+    props = fa._ffprobe_video_properties("/v/in.mkv")
+
+    assert (props["width"], props["height"]) == (720, 486)
+    assert props["fps"] == pytest.approx(29.97, abs=0.01)
+    assert props["total_frames"] == 2997
+
+
+def test_ffprobe_video_properties_returns_none_on_bad_dimensions(monkeypatch):
+    completed = MagicMock()
+    completed.stdout = '{"streams": [{"width": 0, "height": 0}]}'
+    monkeypatch.setattr(fa.subprocess, "run", lambda *a, **kw: completed)
+
+    assert fa._ffprobe_video_properties("/v/in.mkv") is None

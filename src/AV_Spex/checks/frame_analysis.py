@@ -814,6 +814,132 @@ class QCToolsParser:
         return runs, thresholds
 
 
+def _ffprobe_video_properties(video_path: str) -> Optional[Dict[str, Any]]:
+    """Read width/height/fps/frame count from ffprobe, or None if that fails."""
+    try:
+        result = subprocess.run(
+            ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+             '-show_entries',
+             'stream=width,height,avg_frame_rate,r_frame_rate,nb_frames,duration'
+             ':format=duration',
+             '-of', 'json', str(video_path)],
+            capture_output=True, text=True, check=True
+        )
+        probe = json.loads(result.stdout)
+        stream = (probe.get('streams') or [{}])[0]
+        width = int(stream.get('width') or 0)
+        height = int(stream.get('height') or 0)
+        if width <= 0 or height <= 0:
+            return None
+
+        # avg_frame_rate is the reliable one for CFR captures; r_frame_rate backs it up
+        fps = 0.0
+        for key in ('avg_frame_rate', 'r_frame_rate'):
+            rate = stream.get(key) or ''
+            if '/' in rate:
+                num, _, den = rate.partition('/')
+                try:
+                    num, den = float(num), float(den)
+                except ValueError:
+                    continue
+                if den > 0 and num > 0:
+                    fps = num / den
+                    break
+
+        duration = 0.0
+        for candidate in (stream.get('duration'),
+                          (probe.get('format') or {}).get('duration')):
+            try:
+                duration = float(candidate)
+            except (TypeError, ValueError):
+                continue
+            if duration > 0:
+                break
+
+        try:
+            total_frames = int(stream.get('nb_frames'))
+        except (TypeError, ValueError):
+            # Matroska usually omits nb_frames; derive it from duration instead
+            total_frames = int(duration * fps) if duration > 0 and fps > 0 else 0
+
+        return {'width': width, 'height': height, 'fps': fps,
+                'total_frames': total_frames,
+                'duration': duration or (total_frames / fps if fps > 0 else 0)}
+    except (subprocess.SubprocessError, json.JSONDecodeError, OSError, KeyError) as e:
+        logger.error(f"  ffprobe could not read video properties either: {e}")
+        return None
+
+
+def probe_video_properties(video_path) -> Dict[str, Any]:
+    """Read a video's geometry, preferring OpenCV and falling back to ffprobe.
+
+    OpenCV reports -1 for *every* property when it cannot open a file, so an
+    unchecked `cap.get()` silently yields width/height of -1. That propagated
+    into border detection as an active area of (0, 0, -1, -1) and from there
+    into `crop=-1:-1:0:0`, which ffmpeg rejects — every BRNG analysis then
+    "passed" having examined zero frames. So the open is checked here, the
+    failure is logged loudly, and real geometry is recovered from ffprobe.
+
+    The returned `opencv_usable` flag says whether frame *reading* is possible:
+    ffprobe can supply metadata, but only cv2 hands back decoded frames, so
+    callers that read frames must check it rather than assume.
+    """
+    path = str(video_path)
+    cap = cv2.VideoCapture(path)
+    try:
+        if cap.isOpened():
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            if width > 0 and height > 0:
+                return {'width': width, 'height': height, 'fps': fps,
+                        'total_frames': total_frames,
+                        'duration': total_frames / fps if fps > 0 else 0,
+                        'opencv_usable': True}
+    finally:
+        cap.release()
+
+    # OpenCV's own diagnostics go to C-level stderr, which never reaches the
+    # log — so say it here, where the user will actually see it.
+    logger.error(
+        f"OpenCV could not open {os.path.basename(path)}. This usually means the "
+        f"bundled OpenCV was built without FFmpeg (macOS x86_64 opencv-python "
+        f"wheels >= 4.13 ship no libavcodec/libavformat), leaving no backend that "
+        f"can decode FFV1/Matroska."
+    )
+    if not _opencv_has_ffmpeg():
+        logger.error(
+            "  Confirmed: this OpenCV build reports FFMPEG: NO. Frame-reading "
+            "analyses (border detection, duplicate-frame verification) cannot run."
+        )
+
+    probed = _ffprobe_video_properties(path)
+    if probed:
+        logger.warning(
+            f"  Falling back to ffprobe for video properties: "
+            f"{probed['width']}x{probed['height']} @ {probed['fps']:.3f} fps"
+        )
+        probed['opencv_usable'] = False
+        return probed
+
+    # Nothing could read the file — report zeros, never -1, so downstream
+    # guards see an obviously invalid size instead of a plausible-looking one.
+    return {'width': 0, 'height': 0, 'fps': 0.0, 'total_frames': 0,
+            'duration': 0, 'opencv_usable': False}
+
+
+def _opencv_has_ffmpeg() -> bool:
+    """True if this OpenCV build has the FFmpeg videoio backend compiled in."""
+    try:
+        for line in cv2.getBuildInformation().splitlines():
+            if 'FFMPEG' in line and ':' in line:
+                return line.split(':', 1)[1].strip().upper().startswith('YES')
+    except Exception:
+        pass
+    return False
+
+
 class SophisticatedBorderDetector:
     """Advanced border detection with quality assessment and refinement capabilities"""
     
@@ -831,15 +957,15 @@ class SophisticatedBorderDetector:
 
     def _init_video_properties(self):
         """Initialize video properties"""
-        cap = cv2.VideoCapture(self.video_path)
-        self.width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.fps = cap.get(cv2.CAP_PROP_FPS)
-        self.total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        self.duration = self.total_frames / self.fps if self.fps > 0 else 0
-        cap.release()
-    
-    def detect_borders_with_quality_assessment(self, 
+        props = probe_video_properties(self.video_path)
+        self.width = props['width']
+        self.height = props['height']
+        self.fps = props['fps']
+        self.total_frames = props['total_frames']
+        self.duration = props['duration']
+        self.opencv_usable = props['opencv_usable']
+
+    def detect_borders_with_quality_assessment(self,
                                               violations: List[FrameViolation] = None,
                                               method: str = 'sophisticated') -> BorderDetectionResult:
         """
@@ -1540,14 +1666,14 @@ class DifferentialBRNGAnalyzer:
 
     def _init_video_properties(self):
         """Initialize video properties"""
-        cap = cv2.VideoCapture(str(self.video_path))
-        self.width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.fps = cap.get(cv2.CAP_PROP_FPS)
-        self.total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        self.duration = self.total_frames / self.fps if self.fps > 0 else 0
-        cap.release()
-    
+        props = probe_video_properties(self.video_path)
+        self.width = props['width']
+        self.height = props['height']
+        self.fps = props['fps']
+        self.total_frames = props['total_frames']
+        self.duration = props['duration']
+        self.opencv_usable = props['opencv_usable']
+
 
     def analyze_with_differential_detection(self, 
                                        output_dir: Path,
@@ -2958,14 +3084,14 @@ class IntegratedSignalstatsAnalyzer:
 
     def _init_video_properties(self):
         """Initialize video properties"""
-        cap = cv2.VideoCapture(self.video_path)
-        self.width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.fps = cap.get(cv2.CAP_PROP_FPS)
-        self.total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        self.duration = self.total_frames / self.fps if self.fps > 0 else 0
-        cap.release()
-    
+        props = probe_video_properties(self.video_path)
+        self.width = props['width']
+        self.height = props['height']
+        self.fps = props['fps']
+        self.total_frames = props['total_frames']
+        self.duration = props['duration']
+        self.opencv_usable = props['opencv_usable']
+
     def _find_qctools_report(self, log_result: bool = True) -> Optional[str]:
         """Find existing QCTools report"""
         video_path = Path(self.video_path)
