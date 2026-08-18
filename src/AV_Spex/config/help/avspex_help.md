@@ -116,6 +116,12 @@ The GUI has four tabs: **Import**, **Checks**, **Spex**, and **Complex**
 
 The Import tab is where you select input directories for processing and manage configuration files. It includes options to import, export, or reset the Checks and Spex configurations as JSON files.
 
+**Import Directory...** adds a directory to the *Selected Directories* list; add as many as you like to process a batch, and use **Delete Selected** to remove one. This tab also holds the buttons that start a run, so it is where you end up after configuring the other tabs:
+
+- **Check Spex!** — process every directory in the list with your current settings
+- **Dry Run** — apply your configuration changes and report what would happen, without running any tools on the video files
+- **Show Processing Window** — reopen the processing console for the current or most recent run
+
 ![The Import tab](import_tab_example.png)
 
 #### Import and Export Config
@@ -143,9 +149,18 @@ The Checks tab controls which tools and processing steps are run. It includes:
   - **Step 2**: Run QCTools and qct-parse (bar detection, evaluate bars, thumbnail export, audio analysis, clamped levels, chroma phase errors) plus CLAMS bars/tone detection and frame analysis (bitplane check, border detection, BRNG, signalstats); check fixity and validate stream fixity; generate the HTML report
   - **Vendor**: Run the metadata tools and MediaConch without comparing them against Spex values, embed stream fixity, and generate the HTML report — for checking vendor-supplied files before the full QC pass
   - **Off**: Turn off all tools
-- **Checks Options**: Enable or disable individual tools and checks using checkboxes. Each tool has a **Run Tool** option (generates a sidecar file) and a **Check Tool** option (compares the sidecar output against expected Spex values).
 
-Click **Check Spex!** to start processing.
+  **Manage Profiles** opens a dialog listing your saved checks profiles, with buttons to create, edit, delete, and apply them. **Save Current as Profile** stores whatever the checkboxes currently say as a new named profile of your own.
+- **Checks Options**: The individual settings, grouped by what they affect. Every checkbox carries its description inline, so nothing is hidden behind a tooltip:
+  - **Input** — **Video File Extension**, the container AV Spex looks for in each input directory. Choosing a non-MKV container automatically disables the options that only work on Matroska: embedded stream fixity, the mediatrace custom-tag check, and the signal flow check
+  - **Validation** — **Validate Filename**, checking the input filename against the active Filename profile
+  - **Outputs** — the access copy with its sub-options, and the HTML report. Sub-options that depend on another setting say so on a *Requires:* line and stay grayed out until that setting is on (the QCTools file extension lives on the Complex tab, with the rest of the QCTools settings)
+  - **Fixity** — the whole-file and embedded stream fixity steps, each with its own hash algorithm dropdown (`md5` or `sha256`)
+  - **Tools** — one box per metadata tool (ExifTool, FFprobe, MediaInfo, MediaTrace, mkvalidator), each with a **Run Tool** option (generates the sidecar file) and a **Check Tool** option (compares that sidecar against the expected Spex values). MediaConch has its own box, showing the active policy in a dropdown with buttons to import a new policy XML or export the current one
+
+The heavier analysis steps are not on this tab — they live on the Complex tab, described below.
+
+When your selections are set, go to the **Import** tab and click **Check Spex!** to start processing, or **Dry Run** to apply your configuration changes without processing any files.
 
 ![The Checks tab](checks_tab_example.png)
 
@@ -198,7 +213,7 @@ Checks marked "via qct-parse" read the QCTools report through the qct-parse tool
 
 ![The Complex tab](complex_tab_example.png)
 
-Once your Spex selections are complete, navigate to the Checks tab and click **Check Spex!**.
+Once your selections are complete, return to the Import tab and click **Check Spex!**.
 
 ---
 
@@ -309,7 +324,14 @@ Available when Detect Color Bars is on. Exports thumbnail images of frames that 
 
 **Fragment merging**: A continuous span can dip below threshold briefly and be reported as several adjacent fragments; fragments separated by less than the configured merge gap (1 s for bars, 5 s for tone) are coalesced back into a single span.
 
-**How the results are used**: CLAMS runs before qct-parse, and all detected bars and tone regions are passed to qct-parse, which runs additional windowed bars scans over them beyond the head of the tape. The head color-bars end time that drives the BRNG-skip window and the access-file trim is then merged from both detectors: when CLAMS's primary bars detection starts within the first 10 seconds of the file, the later of the two end times (qct-parse or CLAMS) wins — and if only one detector found head bars, its end time is used on its own. Only primary-pass CLAMS detections participate in this merge; mid-file bars are report-only.
+**How the results are used**: CLAMS runs before qct-parse, and all detected bars and tone regions are passed to qct-parse, which runs additional windowed bars scans over them beyond the head of the tape. The head color-bars end time that drives the BRNG-skip window and the access-file trim is then decided by a consensus between the two detectors. A bars span counts as *head* bars only if it starts within the first 30 seconds of the file, and only primary-pass CLAMS detections take part — mid-file bars are report-only. From there:
+
+- **Both detectors found head bars and agree** (their end times are within 3 seconds of each other) — the later end time wins.
+- **Both found head bars but disagree** — the disputed span between the two end times is re-checked with CLAMS's SSIM comparison. If that span isn't bars, the earlier end time wins; otherwise the later one does. This arbitration exists because qct-parse works from luma statistics, which can't distinguish color bars from a bright, saturated slate.
+- **Only qct-parse found head bars** — if CLAMS ran and its SSIM scan of that same region says the region is not bars, the claim is *demoted*: no head-bars end time is set at all, so nothing is trimmed from the access file and no analysis window is skipped. A false trim removes real program content, so an uncorroborated claim is discarded rather than trusted.
+- **Only CLAMS found head bars** — its end time is used.
+
+Separately from that single end time, the full set of bars spans found by *either* detector is excluded from BRNG, signalstats, and duplicate-frame analysis, and from the qct-parse color bars evaluation. Over-excluding there is cheap, while analyzing bars as if they were program content skews the results. The access-file trim and chroma phase detection intentionally use only the head end time.
 
 Numeric tuning of the CLAMS parameters (SSIM threshold, sample ratio, minimum durations, etc.) is JSON-only — only the on/off toggle is exposed in the GUI and CLI. Edit the saved `last_used_checks_config.json` directly if you need to adjust those.
 
