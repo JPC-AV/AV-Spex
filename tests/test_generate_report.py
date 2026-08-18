@@ -1165,3 +1165,36 @@ def test_brng_caveat_falls_back_to_generic_text_without_a_note():
 
     assert "Low confidence:" in html
     assert "could not be placed on picture content" in html
+
+
+def test_brng_partial_coverage_renders_its_own_caveat():
+    """Incomplete is a different claim from wrong — the wording must differ."""
+    outputs = {**_FRAME_OUTPUTS_BASE, 'brng_analysis': _brng_payload(
+        period_confidence="partial_coverage",
+        period_confidence_note="Only 2 of 3 analysis periods could be examined.",
+    )}
+    html = gr.generate_frame_analysis_html(outputs, "JPC_AV_02222")
+
+    assert "Partial coverage:" in html
+    assert "Only 2 of 3 analysis periods could be examined." in html
+    # Must not claim the sample is unrepresentative — the analyzed periods are valid
+    assert "Low confidence:" not in html
+    assert "indicative only" not in html
+
+
+def test_brng_partial_coverage_falls_back_to_generic_text():
+    outputs = {**_FRAME_OUTPUTS_BASE,
+               'brng_analysis': _brng_payload(period_confidence="partial_coverage")}
+    html = gr.generate_frame_analysis_html(outputs, "JPC_AV_02222")
+
+    assert "Partial coverage:" in html
+    assert "Some analysis periods could not be examined." in html
+
+
+def test_brng_unknown_confidence_value_still_warns():
+    """A level added later must not render as if nothing were wrong."""
+    outputs = {**_FRAME_OUTPUTS_BASE,
+               'brng_analysis': _brng_payload(period_confidence="something_new")}
+    html = gr.generate_frame_analysis_html(outputs, "JPC_AV_02222")
+
+    assert "Reduced confidence:" in html

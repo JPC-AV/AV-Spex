@@ -72,10 +72,11 @@ class BRNGAnalysisResult:
     refinement_recommendations: Dict = None
     analysis_periods: List[Tuple[float, int]] = None
     period_summaries: List[Dict] = None
-    # How much the sampled periods can be trusted. 'last_resort' means period
-    # selection could not find non-black content and kept the least-black
-    # candidate anyway, so these numbers describe mostly-black frames.
-    period_confidence: str = 'normal'          # 'normal' | 'last_resort'
+    # How much the sampled periods can be trusted — see PERIOD_CONFIDENCE_LEVELS.
+    # 'partial_coverage': some periods could not be examined, so the result is
+    # incomplete. 'last_resort': the periods that were examined sit on black
+    # content, so the numbers describe black frames rather than picture.
+    period_confidence: str = 'normal'
     period_confidence_note: Optional[str] = None
 
 @dataclass
@@ -934,6 +935,32 @@ def probe_video_properties(video_path) -> Dict[str, Any]:
             'duration': 0, 'opencv_usable': False}
 
 
+# How far a BRNG result can be trusted, least to most compromised. 'normal' means
+# the intended sample was analyzed; 'partial_coverage' means some periods could not
+# be examined; 'last_resort' means the periods that *were* examined sit on black
+# content because no picture content could be sampled.
+PERIOD_CONFIDENCE_LEVELS = ('normal', 'partial_coverage', 'last_resort')
+
+
+def resolve_period_confidence(last_resort_note: str = None,
+                              coverage_note: str = None) -> Tuple[str, Optional[str]]:
+    """Fold the confidence signals into one level plus a note covering all of them.
+
+    Both can apply at once (a mostly-black sample where some periods also failed).
+    The level reports the more severe one — being measured on black content makes
+    the numbers wrong, whereas partial coverage only makes them incomplete — while
+    the note keeps every reason, so nothing is lost to the precedence choice.
+    """
+    notes = [n for n in (last_resort_note, coverage_note) if n]
+    if last_resort_note:
+        level = 'last_resort'
+    elif coverage_note:
+        level = 'partial_coverage'
+    else:
+        level = 'normal'
+    return level, (' '.join(notes) if notes else None)
+
+
 def is_valid_active_area(active_area) -> bool:
     """True if `active_area` is a usable (x, y, w, h) crop rectangle.
 
@@ -1758,6 +1785,8 @@ class DifferentialBRNGAnalyzer:
         
         # Store paths to temporary videos for thumbnail creation
         temp_video_paths = []
+        # Set when some (but not all) periods fail to produce comparison videos
+        coverage_note = None
 
         self._emit_progress(0)
 
@@ -1891,6 +1920,11 @@ class DifferentialBRNGAnalyzer:
                     f"  BRNG analysis covered {total_periods - periods_failed} of "
                     f"{total_periods} period(s); {periods_failed} could not be analyzed"
                 )
+                coverage_note = (
+                    f"Only {total_periods - periods_failed} of {total_periods} analysis "
+                    f"periods could be examined; violations may exist in the "
+                    f"{periods_failed} period(s) that failed."
+                )
 
             logger.info(f"  Analyzed {len(violations)} frames with potential violations across all periods\n")
         else:
@@ -1958,7 +1992,10 @@ class DifferentialBRNGAnalyzer:
                 pass
         
         self._emit_progress(100)
-        
+
+        confidence_level, confidence_note = resolve_period_confidence(
+            last_resort_note=period_confidence_note, coverage_note=coverage_note)
+
         return BRNGAnalysisResult(
             violations=violations,
             aggregate_patterns=aggregate_patterns,
@@ -1968,8 +2005,8 @@ class DifferentialBRNGAnalyzer:
             refinement_recommendations=aggregate_patterns.get('expansion_recommendations'),
             analysis_periods=analysis_periods if analysis_periods else None,
             period_summaries=period_summaries if period_summaries else None,
-            period_confidence='last_resort' if period_confidence_note else 'normal',
-            period_confidence_note=period_confidence_note
+            period_confidence=confidence_level,
+            period_confidence_note=confidence_note
         )
 
     def _create_comparison_videos_for_period(self, highlighted_path: Path, original_path: Path,
