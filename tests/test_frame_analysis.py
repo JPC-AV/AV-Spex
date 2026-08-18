@@ -895,3 +895,139 @@ def test_ffprobe_video_properties_returns_none_on_bad_dimensions(monkeypatch):
     monkeypatch.setattr(fa.subprocess, "run", lambda *a, **kw: completed)
 
     assert fa._ffprobe_video_properties("/v/in.mkv") is None
+
+
+# ===========================================================================
+# Active-area validation — a truthy tuple is not a valid crop
+# ===========================================================================
+
+@pytest.mark.parametrize("area", [
+    (0, 0, -1, -1),   # what OpenCV's -1 dimensions produced
+    (0, 0, 0, 0),     # what they produce now that -1 is gone
+    (25, 25, 0, 436),
+    (25, 25, 670, -5),
+    (-1, 0, 670, 436),
+    None,
+    (),
+    (0, 0, 720),      # wrong arity
+])
+def test_is_valid_active_area_rejects_unusable(area):
+    assert fa.is_valid_active_area(area) is False
+
+
+def test_is_valid_active_area_accepts_real_rectangle():
+    assert fa.is_valid_active_area((25, 25, 670, 436)) is True
+    assert fa.is_valid_active_area((0, 0, 720, 486)) is True
+
+
+def test_build_crop_filter_returns_empty_for_degenerate_area():
+    """crop=-1:-1:0:0 is what ffmpeg rejected with exit status 234."""
+    assert fa.build_crop_filter((0, 0, -1, -1)) == ""
+    assert fa.build_crop_filter((0, 0, 0, 0)) == ""
+    assert fa.build_crop_filter(None) == ""
+
+
+def test_build_crop_filter_formats_valid_area():
+    assert fa.build_crop_filter((25, 25, 670, 436)) == "crop=670:436:25:25,"
+    assert fa.build_crop_filter((25, 25, 670, 436), trailing_comma=False) == "crop=670:436:25:25"
+
+
+def test_sanitize_active_area_nulls_degenerate_and_keeps_good():
+    assert fa.sanitize_active_area((0, 0, -1, -1), "BRNG") is None
+    assert fa.sanitize_active_area(None) is None
+    assert fa.sanitize_active_area((25, 25, 670, 436)) == (25, 25, 670, 436)
+
+
+def test_comparison_video_command_omits_crop_when_area_degenerate(monkeypatch):
+    """The end-to-end guard: no `crop=-1:-1:0:0` can reach ffmpeg."""
+    analyzer = fa.DifferentialBRNGAnalyzer.__new__(fa.DifferentialBRNGAnalyzer)
+    analyzer.video_path = Path("/v/in.mkv")
+    analyzer.active_area = (0, 0, -1, -1)   # bypasses __init__ sanitizing
+    analyzer.signals = None
+
+    captured = []
+    monkeypatch.setattr(fa.subprocess, "run",
+                        lambda cmd, **kw: captured.append(cmd) or MagicMock())
+
+    analyzer._create_comparison_videos_for_period(
+        Path("/tmp/h.mp4"), Path("/tmp/o.mp4"), start_time=0.0, duration=60)
+
+    assert captured, "no ffmpeg command was built"
+    for cmd in captured:
+        joined = " ".join(cmd)
+        assert "crop=-1" not in joined
+        assert "crop=" not in joined, f"degenerate area still produced a crop: {joined}"
+
+
+def test_brng_analyzer_init_sanitizes_degenerate_border_data():
+    border = fa.BorderDetectionResult(
+        active_area=(0, 0, -1, -1), border_regions={},
+        detection_method="simple", quality_frame_hints=[],
+    )
+    analyzer = fa.DifferentialBRNGAnalyzer.__new__(fa.DifferentialBRNGAnalyzer)
+    analyzer.video_path = Path("/v/in.mkv")
+    analyzer.border_data = border
+    analyzer.active_area = fa.sanitize_active_area(border.active_area, "BRNG analysis")
+
+    assert analyzer.active_area is None, "degenerate area must not survive into analysis"
+
+
+# ===========================================================================
+# "Clean" must mean "examined and found nothing", not "never ran"
+# ===========================================================================
+
+def _brng_analyzer_for_periods(tmp_path, monkeypatch, create_ok):
+    analyzer = fa.DifferentialBRNGAnalyzer.__new__(fa.DifferentialBRNGAnalyzer)
+    analyzer.video_path = Path("/v/in.mkv")
+    analyzer.active_area = None
+    analyzer.signals = None
+    analyzer.check_cancelled = lambda: False
+    analyzer.width, analyzer.height = 720, 486
+    analyzer.fps, analyzer.total_frames, analyzer.duration = 29.97, 1000, 33.4
+    analyzer.opencv_usable = True
+    monkeypatch.setattr(
+        fa.DifferentialBRNGAnalyzer, "_create_comparison_videos_for_period",
+        lambda self, *a, **kw: create_ok)
+    return analyzer
+
+
+def test_all_periods_failing_returns_none_not_a_clean_result(tmp_path, monkeypatch):
+    """The George Blood false negative: 0 frames examined was reported as clean."""
+    analyzer = _brng_analyzer_for_periods(tmp_path, monkeypatch, create_ok=False)
+
+    result = analyzer.analyze_with_differential_detection(
+        output_dir=tmp_path,
+        analysis_periods=[(0.0, 60), (115.0, 60), (215.0, 60)],
+    )
+
+    assert result is None, (
+        "every period failed, so returning a BRNGAnalysisResult with no "
+        "violations would be reported as 'No BRNG violations detected'"
+    )
+
+
+def test_partial_period_failure_still_returns_a_result(tmp_path, monkeypatch):
+    """One bad period out of three degrades; it must not discard the good ones."""
+    calls = {"n": 0}
+
+    def flaky(self, *a, **kw):
+        calls["n"] += 1
+        return calls["n"] != 1        # first period fails, rest succeed
+
+    analyzer = _brng_analyzer_for_periods(tmp_path, monkeypatch, create_ok=True)
+    monkeypatch.setattr(
+        fa.DifferentialBRNGAnalyzer, "_create_comparison_videos_for_period", flaky)
+    empty_stats = {
+        "qctools_frames_targeted": 0, "frames_mapped_to_period": 0,
+        "total_samples_analyzed": 0, "frames_checked": 0, "violations_found": 0,
+    }
+    monkeypatch.setattr(
+        fa.DifferentialBRNGAnalyzer, "_analyze_differential_violations",
+        lambda self, *a, **kw: ([], empty_stats))
+
+    result = analyzer.analyze_with_differential_detection(
+        output_dir=tmp_path,
+        analysis_periods=[(0.0, 60), (115.0, 60), (215.0, 60)],
+    )
+
+    assert result is not None

@@ -929,6 +929,44 @@ def probe_video_properties(video_path) -> Dict[str, Any]:
             'duration': 0, 'opencv_usable': False}
 
 
+def is_valid_active_area(active_area) -> bool:
+    """True if `active_area` is a usable (x, y, w, h) crop rectangle.
+
+    Truthiness is not validity: (0, 0, -1, -1) — what border detection produced
+    when OpenCV reported -1 dimensions — passes `if active_area:` but formats to
+    `crop=-1:-1:0:0`, which ffmpeg rejects with exit status 234.
+    """
+    if not active_area or len(active_area) != 4:
+        return False
+    x, y, w, h = active_area
+    return w > 0 and h > 0 and x >= 0 and y >= 0
+
+
+def sanitize_active_area(active_area, context: str = ""):
+    """Return `active_area` if usable, else None (logging why, once per caller).
+
+    Returning None rather than a bad tuple means every downstream
+    `if active_area:` naturally degrades to whole-frame analysis instead of
+    emitting a crop filter ffmpeg cannot parse.
+    """
+    if active_area is None or is_valid_active_area(active_area):
+        return active_area
+    where = f" in {context}" if context else ""
+    logger.warning(
+        f"  Ignoring unusable active area {tuple(active_area)}{where} — "
+        f"border detection could not measure the frame; analyzing the full frame instead"
+    )
+    return None
+
+
+def build_crop_filter(active_area, trailing_comma: bool = True) -> str:
+    """Format `active_area` as an ffmpeg crop filter, or '' if it isn't usable."""
+    if not is_valid_active_area(active_area):
+        return ""
+    x, y, w, h = active_area
+    return f"crop={w}:{h}:{x}:{y}{',' if trailing_comma else ''}"
+
+
 def _opencv_has_ffmpeg() -> bool:
     """True if this OpenCV build has the FFmpeg videoio backend compiled in."""
     try:
@@ -1010,7 +1048,14 @@ class SophisticatedBorderDetector:
                                      violations: List[FrameViolation] = None) -> BorderDetectionResult:
         """Sophisticated border detection with quality assessment"""
         cap = cv2.VideoCapture(self.video_path)
-        
+        if not cap.isOpened():
+            cap.release()
+            logger.warning(
+                "  OpenCV cannot decode this file, so no frames can be inspected — "
+                "falling back to fixed-size border detection"
+            )
+            return self._detect_simple_borders()
+
         # Select quality frames for analysis
         self._emit_progress(0)
         quality_frames = self._select_quality_frames(cap, violations)
@@ -1413,7 +1458,11 @@ class SophisticatedBorderDetector:
         
         # Open video for frame selection
         cap = cv2.VideoCapture(self.video_path)
-        
+        if not cap.isOpened():
+            cap.release()
+            logger.warning("  OpenCV cannot decode this file — no representative frame available")
+            return None
+
         # Check frames every 1 second in the search window
         check_interval = max(1, int(self.fps))
         frame_indices = list(range(start_frame, end_frame, check_interval))
@@ -1450,6 +1499,9 @@ class SophisticatedBorderDetector:
             # Final fallback - use target frame
             logger.warning(f"⚠️ No suitable frame found, using target frame as fallback\n")
             cap = cv2.VideoCapture(self.video_path)
+            if not cap.isOpened():
+                cap.release()
+                return None
             fallback_frame = target_frame if target_frame < self.total_frames else self.total_frames // 2
             cap.set(cv2.CAP_PROP_POS_FRAMES, fallback_frame)
             ret, frame = cap.read()
@@ -1653,7 +1705,8 @@ class DifferentialBRNGAnalyzer:
                  check_cancelled_fn=None, signals=None):
         self.video_path = Path(video_path)
         self.border_data = border_data
-        self.active_area = border_data.active_area if border_data else None
+        self.active_area = sanitize_active_area(
+            border_data.active_area if border_data else None, "BRNG analysis")
         self.check_cancelled = check_cancelled_fn or (lambda: False)
         self.signals = signals
         self._init_video_properties()
@@ -1707,7 +1760,8 @@ class DifferentialBRNGAnalyzer:
             all_violations = []
             period_summaries = []
             total_periods = len(analysis_periods)
-            
+            periods_failed = 0
+
             for i, (start_time, duration) in enumerate(analysis_periods):
                 if self.check_cancelled():
                     break
@@ -1762,6 +1816,7 @@ class DifferentialBRNGAnalyzer:
                     highlighted_path, original_path, start_time, duration,
                     progress_range=(period_base, period_vid_done)):
                     logger.error(f"Failed to create comparison videos for period {i+1}")
+                    periods_failed += 1
                     continue
                 
                 self._emit_progress(period_vid_done)
@@ -1812,6 +1867,24 @@ class DifferentialBRNGAnalyzer:
                 self._emit_progress(period_end)
             
             violations = all_violations
+
+            # Every period failing means nothing was examined. Returning an empty
+            # violation list here would be reported as "No BRNG violations
+            # detected" — a clean bill of health for an analysis that never ran.
+            if periods_failed and periods_failed == total_periods:
+                logger.error(
+                    f"  BRNG analysis could not run: comparison video creation failed "
+                    f"for all {total_periods} period(s), so no frames were examined. "
+                    f"This is NOT a clean result — no conclusion can be drawn about "
+                    f"out-of-range values."
+                )
+                return None
+            if periods_failed:
+                logger.warning(
+                    f"  BRNG analysis covered {total_periods - periods_failed} of "
+                    f"{total_periods} period(s); {periods_failed} could not be analyzed"
+                )
+
             logger.info(f"  Analyzed {len(violations)} frames with potential violations across all periods\n")
         else:
             # Original single-period analysis (similar handling)
@@ -1924,12 +1997,9 @@ class DifferentialBRNGAnalyzer:
                                             start_time: float, duration: int,
                                             progress_range: Tuple[int, int] = None) -> bool:
         """Create highlighted and original versions for a specific time period"""
-        # Build crop filter if active area exists
-        crop_filter = ""
-        if self.active_area:
-            x, y, w, h = self.active_area
-            crop_filter = f"crop={w}:{h}:{x}:{y},"
-        
+        # Build crop filter if a usable active area exists
+        crop_filter = build_crop_filter(self.active_area)
+
         # Create highlighted version for this period
         highlighted_cmd = [
             "ffmpeg",
@@ -1991,7 +2061,19 @@ class DifferentialBRNGAnalyzer:
         
         cap_h = cv2.VideoCapture(str(highlighted_path))
         cap_o = cv2.VideoCapture(str(original_path))
-        
+
+        if not cap_h.isOpened() or not cap_o.isOpened():
+            # Without this, a failed open yields total_frames of -1 and the
+            # sampling loop quietly returns zero violations — indistinguishable
+            # from a genuinely clean period.
+            logger.error(
+                f"  Could not open the comparison videos for this period — "
+                f"no frames can be compared, so this period is not analyzed"
+            )
+            cap_h.release()
+            cap_o.release()
+            return violations
+
         # Get video properties
         total_frames = int(cap_h.get(cv2.CAP_PROP_FRAME_COUNT))
         fps = cap_h.get(cv2.CAP_PROP_FPS)
@@ -3152,13 +3234,15 @@ class IntegratedSignalstatsAnalyzer:
             logger.debug(f"    Period {i+1}: {start_tc} - {end_tc} ({duration}s)")
         
         # Log active area vs full frame comparison
-        active_area = border_data.active_area if border_data else None
+        active_area = sanitize_active_area(
+            border_data.active_area if border_data else None, "signalstats analysis")
         if active_area:
             x, y, w, h = active_area
             full_w, full_h = self.width, self.height
-            crop_pct = (w * h) / (full_w * full_h) * 100
             logger.debug(f"  Comparison mode: Full frame ({full_w}x{full_h}) vs Active area ({w}x{h} at {x},{y})")
-            logger.info(f"  Active area is {crop_pct:.1f}% of full frame\n")
+            if full_w > 0 and full_h > 0:
+                crop_pct = (w * h) / (full_w * full_h) * 100
+                logger.info(f"  Active area is {crop_pct:.1f}% of full frame\n")
         else:
             logger.debug(f"  Comparison mode: Full frame analysis only (no border detection)")
         
@@ -3777,10 +3861,7 @@ class IntegratedSignalstatsAnalyzer:
         emitted as frames stream out of ffprobe, mapped into that subrange.
         """
 
-        crop_filter = ""
-        if active_area:
-            x, y, w, h = active_area
-            crop_filter = f"crop={w}:{h}:{x}:{y},"
+        crop_filter = build_crop_filter(active_area)
 
         # Use movie filter's seek_point parameter for fast seeking
         # trim=duration limits output to N seconds after seek point
@@ -3957,7 +4038,9 @@ class EnhancedFrameAnalysis:
         if not ss_results.max_brng or ss_results.max_brng <= 0:
             return
 
-        active_area = border_results.active_area if border_results else None
+        active_area = sanitize_active_area(
+            border_results.active_area if border_results else None,
+            "signalstats representative frames")
 
         thumb_dir = self.output_dir / "signalstats_frames"
         thumb_dir.mkdir(exist_ok=True)
@@ -3994,10 +4077,7 @@ class EnhancedFrameAnalysis:
         Both halves are cropped to active_area when provided. Returns the JPG path,
         or None on failure.
         """
-        crop_prefix = ""
-        if active_area:
-            x, y, w, h = active_area
-            crop_prefix = f"crop={w}:{h}:{x}:{y},"
+        crop_prefix = build_crop_filter(active_area)
 
         # Single seek + split: left half is the (cropped) original, right half is
         # the same frame with the magenta out-of-range highlight, hstacked.
@@ -6113,7 +6193,7 @@ class EnhancedFrameAnalysis:
         # Border detection with frame dimensions
         if 'initial_borders' in results:
             borders = results.get('final_borders', results['initial_borders'])
-            if borders['active_area']:
+            if is_valid_active_area(borders['active_area']):
                 x, y, w, h = borders['active_area']
                 lines.append(f"\nBorder Detection:")
                 lines.append(f"  Active area: {w}x{h} at ({x},{y})")
