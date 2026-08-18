@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "AV_Spex"
-version = "1.4.6"
+version = "1.4.7"
 description = "A Python project written for NMAAHC media conservation lab"
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -24,7 +24,15 @@ dependencies = [
     "toml==0.10.2",
     "PyQt6>=6.7.1",
     "numpy>=2.0.0",
-    "opencv-python-headless>=4.10.0",
+    # macOS x86_64 wheels stopped bundling FFmpeg at 4.13.0.90 — they ship no
+    # libavcodec/libavformat and report "FFMPEG: NO", leaving AVFoundation as
+    # the only videoio backend, which cannot open FFV1/Matroska. cv2.VideoCapture
+    # then fails on every source file and reports -1 for width/height, which
+    # frame_analysis turns into a degenerate crop. 4.12.0.88 is the last x86_64
+    # release with FFmpeg; arm64 wheels are unaffected and stay unpinned.
+    # (PEP 508 has no unary "not", hence the De Morgan form on the second entry.)
+    "opencv-python-headless>=4.10.0,<4.13; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "opencv-python-headless>=4.10.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
     "scipy>=1.14.0",
     "matplotlib>=3.9.0",
 ]

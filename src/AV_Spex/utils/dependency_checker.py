@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import platform
 from dataclasses import dataclass
-from typing import List, Dict, Optional, Tuple
+from typing import Callable, List, Dict, Optional, Tuple
 from enum import Enum
 
 from PyQt6.QtWidgets import (
@@ -36,6 +36,47 @@ class DependencyInfo:
     status: DependencyStatus = DependencyStatus.CHECKING
     version_found: Optional[str] = None
     error_message: Optional[str] = None
+    # For capabilities that aren't a command on PATH (a bundled library's build
+    # options, say). Returns (ok, detail); when set it replaces the which() lookup.
+    check_fn: Optional[Callable[[], Tuple[bool, str]]] = None
+
+
+OPENCV_FFMPEG_HINT = (
+    "Reinstall AV-Spex built against an OpenCV with FFmpeg. macOS x86_64 "
+    "opencv-python wheels from 4.13.0.90 onward ship without it; pin "
+    "opencv-python-headless<4.13 for Intel builds, or use the Apple Silicon build."
+)
+
+
+def opencv_ffmpeg_support() -> Tuple[bool, str]:
+    """Report whether the bundled OpenCV can decode video at all.
+
+    OpenCV without the FFmpeg backend falls back to AVFoundation on macOS, which
+    has no Matroska demuxer and no FFV1 decoder — so every VideoCapture on our
+    source files fails. That is silent at the C++ level, so it is surfaced here
+    at startup rather than being discovered as an empty analysis afterwards.
+    """
+    try:
+        import cv2
+    except ImportError as e:
+        return False, f"OpenCV is not importable: {e}"
+
+    version = getattr(cv2, "__version__", "unknown")
+    try:
+        for line in cv2.getBuildInformation().splitlines():
+            if 'FFMPEG' in line and ':' in line:
+                enabled = line.split(':', 1)[1].strip().upper().startswith('YES')
+                if enabled:
+                    return True, f"OpenCV {version} (FFmpeg backend available)"
+                return False, (
+                    f"OpenCV {version} was built without FFmpeg, so it cannot "
+                    f"open FFV1/Matroska files. Border detection, BRNG comparison "
+                    f"and duplicate-frame verification will be skipped."
+                )
+    except Exception as e:
+        return False, f"Could not read the OpenCV build configuration: {e}"
+
+    return False, f"OpenCV {version} reports no FFMPEG entry in its build information"
 
 class DependencyCheckWorker(QThread):
     """Worker thread for checking dependencies without blocking the GUI"""
@@ -58,8 +99,19 @@ class DependencyCheckWorker(QThread):
             if self._cancelled:
                 return
                 
+            # Capability checks (bundled libraries) run their own probe
+            if dep.check_fn is not None:
+                ok, detail = dep.check_fn()
+                dep.version_found = detail
+                if ok:
+                    dep.status = DependencyStatus.FOUND
+                else:
+                    # Present, but not usable for what we need — not "missing"
+                    dep.status = DependencyStatus.VERSION_ISSUE
+                    dep.error_message = detail
+                    all_good = False
             # Check if command exists
-            if not shutil.which(dep.command):
+            elif not shutil.which(dep.command):
                 dep.status = DependencyStatus.NOT_FOUND
                 dep.error_message = f"{dep.command} command not found in PATH"
                 all_good = False
@@ -169,9 +221,17 @@ class DependencyCheckDialog(QDialog):
                 version_command="mkvalidator --version",
                 description="Required for Matroska file structure validation",
                 install_hint="Install via: brew install mkvalidator (macOS) or visit https://www.matroska.org/downloads/mkvalidator.html"
+            ),
+            DependencyInfo(
+                name="OpenCV video decoding",
+                command="",
+                description="Bundled with AV-Spex; required for border detection, "
+                            "BRNG comparison and duplicate-frame verification",
+                install_hint=OPENCV_FFMPEG_HINT,
+                check_fn=opencv_ffmpeg_support
             )
         ]
-    
+
     def setup_ui(self):
         """Set up the dialog UI"""
         layout = QVBoxLayout(self)
@@ -349,13 +409,21 @@ class DependencyManager:
         all_good = True
         
         for dep in dependencies:
-            if shutil.which(dep.command):
+            if dep.check_fn is not None:
+                ok, detail = dep.check_fn()
+                if ok:
+                    print(f"✅ {dep.name}: {detail}")
+                else:
+                    print(f"⚠️  {dep.name}: {detail}")
+                    print(f"   {dep.install_hint}")
+                    all_good = False
+            elif shutil.which(dep.command):
                 print(f"✅ {dep.name}: Found")
             else:
                 print(f"❌ {dep.name}: Not found")
                 print(f"   {dep.install_hint}")
                 all_good = False
-        
+
         return all_good
     
     @staticmethod
@@ -398,6 +466,14 @@ class DependencyManager:
                 name="mkvalidator",
                 command="mkvalidator",
                 install_hint="Install via: brew install mkvalidator (macOS) or visit https://www.matroska.org/downloads/mkvalidator.html"
+            ),
+            DependencyInfo(
+                name="OpenCV video decoding",
+                command="",
+                description="Bundled with AV-Spex; required for border detection, "
+                            "BRNG comparison and duplicate-frame verification",
+                install_hint=OPENCV_FFMPEG_HINT,
+                check_fn=opencv_ffmpeg_support
             )
         ]
 
@@ -422,5 +498,12 @@ def cli_deps_check():
         if not check_external_dependency(command):
             logger.critical(f"Error: {command} not found. Please install it.")
             return False
-    
+
+    # Not fatal — everything except the frame-reading analyses still works — but
+    # it has to be said up front, or the affected checks silently report nothing.
+    ffmpeg_ok, detail = opencv_ffmpeg_support()
+    if not ffmpeg_ok:
+        logger.warning(f"Warning: {detail}")
+        logger.warning(f"  {OPENCV_FFMPEG_HINT}")
+
     return True
