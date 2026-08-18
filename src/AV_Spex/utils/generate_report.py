@@ -5150,12 +5150,31 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                 assessment_icon = '✅'
             
             html += f"""
-            <div style="background-color: {assessment_bg}; padding: 12px 16px; margin: 10px 0; 
+            <div style="background-color: {assessment_bg}; padding: 12px 16px; margin: 10px 0;
                         border-left: 4px solid {assessment_border}; border-radius: 0 4px 4px 0;">
                 <p style="margin: 0; font-size: 14px;"><strong>{assessment_icon} Assessment:</strong> {assessment}</p>
             </div>
             """
-            
+
+            # ── Low-confidence caveat ──
+            # Period selection could not find non-black content and analyzed the
+            # least-black candidate anyway, so the numbers below describe black
+            # frames. Say so before the reader interprets them.
+            if brng_data.get('period_confidence') == 'last_resort':
+                confidence_note = brng_data.get('period_confidence_note') or (
+                    "Analysis periods could not be placed on picture content."
+                )
+                html += f"""
+            <div style="background-color: #fff3cd; padding: 12px 16px; margin: 10px 0;
+                        border-left: 4px solid #bf971b; border-radius: 0 4px 4px 0;">
+                <p style="margin: 0; font-size: 14px;"><strong>⚠️ Low confidence:</strong> {confidence_note}</p>
+                <p style="margin: 6px 0 0 0; font-size: 13px; color: #6b5a3e;">
+                    Treat the values below as indicative only — they are not a
+                    representative sample of this file's picture content.
+                </p>
+            </div>
+            """
+
             # ── Period-by-Period Analysis ──
             if period_summaries:
                 # Calculate overall time range

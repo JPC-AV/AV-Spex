@@ -72,6 +72,11 @@ class BRNGAnalysisResult:
     refinement_recommendations: Dict = None
     analysis_periods: List[Tuple[float, int]] = None
     period_summaries: List[Dict] = None
+    # How much the sampled periods can be trusted. 'last_resort' means period
+    # selection could not find non-black content and kept the least-black
+    # candidate anyway, so these numbers describe mostly-black frames.
+    period_confidence: str = 'normal'          # 'normal' | 'last_resort'
+    period_confidence_note: Optional[str] = None
 
 @dataclass
 class SignalstatsResult:
@@ -1733,7 +1738,8 @@ class DifferentialBRNGAnalyzer:
                                        skip_start_seconds: float = 0,
                                        qctools_violations: List[FrameViolation] = None,
                                        analysis_periods: List[Tuple[float, int]] = None,
-                                       upstream_context: 'UpstreamAnalysisContext' = None) -> BRNGAnalysisResult:
+                                       upstream_context: 'UpstreamAnalysisContext' = None,
+                                       period_confidence_note: str = None) -> BRNGAnalysisResult:
         """
         Perform differential BRNG detection by creating highlighted and original versions.
         Now supports analyzing specific periods from signalstats.
@@ -1741,6 +1747,8 @@ class DifferentialBRNGAnalyzer:
         Args:
             upstream_context: Findings from border detection and signalstats that
                 inform sensitivity, sampling density, and thumbnail selection.
+            period_confidence_note: Set when period selection had to fall back to a
+                mostly-black window; recorded on the result so the report can caveat it.
         """
         output_dir = Path(output_dir)
         output_dir.mkdir(exist_ok=True)
@@ -1959,9 +1967,11 @@ class DifferentialBRNGAnalyzer:
             requires_border_adjustment=aggregate_patterns.get('requires_border_adjustment', False),
             refinement_recommendations=aggregate_patterns.get('expansion_recommendations'),
             analysis_periods=analysis_periods if analysis_periods else None,
-            period_summaries=period_summaries if period_summaries else None
+            period_summaries=period_summaries if period_summaries else None,
+            period_confidence='last_resort' if period_confidence_note else 'normal',
+            period_confidence_note=period_confidence_note
         )
-    
+
     def _create_comparison_videos_for_period(self, highlighted_path: Path, original_path: Path,
                                             start_time: float, duration: int,
                                             progress_range: Tuple[int, int] = None) -> bool:
@@ -3126,6 +3136,11 @@ class IntegratedSignalstatsAnalyzer:
         self._init_video_properties()
         self._brng_cache = None
         self._brng_cache_active_area = None
+        # Set by _validate_periods_against_black_segments when it has to keep a
+        # mostly-black period rather than return nothing. Sticky for the whole
+        # run (validation is called from several places); cleared by
+        # EnhancedFrameAnalysis.analyze() at the start of each file.
+        self.last_resort_period_note = None
 
     def _emit_progress(self, percent: int):
         """Emit signalstats analysis progress as a percentage (0-100)."""
@@ -3677,6 +3692,15 @@ class IntegratedSignalstatsAnalyzer:
                 f"be treated as low confidence."
             )
             validated.append((start, dur))
+            # Sticky: only ever set, never cleared here, since validation runs at
+            # several points in a single analysis and any one of them firing means
+            # the sampled periods are compromised.
+            self.last_resort_period_note = (
+                f"No period free of black content could be found. The least-black "
+                f"candidate ({start_tc}, {overlap_pct:.0f}% black) was analyzed instead, "
+                f"so these results describe mostly-black frames rather than picture "
+                f"content."
+            )
 
         return validated
 
@@ -5217,6 +5241,9 @@ class EnhancedFrameAnalysis:
         if self.signals and hasattr(self.signals, 'frame_analysis_progress'):
             self.signals.frame_analysis_progress.emit(0)
 
+        # Clear the sticky last-resort marker so it reflects this file only
+        self.signalstats_analyzer.last_resort_period_note = None
+
         frame_config = self.checks_config.outputs.frame_analysis
         
         # Check which steps are enabled (handle both bool and str types)
@@ -5538,7 +5565,8 @@ class EnhancedFrameAnalysis:
                 skip_start_seconds=color_bars_end_time,
                 qctools_violations=violations,
                 analysis_periods=analysis_periods,
-                upstream_context=upstream_context
+                upstream_context=upstream_context,
+                period_confidence_note=self.signalstats_analyzer.last_resort_period_note
             )
             results['brng_analysis'] = asdict(brng_results) if brng_results else None
             
@@ -5686,7 +5714,8 @@ class EnhancedFrameAnalysis:
                         skip_start_seconds=color_bars_end_time,
                         qctools_violations=violations,
                         analysis_periods=analysis_periods,
-                        upstream_context=upstream_context
+                        upstream_context=upstream_context,
+                        period_confidence_note=self.signalstats_analyzer.last_resort_period_note
                     )
 
                     if self.check_cancelled():

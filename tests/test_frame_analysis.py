@@ -1109,3 +1109,109 @@ def test_differential_analyzer_has_no_stale_method_reference():
         "_create_comparison_videos was renamed to _create_comparison_videos_for_period "
         "(and its start/duration args swapped) in commit 90aa139"
     )
+
+
+# ===========================================================================
+# Last-resort period confidence, validator → BRNGAnalysisResult
+# ===========================================================================
+
+def test_brng_result_defaults_to_normal_confidence():
+    result = fa.BRNGAnalysisResult(
+        violations=[], aggregate_patterns={}, actionable_report={},
+        thumbnails=[], requires_border_adjustment=False,
+    )
+    assert result.period_confidence == "normal"
+    assert result.period_confidence_note is None
+
+
+def test_validator_records_note_when_it_keeps_a_black_period():
+    fake_self = MagicMock()
+    fake_self.duration = 1800.0
+    fake_self.last_resort_period_note = None
+    fake_self._shift_period_away_from_black = ISA._shift_period_away_from_black.__get__(fake_self)
+    fake_self._fit_period_in_content_gap = lambda *a, **kw: None
+
+    ISA._validate_periods_against_black_segments(
+        fake_self, periods=[(1435.0, 60), (1765.0, 60)],
+        black_segments=[(0.0, 1799.0)], effective_start=10.0, period_duration=60,
+    )
+
+    note = fake_self.last_resort_period_note
+    assert note, "the last-resort fallback must record why confidence is reduced"
+    assert "black" in note.lower()
+
+
+def test_validator_leaves_note_unset_when_periods_are_clean():
+    fake_self = MagicMock()
+    fake_self.duration = 1800.0
+    fake_self.last_resort_period_note = None
+
+    ISA._validate_periods_against_black_segments(
+        fake_self, periods=[(100.0, 60)], black_segments=[(0.0, 10.0)],
+        effective_start=0.0, period_duration=60,
+    )
+
+    assert fake_self.last_resort_period_note is None
+
+
+def test_validator_note_is_sticky_across_calls():
+    """Validation runs at several points; one fallback taints the whole run."""
+    fake_self = MagicMock()
+    fake_self.duration = 1800.0
+    fake_self.last_resort_period_note = None
+    fake_self._shift_period_away_from_black = ISA._shift_period_away_from_black.__get__(fake_self)
+    fake_self._fit_period_in_content_gap = lambda *a, **kw: None
+
+    # First call trips the fallback
+    ISA._validate_periods_against_black_segments(
+        fake_self, [(1765.0, 60)], [(0.0, 1799.0)], 10.0, 60)
+    first = fake_self.last_resort_period_note
+    assert first
+
+    # A later clean call must not erase it
+    ISA._validate_periods_against_black_segments(
+        fake_self, [(100.0, 60)], [(0.0, 10.0)], 0.0, 60)
+    assert fake_self.last_resort_period_note == first
+
+
+def _stub_brng_analyzer():
+    analyzer = fa.DifferentialBRNGAnalyzer.__new__(fa.DifferentialBRNGAnalyzer)
+    analyzer.video_path = Path("/v/in.mkv")
+    analyzer.active_area = None
+    analyzer.signals = None
+    analyzer.check_cancelled = lambda: False
+    analyzer._create_comparison_videos_for_period = lambda *a, **kw: True
+    analyzer._analyze_differential_violations = lambda *a, **kw: ([], {
+        "qctools_frames_targeted": 0, "frames_mapped_to_period": 0,
+        "total_samples_analyzed": 0, "frames_checked": 0, "violations_found": 0,
+    })
+    return analyzer
+
+
+def test_confidence_note_reaches_the_result(tmp_path):
+    result = _stub_brng_analyzer().analyze_with_differential_detection(
+        output_dir=tmp_path, analysis_periods=[(1765.0, 60)],
+        period_confidence_note="mostly black",
+    )
+    assert result.period_confidence == "last_resort"
+    assert result.period_confidence_note == "mostly black"
+
+
+def test_no_note_means_normal_confidence(tmp_path):
+    result = _stub_brng_analyzer().analyze_with_differential_detection(
+        output_dir=tmp_path, analysis_periods=[(100.0, 60)],
+    )
+    assert result.period_confidence == "normal"
+    assert result.period_confidence_note is None
+
+
+def test_confidence_survives_asdict_for_the_report(tmp_path):
+    """The report reads results['brng_analysis'], which is asdict() output."""
+    from dataclasses import asdict
+    result = _stub_brng_analyzer().analyze_with_differential_detection(
+        output_dir=tmp_path, analysis_periods=[(1765.0, 60)],
+        period_confidence_note="mostly black",
+    )
+    data = asdict(result)
+    assert data["period_confidence"] == "last_resort"
+    assert data["period_confidence_note"] == "mostly black"
