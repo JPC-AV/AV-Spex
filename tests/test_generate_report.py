@@ -1105,3 +1105,96 @@ def test_make_tone_leak_html_clean_shows_green_status(tmp_path):
 
 def test_make_tone_leak_html_missing_summary_returns_none(tmp_path):
     assert gr.make_tone_leak_html(str(tmp_path / "nope.csv"), None) is None
+
+
+# ===========================================================================
+# BRNG low-confidence caveat banner
+# ===========================================================================
+
+_FRAME_OUTPUTS_BASE = {
+    'border_visualization': None, 'border_data': None, 'brng_analysis': None,
+    'brng_thumbnails': [], 'signalstats_analysis': None,
+    'enhanced_frame_analysis': None, 'dropped_sample_spectrogram': None,
+    'dropped_sample_detection': None, 'duplicate_frame_detection': None,
+    'initial_brng_analysis': None,
+}
+
+
+def _brng_payload(**extra):
+    payload = {
+        "actionable_report": {"overall_assessment": "No BRNG violations detected",
+                              "summary_statistics": {}},
+        "aggregate_patterns": {}, "violations": [],
+        "period_summaries": [{"period_num": 1, "start_time": 1765.0,
+                              "end_time": 1825.0, "violations_found": 0,
+                              "frames_checked": 10}],
+        "analysis_periods": [[1765.0, 60]],
+    }
+    payload.update(extra)
+    return payload
+
+
+def test_brng_last_resort_periods_render_a_low_confidence_caveat():
+    """A mostly-black sample must not read like a normal clean result."""
+    outputs = {**_FRAME_OUTPUTS_BASE, 'brng_analysis': _brng_payload(
+        period_confidence="last_resort",
+        period_confidence_note="No period free of black content could be found.",
+    )}
+    html = gr.generate_frame_analysis_html(outputs, "JPC_AV_02222")
+
+    assert "Low confidence:" in html
+    assert "No period free of black content could be found." in html
+
+
+def test_brng_normal_confidence_renders_no_caveat():
+    outputs = {**_FRAME_OUTPUTS_BASE,
+               'brng_analysis': _brng_payload(period_confidence="normal")}
+    assert "Low confidence:" not in gr.generate_frame_analysis_html(outputs, "JPC_AV_02222")
+
+
+def test_brng_caveat_absent_for_results_predating_the_field():
+    """Older sidecars have no period_confidence key at all."""
+    outputs = {**_FRAME_OUTPUTS_BASE, 'brng_analysis': _brng_payload()}
+    assert "Low confidence:" not in gr.generate_frame_analysis_html(outputs, "JPC_AV_02222")
+
+
+def test_brng_caveat_falls_back_to_generic_text_without_a_note():
+    outputs = {**_FRAME_OUTPUTS_BASE,
+               'brng_analysis': _brng_payload(period_confidence="last_resort")}
+    html = gr.generate_frame_analysis_html(outputs, "JPC_AV_02222")
+
+    assert "Low confidence:" in html
+    assert "could not be placed on picture content" in html
+
+
+def test_brng_partial_coverage_renders_its_own_caveat():
+    """Incomplete is a different claim from wrong — the wording must differ."""
+    outputs = {**_FRAME_OUTPUTS_BASE, 'brng_analysis': _brng_payload(
+        period_confidence="partial_coverage",
+        period_confidence_note="Only 2 of 3 analysis periods could be examined.",
+    )}
+    html = gr.generate_frame_analysis_html(outputs, "JPC_AV_02222")
+
+    assert "Partial coverage:" in html
+    assert "Only 2 of 3 analysis periods could be examined." in html
+    # Must not claim the sample is unrepresentative — the analyzed periods are valid
+    assert "Low confidence:" not in html
+    assert "indicative only" not in html
+
+
+def test_brng_partial_coverage_falls_back_to_generic_text():
+    outputs = {**_FRAME_OUTPUTS_BASE,
+               'brng_analysis': _brng_payload(period_confidence="partial_coverage")}
+    html = gr.generate_frame_analysis_html(outputs, "JPC_AV_02222")
+
+    assert "Partial coverage:" in html
+    assert "Some analysis periods could not be examined." in html
+
+
+def test_brng_unknown_confidence_value_still_warns():
+    """A level added later must not render as if nothing were wrong."""
+    outputs = {**_FRAME_OUTPUTS_BASE,
+               'brng_analysis': _brng_payload(period_confidence="something_new")}
+    html = gr.generate_frame_analysis_html(outputs, "JPC_AV_02222")
+
+    assert "Reduced confidence:" in html
