@@ -116,7 +116,7 @@ av-spex --help
 
 ## GUI Usage
 
-If using the homebrew/cli verison, launch the GUI with the command:
+If using the homebrew/cli version, launch the GUI with the command:
 ```bash
 av-spex-gui
 ```
@@ -139,9 +139,10 @@ The Import tab is where you select input directories for processing and manage c
 
 The Checks tab controls which tools and processing steps are run. It includes:
 
-- **Checks Profiles**: Apply a preset profile (Step 1, Step 2, or Off) that configures a predefined set of tool options.
-  - **Step 1**: Run and check ExifTool, FFprobe, MediaInfo, MediaTrace, and MediaConch; embed and output fixity
-  - **Step 2**: Run QCTools and qct-parse (bar detection, evaluate bars, thumbnail export); validate fixity; generate HTML report
+- **Checks Profiles**: Apply a preset profile that configures a predefined set of tool options.
+  - **Step 1**: Run and check ExifTool, FFprobe, MediaInfo, MediaTrace, mkvalidator, and MediaConch; embed and output fixity
+  - **Step 2**: Run QCTools and qct-parse (bar detection, evaluate bars, thumbnail export, audio analysis, clamped levels, chroma phase errors) plus CLAMS bars/tone detection and frame analysis (bitplane check, border detection, BRNG, signalstats); check fixity and validate stream fixity; generate the HTML report
+  - **Vendor**: Run the metadata tools and MediaConch without comparing them against Spex values, embed stream fixity, and generate the HTML report — for checking vendor-supplied files before the full QC pass
   - **Off**: Turn off all tools
 - **Checks Options**: Enable or disable individual tools and checks using checkboxes. Each tool has a **Run Tool** option (generates a sidecar file) and a **Check Tool** option (compares the sidecar output against expected Spex values).
 
@@ -169,7 +170,7 @@ The Complex tab configures the advanced analysis steps — typically run during 
 
 - **QCTools Report**: Run QCTools on the input video to generate the per-frame report that many of the checks below read, and set the report's file extension (`qctools.xml.gz` or `qctools.mkv`). If a report already exists in the `_qc_metadata` or `_vrecord_metadata` directory, it is reused instead of re-running.
 - **Color Bars & Tone**:
-  - **Detect Color Bars**: Find SMPTE color bars in the video content (via qct-parse). The detected section is used downstream to skip bars in BRNG analysis and trim them from the access file. Its sub-options **Evaluate Color Bars** (compare program content against the detected bars) and **Export Thumbnails** (save thumbnails of failing frames) become available when detection is on.
+  - **Detect Color Bars**: Find SMPTE color bars in the video content (via qct-parse). The detected section is used downstream to skip bars in BRNG analysis and trim them from the access file. Its sub-options **Evaluate Color Bars** (compare program content against a reference — either this file's own detected bars or standard SMPTE values) and **Export Thumbnails** (save thumbnails of failing frames) become available when detection is on.
   - **CLAMS Bars + Tone Detection**: Run the CLAMS SSIM-based SMPTE bars detector and cross-correlation tone detector together as one step, alongside qct-parse for side-by-side comparison (see [Audio Analysis & CLAMS Detection](#audio-analysis--clams-detection) below)
 - **Video Signal Checks** (see [Frame Analysis](#frame-analysis) below for details on the frame analysis sub-steps):
   - **Detect Clamped Levels**: Broadcast-range level clamping from the analog-to-digital converter (via qct-parse)
@@ -181,10 +182,11 @@ The Complex tab configures the advanced analysis steps — typically run during 
   - **BRNG Analysis**: Toggle on/off, set maximum analysis duration, and enable or disable automatic color bar skipping
   - **Analysis Periods**: The number and length of the time windows sampled across the video, shared by Signalstats and BRNG analysis
 - **Audio Checks**:
-  - **Audio Analysis**: Clipping, channel imbalance, audible timecode (LTC), and audio dropout (via qct-parse)
+  - **Audio Analysis**: Clipping, channel imbalance, identical channel detection, audible timecode (LTC), and audio dropout (via qct-parse)
+  - **Tone Leak Detection**: A 1 kHz reference tone leaking from the transfer chain, heard as a faint high-pitched whine or squeak in quiet passages (via qct-parse)
   - **Dropped Sample Detection**: Potential audio sample drops from TBC/framesync or ADC devices
 
-Checks marked "via qct-parse" read the QCTools report through the qct-parse tool, and enabling any of them turns qct-parse on automatically — there is no separate qct-parse "Run Tool" checkbox on this tab (the Checks tab still exposes one). Turning off all qct-parse-backed checks turns the tool off.
+Checks marked "via qct-parse" read the QCTools report through the qct-parse tool, and enabling any of them turns qct-parse on automatically — there is no separate qct-parse "Run Tool" checkbox on this tab. Turning off all qct-parse-backed checks turns the tool off.
 
 Once your Spex selections are complete, navigate to the Checks tab and click **Check Spex!**.
 
@@ -233,6 +235,7 @@ When **Audio Analysis** is enabled (Audio Checks section of the Complex tab), AV
 
 - **Clipping** — samples at or near 0 dBFS that indicate the signal exceeded the digital ceiling
 - **Channel imbalance** — significant level differences between left and right channels
+- **Identical channels** — channels carrying the same content (dual mono), screened on level and phase agreement and confirmed by a sample-level comparison
 - **Audible timecode** — timecode signal bleed into the audio track
 - **Audio dropout** — extended silent or near-silent gaps that may indicate a tape or capture problem
 
@@ -244,6 +247,16 @@ Audio analysis runs inside qct-parse, so `qct_parse.run_tool` must be on. Both t
 av-spex --enable-audio-analysis on
 ```
 
+### Tone Leak Detection
+
+The **Tone Leak Detection** option (Audio Checks section of the Complex tab) flags a continuous ~1 kHz calibration tone leaking from the transfer chain into the recorded audio, heard as a faint high-pitched whine or squeak during quiet passages. Because the leaked tone is distorted, it leaves a harmonic comb at exact multiples of 1 kHz that stands above the surrounding spectral floor even when the tone is well below program level. Audio is decoded directly from the video file rather than read from the QCTools report, and every stream and channel is analyzed independently.
+
+```bash
+av-spex --enable-tone-leak-detection on
+```
+
+Like audio analysis, this runs inside qct-parse and the CLI auto-enables `qct_parse.run_tool` if needed.
+
 ### Clamped Levels Detection
 
 The **Detect Clamped Levels** option (Video Signal Checks section of the Complex tab) detects broadcast-range level clamping introduced by some analog-to-digital converters, where signal that exceeded broadcast-legal range was hard-limited rather than preserved. It runs via qct-parse.
@@ -254,14 +267,24 @@ av-spex --enable-clamped-levels on
 
 Like audio analysis, this runs inside qct-parse and the CLI auto-enables `qct_parse.run_tool` if needed.
 
+### Chroma Phase Error Detection
+
+The **Detect Chroma Phase Errors** option (Video Signal Checks section of the Complex tab) flags frames where the chroma signal has collapsed toward a single hue — typically cyan or magenta — usually caused by helical-scan tracking failures on tape sources, and often accompanied by horizontal displacement and a brief picture "swerve" at onset. Frames are flagged when both U and V span nearly the full chroma range, or when maximum saturation exceeds a bit-depth-aware threshold; consecutive flagged frames are merged into events, isolated transients are suppressed, and detected color bars are skipped. Events are reported with a thumbnail and the median hue at the peak-saturation frame.
+
+```bash
+av-spex --enable-chroma-phase-detection on
+```
+
+Like audio analysis, this runs inside qct-parse and the CLI auto-enables `qct_parse.run_tool` if needed.
+
 ### CLAMS Detection
 
-CLAMS Detection runs two analyses together as a single step, independent of qct-parse:
+**CLAMS** (Computational Linguistics Applications for Multimedia Services) is an open-source project led by Brandeis University. AV Spex adapts two CLAMS apps — [app-barsdetection](https://github.com/clamsproject/app-barsdetection) and [app-tonedetection](https://github.com/clamsproject/app-tonedetection) — porting just their detection cores into the AV Spex pipeline. CLAMS Detection runs the two together as a single step, before qct-parse:
 
-- **SSIM bars detector** — uses the structural similarity index (SSIM) to identify SMPTE color bars by comparing frames against a reference pattern. Runs in parallel with qct-parse's own bars detector to provide a side-by-side comparison.
+- **SSIM bars detector** — uses the structural similarity index (SSIM) to identify SMPTE color bars by comparing frames against a reference pattern, providing a side-by-side comparison with qct-parse's own bars detector.
 - **Cross-correlation tone detector** — identifies spans of monotonic audio, such as the 1 kHz tones that accompany SMPTE bars. Useful for locating bars-and-tones segments at the head of a tape.
 
-CLAMS results complement qct-parse output, but qct-parse remains authoritative for downstream BRNG-skip and access-file color-bar trim decisions.
+Detected CLAMS regions are passed to qct-parse to guide additional windowed bars scans, and the head color-bars end time used for downstream BRNG-skip and access-file trim decisions is merged from both detectors — the later end time wins.
 
 ```bash
 av-spex --enable-clams-detection on
@@ -340,10 +363,10 @@ av-spex [path/to/directory]
 
 ### Options
 
-`av-spex --help` prints the full reference grouped by category (Config profiles, Config import/export, Tool toggles, qct-parse / CLAMS, Frame analysis, Output settings, Fixity).
+`av-spex --help` prints the full reference grouped by category (Config profiles, Config import/export, Tool toggles, qct-parse / CLAMS, Frame analysis, Input settings, Output settings, Fixity).
 
 **Processing profiles:**
-- `--profile {step1,step2,off}` — Apply a predefined processing profile (see [Checks Tab](#checks-tab) for details on each profile)
+- `--profile {step1,step2,off,vendor}` — Apply a predefined processing profile (see [Checks Tab](#checks-tab) for details on each profile)
 
 **Tool toggles:**
 - `--on / --off` — Enable or disable individual tool options without affecting others. Format: `tool.run_tool` or `tool.check_tool` (e.g., `--on mediainfo.run_tool --on mediainfo.check_tool`)
@@ -358,14 +381,24 @@ av-spex [path/to/directory]
 - `--exiftool-from-file FILE` / `--mediainfo-from-file FILE` / `--ffprobe-from-file FILE` — Create a new expected-values profile from a tool's raw output file (saves and applies it)
 
 **qct-parse / CLAMS feature toggles:**
-- `--enable-audio-analysis {on,off}` — Toggle qct-parse audio analysis (clipping, channel imbalance, audible timecode, dropout). Auto-enables qct-parse if needed.
+- `--enable-audio-analysis {on,off}` — Toggle qct-parse audio analysis (clipping, channel imbalance, identical channels, audible timecode, dropout). Auto-enables qct-parse if needed.
 - `--enable-clamped-levels {on,off}` — Toggle broadcast-range level clamping detection. Auto-enables qct-parse if needed.
+- `--enable-chroma-phase-detection {on,off}` — Toggle chroma phase error detection (tape tracking artifacts where chroma collapses toward cyan/magenta). Auto-enables qct-parse if needed.
+- `--enable-tone-leak-detection {on,off}` — Toggle 1 kHz reference-tone leak detection. Auto-enables qct-parse if needed.
 - `--enable-clams-detection {on,off}` — Toggle CLAMS SSIM bars + cross-correlation tone detector
+- `--evaluate-bars-reference {detected,smpte}` — What Evaluate Color Bars grades against: this file's own detected bars (default) or standard SMPTE values. Only takes effect when `evaluateBars` is on.
+
+**Frame analysis:**
+- Six `--enable-*` sub-step toggles plus `--frame-borders`, `--frame-border-pixels`, `--frame-brng-duration`, and `--frame-no-colorbar-skip` — see [Frame Analysis CLI Flags](#frame-analysis-cli-flags) above
+
+**Input settings:**
+- `--video-file-extension {mkv,mov,mp4,avi,mxf}` — Which container to look for in the input directory (default: `mkv`). A non-MKV selection automatically turns off embedded stream fixity and the mediatrace custom-tag check, and skips the ffprobe signal flow (`ENCODER_SETTINGS`) check, since those only work on Matroska.
 
 **Output settings:**
 - `--access-trim-color-bars {on,off}` — Skip head color bars in the access file
 - `--access-crop-borders {on,off}` — Crop the access file to the active picture area (requires `--access-crop-to-480 on`)
 - `--access-crop-to-480 {on,off}` — Trim NTSC sources to 720x480; off keeps native 720x486
+- `--access-exclude-flagged-audio {on,off}` — Exclude a channel flagged as silent or carrying audible timecode from the access file, outputting the good channel as dual mono (default: off; requires `--enable-audio-analysis on`)
 - `--qctools-ext {qctools.xml.gz,qctools.mkv}` — QCTools output extension
 
 **Fixity:**
@@ -377,17 +410,21 @@ av-spex [path/to/directory]
 - `--export-config {all,spex,checks}` — Export current config(s) to JSON
 - `--export-file FILENAME` — Specify output filename for `--export-config`
 - `--import-config FILE` — Import config from a previously exported JSON file
+- `--export-mediaconch-policy [DEST]` — Export the current MediaConch policy XML so it can be shared. Takes an optional destination file or directory; with no argument it writes to the current directory.
 - `--use-default-config` — Reset all configs to defaults
 
 **Other:**
+- `-d / --directory` — Indicate that the input paths are directories
+- `-f / --file` — Indicate that the input paths are video files
 - `-dr / --dryrun` — Apply config changes without processing any video files
 - `--gui` — Force launch in GUI mode
+- `--version` — Print the AV Spex version and exit
 
 ---
 
 ## Configuration
 
-AV Spex's settings are stored in two primary JSON config files, editable through the GUI or CLI.
+AV Spex's settings are stored in two primary JSON config files, editable through the GUI or CLI: the Checks config and the Spex config. Custom profiles live in their own files alongside them — filename profiles, signal flow profiles, and any custom ExifTool, MediaInfo, or FFprobe expected-value profiles. All of them are saved in the user config directory, so settings persist across sessions and survive an application update.
 
 ### Checks Config
 
@@ -398,9 +435,10 @@ Controls which tools run and what outputs are generated.
 - `access_file_trim_color_bars` — Skip head color bars in the access file (requires qct-parse bars detection)
 - `access_file_crop_borders` — Crop the access file to the detected active picture area (requires `access_file_crop_to_480: true`)
 - `access_file_crop_to_480` — Trim NTSC to 720x480 (default `true`); set to `false` to keep native 720x486
+- `access_file_exclude_flagged_audio` — Leave flagged audio channels out of the access copy: a channel found silent or carrying audible timecode is dropped, and dual mono is built from the good channel (default `false`; requires audio analysis)
 - `report` — Generate an HTML summary report
 - `qctools_ext` — Output extension for QCTools files (`qctools.xml.gz` or `qctools.mkv`)
-- **Frame Analysis** settings: `enable_bitplane_check`, `enable_border_detection`, `enable_brng_analysis`, `enable_signalstats`, `enable_dropped_sample_detection`, `enable_duplicate_frame_detection`, `border_detection_mode` (simple/sophisticated), `simple_border_pixels` (default: 25), `brng_duration_limit` (default: 300 seconds), `analysis_period_duration` and `analysis_period_count` (signalstats sampling), plus sophisticated-border tuning fields
+- **Frame Analysis** settings: `enable_bitplane_check`, `enable_border_detection`, `enable_brng_analysis`, `enable_signalstats`, `enable_dropped_sample_detection`, `enable_duplicate_frame_detection`, `border_detection_mode` (simple/sophisticated), `simple_border_pixels` (default: 25), `brng_duration_limit` (default: 300 seconds), `brng_skip_color_bars`, `analysis_period_duration` and `analysis_period_count` (the periods shared by signalstats and BRNG analysis), `duplicate_min_run_length` (default: 2), plus sophisticated-border tuning fields and the border retry settings `auto_retry_borders` / `max_border_retries`
 
 **Fixity**
 - `output_fixity` — Write checksums to a fixity text file
@@ -412,11 +450,15 @@ Controls which tools run and what outputs are generated.
 - `stream_hash_algorithm` — Hash algorithm for embedded stream fixity (`md5` or `sha256`)
 
 **Tools** — Each tool has `run_tool` and/or `check_tool` toggles:
-- `exiftool`, `ffprobe`, `mediainfo`, `mediatrace`: `run_tool` and `check_tool`
+- `exiftool`, `ffprobe`, `mediainfo`, `mediatrace`, `mkvalidator`: `run_tool` and `check_tool` (mkvalidator only applies to MKV inputs and is skipped for other containers)
 - `mediaconch`: `run_mediaconch` and `mediaconch_policy` (path to XML policy file)
 - `qctools`: `run_tool`
-- `qct_parse`: `run_tool`, `barsDetection`, `evaluateBars`, `thumbExport`, `audio_analysis`, `detect_clamped_levels`
+- `qct_parse`: `run_tool`, `barsDetection`, `evaluateBars`, `evaluateBarsReference` (`detected` or `smpte`), `thumbExport`, `audio_analysis`, `detect_clamped_levels`, `detect_chroma_phase_errors`, `detect_tone_leak`
 - `clams_detection`: `run_tool` (numeric `bars` and `tone` sub-parameters are JSON-only)
+
+**Input settings**
+- `video_file_extension` — Which container AV Spex looks for in an input directory: `mkv` (default), `mov`, `mp4`, `avi`, or `mxf`. Embedded stream fixity and the custom Matroska tag checks only apply to MKV.
+- `validate_filename` — Check input filenames against the active filename profile
 
 ### Spex Config
 
@@ -425,7 +467,7 @@ Stores expected metadata values organized by tool. Multiple acceptable values ar
 "codec_name": ["flac", "pcm_s24le"]
 ```
 
-Sections include: `filename_values`, `mediainfo_values` (general, video, audio track values), `exiftool_values`, `ffmpeg_values` (video stream, audio stream, format values), `mediatrace_values` (custom MKV tags like `ENCODER_SETTINGS`), and `qct_parse_values` (color bar thresholds and content filter definitions).
+Sections include: `filename_values`, `mediainfo_values` (general, video, audio track values), `exiftool_values`, `ffmpeg_values` (video stream, audio stream, format values), `mediatrace_values` (custom MKV tags like `ENCODER_SETTINGS`), `qct_parse_values` (color bar thresholds and content filter definitions), and `signalflow_profiles` (the equipment signal chain profiles selectable from the Spex tab).
 
 ### Managing Configs
 
@@ -450,13 +492,13 @@ For each processed input directory `{video_id}/`:
 
 ### Logging
 
-A per-file log is written inside each `_qc_metadata` directory.
-`video_id}_qc_metadata/{video_id}_avspex_processing.log`
-These per-file logs are overwritten if a file is re-run. 
+A per-file log is written inside each `_qc_metadata` directory:
+`{video_id}_qc_metadata/{video_id}_avspex_processing.log`
+Re-running a file appends to its existing log rather than overwriting it, so the full processing history of the file is preserved in one place. Each new run is separated from the previous one by a `NEW PROCESSING RUN` banner, followed by the run's start timestamp.
 
 Each run also writes a timestamped application log:
 ```
-/.../Library/Logs/AVSpex/YYY-MM-DD/YYYY-MM-DD_HH-MM-SS_JPC_AV_log.log
+/.../Library/Logs/AVSpex/YYYY-MM-DD/YYYY-MM-DD_HH-MM-SS_JPC_AV_log.log
 ```
 
 ---
@@ -467,9 +509,17 @@ Contributions that enhance script functionality are welcome. Please ensure compa
 
 ---
 
+## License
+
+AV Spex is free software, distributed under the terms of the [GNU General Public License v3.0](LICENSE). The full license text is in the `LICENSE` file at the root of this repository.
+
+Third-party code incorporated into AV Spex remains under its own license — see [Acknowledgements](#acknowledgements) below.
+
+---
+
 ## Acknowledgements
 
-AV Spex makes use of code from several open source projects. Attribution and copyright notices are included as comments inline where open source code is used.
+AV Spex makes use of code from several open source projects. Attribution and copyright notices are included as comments inline where open source code is used, and each project's license terms are reproduced below.
 
 [loglog](https://github.com/amiaopensource/loglog)
 ```
@@ -529,3 +579,22 @@ MIT License
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
     THE SOFTWARE.
 ```
+
+[CLAMS](https://www.clams.ai/) — [app-barsdetection](https://github.com/clamsproject/app-barsdetection) and [app-tonedetection](https://github.com/clamsproject/app-tonedetection)
+```
+Copyright Brandeis University
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+```
+
+The full upstream Apache 2.0 license text is included in the package at `src/AV_Spex/config/clams_bars/LICENSE`.

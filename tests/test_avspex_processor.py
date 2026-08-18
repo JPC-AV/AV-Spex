@@ -28,6 +28,12 @@ def test_log_overall_time():
     assert ap.log_overall_time(1733854413.191993, 1733854426.615125) == '00:00:13'
 
 
+def test_log_overall_time_past_24_hours_does_not_wrap():
+    """A 36:23:40 batch must not report 12:23:40 (the old gmtime behavior)."""
+    start = 1733854413.0
+    assert ap.log_overall_time(start, start + 131020) == '36:23:40'
+
+
 def test_check_directory_matches(tmp_path):
     """Use a tmp dir matching the video_id rather than a hard-coded user path."""
     d = tmp_path / "JPC_AV_01709"
@@ -270,6 +276,39 @@ def test_process_single_directory_stops_file_log_on_exception(monkeypatch):
         proc.process_single_directory("/some/dir")
 
     stop_mock.assert_called_once()
+
+
+def test_process_single_directory_emits_file_completed(monkeypatch):
+    """file_completed carries (video_id, destination_directory) for the console PDF."""
+    _stub_directory_init(monkeypatch)
+    _stub_per_file_logging(monkeypatch)
+    signals = MagicMock()
+
+    proc = ap.AVSpexProcessor(signals=signals)
+    monkeypatch.setattr(proc, "_process_directory_contents", lambda *a, **kw: True)
+
+    proc.process_single_directory("/some/dir")
+
+    signals.file_completed.emit.assert_called_once_with("vid_x", "/tmp/dest")
+
+
+def test_process_single_directory_emits_file_completed_on_exception(monkeypatch):
+    """The emit lives in the finally block, so a failed file still gets saved."""
+    _stub_directory_init(monkeypatch)
+    _stub_per_file_logging(monkeypatch)
+    signals = MagicMock()
+
+    proc = ap.AVSpexProcessor(signals=signals)
+
+    def boom(*a, **kw):
+        raise RuntimeError("processing exploded")
+
+    monkeypatch.setattr(proc, "_process_directory_contents", boom)
+
+    with pytest.raises(RuntimeError):
+        proc.process_single_directory("/some/dir")
+
+    signals.file_completed.emit.assert_called_once_with("vid_x", "/tmp/dest")
 
 
 # ===========================================================================

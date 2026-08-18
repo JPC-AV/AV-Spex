@@ -1141,7 +1141,7 @@ All outputs are conditional. If all selected outputs succeed, a results dictiona
 
 #### CLAMS Detection (Bars + Tone)
 
-When `tools.clams_detection.run_tool` is true, `process_video_outputs()` runs the CLAMS SSIM-based SMPTE bars detector and the cross-correlation tone detector together as one step. The bars detector runs in parallel with qct-parse for side-by-side comparison; the tone detector identifies spans of monotonic audio (e.g. the tones in SMPTE bars-and-tones segments). Numeric tuning of the `bars`/`tone` parameters is JSON-only — only `clams_detection.run_tool` is settable from the CLI (`av-spex --on clams_detection.run_tool`). qct-parse remains authoritative for downstream BRNG-skip and access-file trim.
+When `tools.clams_detection.run_tool` is true, `process_video_outputs()` runs the CLAMS SSIM-based SMPTE bars detector and the cross-correlation tone detector together as one step, before qct-parse. The tone detector identifies spans of monotonic audio (e.g. the tones in SMPTE bars-and-tones segments), and detected bars/tone regions are passed to `run_qctparse()` to guide additional windowed bars scans. The head-bars end time used for downstream BRNG-skip and access-file trim is merged across both detectors ("longest/latest wins"). Numeric tuning of the `bars`/`tone` parameters is JSON-only — only `clams_detection.run_tool` is settable from the CLI (`av-spex --on clams_detection.run_tool`).
 
 7. **Completion**
     Upon completion of the single directory loop, the CLI app outputs the video ID in ASCII art, and, if additional source directories were provided, begins the loop again.

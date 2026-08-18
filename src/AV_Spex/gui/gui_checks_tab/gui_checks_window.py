@@ -236,6 +236,19 @@ class ChecksWindow(QWidget, ThemeableMixin):
         outputs_layout.addWidget(self.report_cb)
         outputs_layout.addWidget(report_desc)
 
+        # Console PDF row - saves the same output as the processing window's
+        # "Save as PDF" button, automatically, once per video.
+        self.save_console_pdf_cb = QCheckBox("Save Console Log as PDF")
+        self.save_console_pdf_cb.setStyleSheet("font-weight: bold;")
+        save_console_pdf_desc = QLabel(
+            "Saves the processing window's console output for each video to "
+            "its qc_metadata directory"
+        )
+        save_console_pdf_desc.setIndent(20)
+
+        outputs_layout.addWidget(self.save_console_pdf_cb)
+        outputs_layout.addWidget(save_console_pdf_desc)
+
         self.outputs_group.setLayout(outputs_layout)
         main_layout.addWidget(self.outputs_group)
     
@@ -562,6 +575,9 @@ class ChecksWindow(QWidget, ThemeableMixin):
         self.report_cb.stateChanged.connect(
             lambda state: self.on_checkbox_changed(state, ['outputs', 'report'])
         )
+        self.save_console_pdf_cb.stateChanged.connect(
+            lambda state: self.on_checkbox_changed(state, ['outputs', 'save_console_pdf'])
+        )
         
         # Fixity section - handle most checkboxes normally
         fixity_checkboxes = {
@@ -641,6 +657,9 @@ class ChecksWindow(QWidget, ThemeableMixin):
         )
         self._update_access_suboptions_enabled(checks_config.outputs.access_file)
         self.report_cb.setChecked(checks_config.outputs.report)
+        self.save_console_pdf_cb.setChecked(
+            getattr(checks_config.outputs, 'save_console_pdf', False)
+        )
         
         # Fixity - now using booleans directly
         self.check_fixity_cb.setChecked(checks_config.fixity.check_fixity)
@@ -785,7 +804,7 @@ class ChecksWindow(QWidget, ThemeableMixin):
         Stream fixity (mkvextract/mkvpropedit) and the mediatrace custom Matroska
         tag check only work on Matroska containers, and signal flow is embedded as
         an MKV tag — so gray them out for non-MKV input. Also grays the signal-flow
-        dropdown on the Spex tab when a MainWindow reference is available.
+        card on the Spex tab when a MainWindow reference is available.
         """
         self.embed_stream_cb.setEnabled(is_mkv)
         self.overwrite_stream_cb.setEnabled(is_mkv)
@@ -796,10 +815,10 @@ class ChecksWindow(QWidget, ThemeableMixin):
             mediatrace_widgets['check'].setEnabled(is_mkv)
             mediatrace_widgets['run'].setEnabled(is_mkv)
 
-        # Cross-tab: gray the signal-flow dropdown on the Spex tab if it exists.
-        signalflow_dropdown = getattr(self.main_window, 'signalflow_profile_dropdown', None)
-        if signalflow_dropdown is not None:
-            signalflow_dropdown.setEnabled(is_mkv)
+        # Cross-tab: gray the signal-flow card on the Spex tab if it exists.
+        spex_tab = getattr(self.main_window, 'spex_tab', None)
+        if spex_tab is not None and hasattr(spex_tab, 'set_signalflow_enabled'):
+            spex_tab.set_signalflow_enabled(is_mkv)
 
     def on_video_extension_changed(self, ext):
         """Persist the selected extension and auto-disable MKV-only features.

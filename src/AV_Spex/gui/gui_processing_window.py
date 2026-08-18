@@ -4,7 +4,9 @@ from PyQt6.QtWidgets import (
     QProgressBar, QSplitter, QMessageBox, QFileDialog
 )
 from PyQt6.QtCore import Qt, QEvent, QSize, QSettings, QMarginsF
-from PyQt6.QtGui import QPalette, QFont, QPdfWriter, QPageSize, QPageLayout, QTextOption
+from PyQt6.QtGui import (
+    QPalette, QFont, QPdfWriter, QPageSize, QPageLayout, QTextOption, QTextCursor
+)
 
 import os
 from datetime import datetime
@@ -30,6 +32,10 @@ class ProcessingWindow(QMainWindow, ThemeableMixin):
         self.setWindowFlags(Qt.WindowType.Window)
         # Initialize settings for this window
         self.settings = QSettings('NMAAHC', 'AVSpex')
+
+        # Console position where the current file's output starts, used when
+        # saving a per-file console PDF (see save_file_console_pdf)
+        self._file_console_start_pos = 0
         
         # Central widget and main_layout
         central_widget = QWidget()
@@ -232,19 +238,7 @@ class ProcessingWindow(QMainWindow, ThemeableMixin):
             file_path += ".pdf"
 
         try:
-            writer = QPdfWriter(file_path)
-            writer.setPageSize(QPageSize(QPageSize.PageSizeId.Letter))
-            writer.setPageMargins(QMarginsF(15, 15, 15, 15), QPageLayout.Unit.Millimeter)
-
-            # Clone the live document so we can enable wrapping for the page
-            # width without disturbing the on-screen console (which uses NoWrap).
-            doc = self.details_text.document().clone(self)
-            doc.setDefaultFont(self.details_text.font())
-            text_option = QTextOption()
-            text_option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
-            doc.setDefaultTextOption(text_option)
-            doc.print(writer)
-
+            self._write_console_pdf(file_path)
             self.update_status(f"Console output saved to {file_path}", MessageType.SUCCESS)
         except Exception as e:
             self.update_status(f"Failed to save PDF: {str(e)}", MessageType.ERROR)
@@ -255,6 +249,73 @@ class ProcessingWindow(QMainWindow, ThemeableMixin):
             msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
             msg_box.setStyleSheet(self.get_message_box_style())
             msg_box.exec()
+
+    def _write_console_pdf(self, file_path, start_position=0):
+        """Print the console document (or a tail of it) to a PDF file.
+
+        Args:
+            file_path (str): Destination .pdf path
+            start_position (int): Character position to start from — anything
+                before it is dropped, which is how a single video's slice of
+                the console is exported.
+        """
+        writer = QPdfWriter(file_path)
+        writer.setPageSize(QPageSize(QPageSize.PageSizeId.Letter))
+        writer.setPageMargins(QMarginsF(15, 15, 15, 15), QPageLayout.Unit.Millimeter)
+
+        # Clone the live document so we can enable wrapping for the page
+        # width without disturbing the on-screen console (which uses NoWrap).
+        doc = self.details_text.document().clone(self)
+        doc.setDefaultFont(self.details_text.font())
+        text_option = QTextOption()
+        text_option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        doc.setDefaultTextOption(text_option)
+
+        if start_position > 0:
+            # Trim everything logged before this video started
+            cursor = QTextCursor(doc)
+            cursor.setPosition(0)
+            cursor.setPosition(min(start_position, doc.characterCount() - 1),
+                               QTextCursor.MoveMode.KeepAnchor)
+            cursor.removeSelectedText()
+
+        doc.print(writer)
+
+    def mark_file_console_start(self, source_directory=None, current=None, total=None):
+        """Remember where in the console this video's output begins.
+
+        Connected to the file_started signal; the position is used later by
+        save_file_console_pdf() to export only this video's console output.
+        """
+        cursor = QTextCursor(self.details_text.document())
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self._file_console_start_pos = cursor.position()
+
+    def save_file_console_pdf(self, video_id, destination_directory):
+        """Save this video's console output to its qc_metadata directory.
+
+        Runs when a file finishes processing, if "Save Console Log as PDF" is
+        enabled on the Checks tab. Failures are reported to the console but
+        never interrupt processing.
+        """
+        checks_config = config_mgr.get_config('checks', ChecksConfig)
+        if not getattr(checks_config.outputs, 'save_console_pdf', False):
+            return
+
+        if not destination_directory or not os.path.isdir(destination_directory):
+            self.update_status(
+                f"Could not save console PDF: {destination_directory} is not a directory",
+                MessageType.ERROR
+            )
+            return
+
+        file_path = os.path.join(destination_directory, f"{video_id}_avspex_console.pdf")
+
+        try:
+            self._write_console_pdf(file_path, self._file_console_start_pos)
+            self.update_status(f"Console output saved to {file_path}", MessageType.INFO)
+        except Exception as e:
+            self.update_status(f"Failed to save console PDF: {str(e)}", MessageType.ERROR)
 
     def get_message_box_style(self):
         """Get theme-aware styling for message boxes."""

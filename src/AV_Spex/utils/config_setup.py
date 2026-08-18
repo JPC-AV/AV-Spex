@@ -244,6 +244,29 @@ class SpexConfig:
     mediatrace_values: MediaTraceValues
     qct_parse_values: QCTParseValues
     signalflow_profiles: Dict[str, Dict] = field(default_factory=dict)
+    # Name of the profile last applied per domain, keyed by
+    # 'filename' | 'mediainfo' | 'exiftool' | 'ffprobe' | 'signalflow'.
+    # An absent key means no profile has been recorded for that domain
+    # (the domain's values may still be populated). Defaulted so a
+    # pre-existing last_used_spex_config.json still loads.
+    active_profiles: Dict[str, str] = field(default_factory=dict)
+
+
+# Profiles bundled with the app, per spex domain. These are protected:
+# config_edit refuses to overwrite or delete them, and the GUI offers
+# "Duplicate" instead of "Edit". The help window documents this guarantee.
+PROTECTED_PROFILES: Dict[str, tuple] = {
+    'exiftool': ("Standard MKV Profile",),
+    'mediainfo': ("Standard MKV Profile",),
+    'ffprobe': ("Standard MKV Profile",),
+    'filename': ("JPC Filename Profile", "Bowser Filename Profile"),
+    'signalflow': ("JPC_AV_SVHS Signal Flow", "BVH3100 Signal Flow"),
+}
+
+
+def is_protected_profile(domain: str, name: str) -> bool:
+    """True if the named profile is a bundled default for the given domain."""
+    return name in PROTECTED_PROFILES.get(domain, ())
 
 @dataclass
 class FrameAnalysisConfig:
@@ -305,6 +328,7 @@ class OutputsConfig:
     access_file_crop_borders: bool = True
     access_file_crop_to_480: bool = True
     access_file_exclude_flagged_audio: bool = False
+    save_console_pdf: bool = False
 
 @dataclass
 class ChecksumAlgorithm(Enum):

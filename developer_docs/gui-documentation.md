@@ -275,15 +275,15 @@ Controls the `checks_config.tools.qct_parse` settings. Dependency logic is enfor
 - **Detect Color Bars** (`barsDetection`) — when unchecked, automatically unchecks and disables Evaluate Color Bars and Thumbnail Export
 - **Evaluate Color Bars** (`evaluateBars`) — compares detected bars against expected values
 - **Thumbnail Export** (`thumbExport`) — exports thumbnails of failed frames; enabled when at least one of bars detection or evaluate bars is active
-- **Perform Audio Analysis** (`audio_analysis`) — detects audio clipping, channel imbalance, audible timecode, and audio dropout
+- **Perform Audio Analysis** (`audio_analysis`) — detects audio clipping, channel imbalance, identical (dual mono) channels, audible timecode, and audio dropout
 - **Detect Clamped Levels** (`detect_clamped_levels`) — detects broadcast-range level clamping from the analog-to-digital converter
 
 #### 3. CLAMS Detection
 
 Controls the `checks_config.tools.clams_detection` settings (single section, runs both detectors):
 
-- **Run Tool** — runs the CLAMS SSIM-based SMPTE bars detector and the cross-correlation tone detector together. The bars detector runs in parallel with qct-parse for side-by-side comparison; the tone detector identifies spans of monotonic audio (e.g. SMPTE bars-and-tones).
-- Numeric tuning of the bars/tone parameters is **JSON-only** — only the `Run Tool` toggle is exposed in the UI. qct-parse remains authoritative for downstream BRNG-skip and access-file trim.
+- **Run Tool** — runs the CLAMS SSIM-based SMPTE bars detector and the cross-correlation tone detector together, before qct-parse. Detected regions are passed to qct-parse to guide additional windowed bars scans; the tone detector identifies spans of monotonic audio (e.g. SMPTE bars-and-tones).
+- Numeric tuning of the bars/tone parameters is **JSON-only** — only the `Run Tool` toggle is exposed in the UI. The head-bars end time used for downstream BRNG-skip and access-file trim is merged across qct-parse and CLAMS ("longest/latest wins").
 
 #### 4. Frame Analysis sections
 
@@ -488,6 +488,7 @@ class ProcessingSignals(QObject):
     progress = pyqtSignal(int, int)         # Numerical progress (current, total)
 
     file_started = pyqtSignal(str, int, int)  # File processing started (path, current_idx, total)
+    file_completed = pyqtSignal(str, str)     # File processing ended (video_id, qc_metadata dir)
     tool_started = pyqtSignal(str)            # Tool processing started
     tool_completed = pyqtSignal(str)          # Tool processing completed
     step_completed = pyqtSignal(str)          # Processing step completed

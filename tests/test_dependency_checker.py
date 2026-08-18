@@ -122,6 +122,8 @@ def test_cli_deps_check_propagates_old_python_exit(monkeypatch):
 
 def test_check_dependencies_cli_all_present(monkeypatch, capsys):
     monkeypatch.setattr(dc.shutil, "which", lambda name: "/usr/bin/" + name)
+    # Pin the bundled-OpenCV probe so the result doesn't depend on the host build
+    monkeypatch.setattr(dc, "opencv_ffmpeg_support", lambda: (True, "OpenCV ok"))
     ok = dc.DependencyManager.check_dependencies_cli()
     assert ok is True
     out = capsys.readouterr().out
@@ -136,6 +138,7 @@ def test_check_dependencies_cli_missing_logs_install_hint(monkeypatch, capsys):
     def fake_which(name):
         return None if name == "exiftool" else "/usr/bin/" + name
     monkeypatch.setattr(dc.shutil, "which", fake_which)
+    monkeypatch.setattr(dc, "opencv_ffmpeg_support", lambda: (True, "OpenCV ok"))
 
     ok = dc.DependencyManager.check_dependencies_cli()
     assert ok is False
@@ -148,24 +151,34 @@ def test_check_dependencies_cli_missing_logs_install_hint(monkeypatch, capsys):
 # Required-dependency lists
 # ---------------------------------------------------------------------------
 
+EXTERNAL_TOOLS = {"FFmpeg", "MediaInfo", "ExifTool", "MediaConch", "QCTools",
+                  "MKVToolNix", "mkvalidator"}
+CAPABILITIES = {"OpenCV video decoding"}
+
+
 def test_get_cli_dependencies_includes_all_expected_tools():
     deps = dc.DependencyManager._get_cli_dependencies()
-    names = {d.name for d in deps}
-    assert names == {"FFmpeg", "MediaInfo", "ExifTool", "MediaConch", "QCTools", "MKVToolNix"}
-    # Each entry must have a real command + install hint to be useful in CLI output
+    assert {d.name for d in deps} == EXTERNAL_TOOLS | CAPABILITIES
     for d in deps:
-        assert d.command
         assert d.install_hint
+        if d.name in CAPABILITIES:
+            # Bundled-library checks probe themselves; there is no PATH command
+            assert d.check_fn is not None
+        else:
+            assert d.command
+            assert d.check_fn is None
 
 
 def test_gui_required_dependencies_have_version_commands():
-    """GUI list also defines version_command for each tool (used by _check_version)."""
+    """GUI list also defines version_command for each PATH tool (used by _check_version)."""
     # Call the unbound method on a stand-in `self` to avoid building an actual QDialog
     deps = dc.DependencyCheckDialog._get_required_dependencies(self=MagicMock())
-    names = {d.name for d in deps}
-    assert names == {"FFmpeg", "MediaInfo", "ExifTool", "MediaConch", "QCTools", "MKVToolNix"}
+    assert {d.name for d in deps} == EXTERNAL_TOOLS | CAPABILITIES
     for d in deps:
-        assert d.version_command, f"{d.name} should declare a version_command for the GUI checker"
+        if d.name in CAPABILITIES:
+            assert d.check_fn is not None
+        else:
+            assert d.version_command, f"{d.name} should declare a version_command for the GUI checker"
 
 
 # ---------------------------------------------------------------------------
@@ -334,3 +347,95 @@ def test_check_version_uses_split_command_args(monkeypatch):
     assert run_mock.call_args.kwargs["capture_output"] is True
     assert run_mock.call_args.kwargs["text"] is True
     assert run_mock.call_args.kwargs["timeout"] == 10
+
+
+# ---------------------------------------------------------------------------
+# opencv_ffmpeg_support — bundled-library capability check
+# ---------------------------------------------------------------------------
+
+def _build_info(ffmpeg_line):
+    return (
+        "General configuration for OpenCV 4.13.0\n"
+        "  Video I/O:\n"
+        f"    {ffmpeg_line}\n"
+        "    AVFoundation:                YES\n"
+    )
+
+
+def test_opencv_ffmpeg_support_detects_working_build(monkeypatch):
+    import cv2
+    monkeypatch.setattr(cv2, "getBuildInformation",
+                        lambda: _build_info("FFMPEG:                      YES"))
+    ok, detail = dc.opencv_ffmpeg_support()
+    assert ok is True
+    assert "FFmpeg backend available" in detail
+
+
+def test_opencv_ffmpeg_support_detects_intel_wheel_without_ffmpeg(monkeypatch):
+    """macOS x86_64 wheels >= 4.13.0.90 report FFMPEG: NO and cannot open FFV1/MKV."""
+    import cv2
+    monkeypatch.setattr(cv2, "getBuildInformation",
+                        lambda: _build_info("FFMPEG:                      NO"))
+    ok, detail = dc.opencv_ffmpeg_support()
+    assert ok is False
+    assert "without FFmpeg" in detail
+    assert "FFV1/Matroska" in detail
+
+
+def test_opencv_ffmpeg_support_handles_missing_ffmpeg_entry(monkeypatch):
+    import cv2
+    monkeypatch.setattr(cv2, "getBuildInformation", lambda: "Video I/O:\n  AVFoundation: YES\n")
+    ok, detail = dc.opencv_ffmpeg_support()
+    assert ok is False
+    assert "no FFMPEG entry" in detail
+
+
+def test_opencv_ffmpeg_support_survives_a_broken_build_info(monkeypatch):
+    import cv2
+    def boom():
+        raise RuntimeError("segfault-adjacent")
+    monkeypatch.setattr(cv2, "getBuildInformation", boom)
+    ok, detail = dc.opencv_ffmpeg_support()
+    assert ok is False
+    assert "Could not read" in detail
+
+
+def test_worker_runs_check_fn_instead_of_which(monkeypatch):
+    """A capability entry must not be looked up on PATH."""
+    monkeypatch.setattr(dc.shutil, "which",
+                        lambda c: pytest.fail("check_fn entries must not hit PATH"))
+    dep = dc.DependencyInfo(name="cap", command="", check_fn=lambda: (True, "all good"))
+    worker = dc.DependencyCheckWorker([dep])
+    _spy_signals(worker)
+
+    worker.run()
+
+    assert dep.status is dc.DependencyStatus.FOUND
+    assert dep.version_found == "all good"
+    worker.all_checks_complete.emit.assert_called_once_with(True)
+
+
+def test_worker_marks_failed_capability_as_version_issue(monkeypatch):
+    """Present but unusable is a version issue, not 'not found'."""
+    monkeypatch.setattr(dc.shutil, "which", lambda c: "/usr/bin/whatever")
+    dep = dc.DependencyInfo(name="cap", command="", check_fn=lambda: (False, "no ffmpeg"))
+    worker = dc.DependencyCheckWorker([dep])
+    _spy_signals(worker)
+
+    worker.run()
+
+    assert dep.status is dc.DependencyStatus.VERSION_ISSUE
+    assert dep.error_message == "no ffmpeg"
+    worker.all_checks_complete.emit.assert_called_once_with(False)
+
+
+def test_cli_deps_check_warns_but_does_not_fail_without_opencv_ffmpeg(monkeypatch):
+    """Metadata, fixity and qct-parse still work — this must not block the run."""
+    monkeypatch.setattr(dc, "check_external_dependency", lambda c: True)
+    monkeypatch.setattr(dc, "opencv_ffmpeg_support", lambda: (False, "built without FFmpeg"))
+    warnings = []
+    monkeypatch.setattr(dc.logger, "warning", lambda m: warnings.append(m))
+
+    assert dc.cli_deps_check() is True
+    assert any("built without FFmpeg" in w for w in warnings)
+    assert any("opencv-python-headless<4.13" in w for w in warnings)

@@ -1,8 +1,10 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTextBrowser
 )
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QTextCursor, QTextCharFormat, QTextBlockFormat
+from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtGui import (
+    QTextCursor, QTextCharFormat, QTextBlockFormat, QShortcut, QKeySequence
+)
 
 import html
 import os
@@ -39,11 +41,27 @@ class HelpWindow(QWidget, ThemeableMixin):
         layout.addWidget(self.content)
 
         button_layout = QHBoxLayout()
+        self.decrease_text_button = QPushButton("−")
+        self.decrease_text_button.setToolTip("Decrease text size (Cmd+-)")
+        self.decrease_text_button.clicked.connect(lambda: self._adjust_text_size(-1))
+        button_layout.addWidget(self.decrease_text_button)
+        self.increase_text_button = QPushButton("+")
+        self.increase_text_button.setToolTip("Increase text size (Cmd+=)")
+        self.increase_text_button.clicked.connect(lambda: self._adjust_text_size(1))
+        button_layout.addWidget(self.increase_text_button)
         button_layout.addStretch()
         self.close_button = QPushButton("Close")
         self.close_button.clicked.connect(self.close)
         button_layout.addWidget(self.close_button)
         layout.addLayout(button_layout)
+
+        # Text zoom state, clamped so the document stays readable. Standard
+        # zoom shortcuts work whenever the window has focus.
+        self._zoom_level = 0
+        QShortcut(QKeySequence.StandardKey.ZoomIn, self,
+                  activated=lambda: self._adjust_text_size(1))
+        QShortcut(QKeySequence.StandardKey.ZoomOut, self,
+                  activated=lambda: self._adjust_text_size(-1))
 
         self.setup_theme_handling()
 
@@ -53,9 +71,17 @@ class HelpWindow(QWidget, ThemeableMixin):
         if help_path:
             try:
                 with open(help_path, 'r', encoding='utf-8') as f:
-                    return f.read()
+                    text = f.read()
             except OSError:
                 pass
+            else:
+                # Resolve the document's relative image references (e.g. the
+                # BRNG differential example) against the bundled help dir
+                help_dir = os.path.dirname(help_path)
+                self.content.setSearchPaths([help_dir])
+                self.content.document().setBaseUrl(
+                    QUrl.fromLocalFile(help_dir + os.sep))
+                return text
         return ("# AV Spex Help\n\n"
                 "The help document could not be found. Please see the README at "
                 "https://github.com/JPC-AV/JPC_AV_videoQC for documentation.")
@@ -129,8 +155,29 @@ class HelpWindow(QWidget, ThemeableMixin):
         used_slugs.add(slug)
         return slug
 
+    ZOOM_MIN = -3
+    ZOOM_MAX = 8
+
+    def _adjust_text_size(self, delta):
+        """Grow or shrink the document text by one zoom step, within limits.
+
+        QTextEdit's zoomIn/zoomOut rescale every font size in the document
+        (headings, body, code) but leave images untouched.
+        """
+        new_level = max(self.ZOOM_MIN, min(self.ZOOM_MAX, self._zoom_level + delta))
+        step = new_level - self._zoom_level
+        if not step:
+            return
+        self._zoom_level = new_level
+        if step > 0:
+            self.content.zoomIn(step)
+        else:
+            self.content.zoomOut(-step)
+
     def on_theme_changed(self, palette):
         """Handle theme changes for this window"""
         self.setPalette(palette)
         theme_manager = ThemeManager.instance()
         theme_manager.style_button(self.close_button)
+        theme_manager.style_button(self.decrease_text_button)
+        theme_manager.style_button(self.increase_text_button)

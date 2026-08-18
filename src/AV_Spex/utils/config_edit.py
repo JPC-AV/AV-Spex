@@ -1,4 +1,4 @@
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from typing import List, Dict, Union, Optional
 
 import json
@@ -7,9 +7,10 @@ import os
 from AV_Spex.utils.log_setup import logger
 from AV_Spex.utils.config_setup import (
     ChecksConfig, SpexConfig, FilenameProfile, FilenameValues,
-    FilenameSection, SignalflowConfig, ChecksProfile, ChecksProfilesConfig,
+    FilenameSection, FilenameConfig, SignalflowConfig, SignalflowProfile,
+    ChecksProfile, ChecksProfilesConfig,
     ExiftoolConfig, ExiftoolProfile, MediainfoConfig, MediainfoProfile,
-    FfprobeConfig, FfprobeProfile, is_mkv_extension
+    FfprobeConfig, FfprobeProfile, is_mkv_extension, is_protected_profile
 )
 from AV_Spex.utils.config_manager import ConfigManager
 
@@ -155,7 +156,170 @@ def resolve_config(args, config_mapping):
     return config_mapping.get(args, None)
 
 
-def apply_filename_profile(selected_profile: FilenameProfile):
+# --- Active spex profiles ---------------------------------------------------
+# The name of the profile last applied for each spex domain is recorded on
+# SpexConfig.active_profiles, so the GUI can show the selection directly
+# instead of reverse-matching current values against every saved profile.
+
+PROFILE_DOMAINS = ('filename', 'mediainfo', 'exiftool', 'ffprobe', 'signalflow')
+
+_SIGNALFLOW_STAGES = ("Source_VTR", "TBC_Framesync", "ADC", "Capture_Device", "Computer")
+
+
+@dataclass
+class ActiveProfileState:
+    """Reported state of a domain's stored active profile.
+
+    name: the stored profile name, or None if none recorded.
+    exists: the named profile is still present in the domain's profile config.
+    modified: current spex values differ from the stored profile's values.
+    """
+    name: Optional[str]
+    exists: bool
+    modified: bool
+
+
+def set_active_profile(domain: str, profile_name: Optional[str]) -> None:
+    """Record (or clear, with None) the profile last applied for a domain."""
+    spex_config = config_mgr.get_config('spex', SpexConfig)
+    updated = dict(spex_config.active_profiles)
+    if profile_name is None:
+        updated.pop(domain, None)
+    else:
+        updated[domain] = profile_name
+    # replace_config_section is required here: update_config's deep merge
+    # cannot add keys that are absent from the target dict.
+    config_mgr.replace_config_section('spex', 'active_profiles', updated)
+
+
+def get_active_profile(domain: str) -> Optional[str]:
+    """Return the stored active profile name for a domain, or None."""
+    spex_config = config_mgr.get_config('spex', SpexConfig)
+    return (spex_config.active_profiles or {}).get(domain)
+
+
+def get_domain_profiles(domain: str) -> Dict:
+    """Return the {name: profile} dict for a spex profile domain."""
+    if domain == 'exiftool':
+        return dict(config_mgr.get_config('exiftool', ExiftoolConfig).exiftool_profiles or {})
+    if domain == 'mediainfo':
+        return dict(config_mgr.get_config('mediainfo', MediainfoConfig).mediainfo_profiles or {})
+    if domain == 'ffprobe':
+        return dict(config_mgr.get_config('ffprobe', FfprobeConfig).ffprobe_profiles or {})
+    if domain == 'filename':
+        return dict(config_mgr.get_config('filename', FilenameConfig).filename_profiles or {})
+    if domain == 'signalflow':
+        return dict(config_mgr.get_config('signalflow', SignalflowConfig).signalflow_profiles or {})
+    raise ValueError(f"Unknown profile domain: {domain}")
+
+
+def _as_plain_dict(obj) -> dict:
+    """Best-effort conversion of a dataclass / dict / object to a plain dict."""
+    if obj is None:
+        return {}
+    if hasattr(obj, '__dataclass_fields__'):
+        return asdict(obj)
+    if isinstance(obj, dict):
+        return obj
+    return {k: v for k, v in getattr(obj, '__dict__', {}).items() if not k.startswith('_')}
+
+
+def _section_matches(current_section, profile_section, skip_keys=()) -> bool:
+    """True if every profile field present in the current section matches it."""
+    current_section = _as_plain_dict(current_section)
+    profile_section = _as_plain_dict(profile_section)
+    for key, profile_value in profile_section.items():
+        if key in skip_keys:
+            continue
+        if key in current_section and current_section[key] != profile_value:
+            return False
+    return True
+
+
+def _exiftool_matches(spex_config, profile) -> bool:
+    return _section_matches(spex_config.exiftool_values, profile)
+
+
+def _mediainfo_matches(spex_config, profile) -> bool:
+    profile_dict = _as_plain_dict(profile)
+    current = _as_plain_dict(spex_config.mediainfo_values)
+    # Profile sections are named general/video/audio; spex uses expected_*.
+    section_mapping = {
+        'general': 'expected_general',
+        'video': 'expected_video',
+        'audio': 'expected_audio',
+    }
+    return all(
+        _section_matches(current.get(spex_key), profile_dict.get(profile_key))
+        for profile_key, spex_key in section_mapping.items()
+    )
+
+
+def _ffprobe_matches(spex_config, profile) -> bool:
+    profile_dict = _as_plain_dict(profile)
+    current = _as_plain_dict(spex_config.ffmpeg_values)
+    # 'tags' is owned by the signal-flow system, so it is excluded here.
+    return all(
+        _section_matches(current.get(key), profile_dict.get(key), skip_keys=('tags',))
+        for key in ('video_stream', 'audio_stream', 'format')
+    )
+
+
+def _filename_matches(spex_config, profile) -> bool:
+    profile_dict = _as_plain_dict(profile)
+    current_dict = _as_plain_dict(spex_config.filename_values)
+    profile_sections = {k: _as_plain_dict(v) for k, v in (profile_dict.get('fn_sections') or {}).items()}
+    current_sections = {k: _as_plain_dict(v) for k, v in (current_dict.get('fn_sections') or {}).items()}
+    if profile_sections != current_sections:
+        return False
+    expected_ext = profile_dict.get('FileExtension')
+    return not expected_ext or expected_ext == current_dict.get('FileExtension')
+
+
+def _signalflow_matches(spex_config, profile) -> bool:
+    profile_dict = _as_plain_dict(profile)
+    encoder_settings = _as_plain_dict(spex_config.mediatrace_values.ENCODER_SETTINGS)
+    for stage in _SIGNALFLOW_STAGES:
+        profile_list = profile_dict.get(stage)
+        if profile_list is None:
+            continue
+        if list(encoder_settings.get(stage) or []) != list(profile_list):
+            return False
+    return True
+
+
+_DOMAIN_MATCHERS = {
+    'exiftool': _exiftool_matches,
+    'mediainfo': _mediainfo_matches,
+    'ffprobe': _ffprobe_matches,
+    'filename': _filename_matches,
+    'signalflow': _signalflow_matches,
+}
+
+
+def get_active_profile_state(domain: str) -> ActiveProfileState:
+    """Report the stored active profile for a domain and whether the current
+    spex values still match it.
+
+    This compares only the single stored profile against current values —
+    it is state reporting, not a matching heuristic.
+    """
+    name = get_active_profile(domain)
+    if not name:
+        return ActiveProfileState(name=None, exists=False, modified=False)
+    profiles = get_domain_profiles(domain)
+    if name not in profiles:
+        return ActiveProfileState(name=name, exists=False, modified=False)
+    spex_config = config_mgr.get_config('spex', SpexConfig)
+    try:
+        matches = _DOMAIN_MATCHERS[domain](spex_config, profiles[name])
+    except Exception as e:
+        logger.warning(f"Could not compare {domain} values against profile '{name}': {e}")
+        matches = True
+    return ActiveProfileState(name=name, exists=True, modified=not matches)
+
+
+def apply_filename_profile(selected_profile: FilenameProfile, profile_name: Optional[str] = None):
     """
     Apply a FilenameProfile dataclass to the current configuration.
     
@@ -184,10 +348,13 @@ def apply_filename_profile(selected_profile: FilenameProfile):
     
     # Force a refresh to ensure changes are persisted
     config_mgr.refresh_configs()
-    
+
     # Verify changes persisted
     final_config = config_mgr.get_config('spex', SpexConfig)
     logger.debug(f"Final verification after refresh: Config has {len(final_config.filename_values.fn_sections)} sections")
+
+    if profile_name:
+        set_active_profile('filename', profile_name)
 
 
 def get_signalflow_profile(profile_name: str):
@@ -208,15 +375,16 @@ def get_signalflow_profile(profile_name: str):
     
     return None
 
-def apply_signalflow_profile(selected_profile):
+def apply_signalflow_profile(selected_profile, profile_name: Optional[str] = None):
     """
     Apply a SignalflowProfile dataclass or dict to the current configuration.
-    
+
     Completely replaces the existing signalflow configuration with the selected profile,
     ensuring all sections are properly saved and persisted.
-    
+
     Args:
         selected_profile (SignalflowProfile or dict): The signalflow profile to apply
+        profile_name: When given, recorded as the domain's active profile
     """
     # Debug information about the provided profile
     logger.debug(f"==== APPLYING SIGNALFLOW PROFILE ====")
@@ -311,6 +479,9 @@ def apply_signalflow_profile(selected_profile):
     logger.debug(f"Mediatrace encoder settings keys: {final_mediatrace_keys}")
     logger.debug(f"FFmpeg encoder settings keys: {final_ffmpeg_keys}")
 
+    if profile_name:
+        set_active_profile('signalflow', profile_name)
+
 
 def enforce_extension_compatibility():
     """Force off the checks that only work on Matroska when the configured
@@ -401,16 +572,17 @@ def apply_profile(selected_profile):
     enforce_extension_compatibility()
 
 
-def apply_exiftool_profile(profile_data):
+def apply_exiftool_profile(profile_data, profile_name: Optional[str] = None):
     """
     Apply an exiftool profile to the current spex configuration.
-    
+
     Completely replaces the existing exiftool configuration with the selected profile,
     ensuring all fields are properly saved and persisted.
-    
+
     Args:
         profile_data: Either an ExiftoolProfile dataclass instance or a dictionary
                      containing exiftool field values
+        profile_name: When given, recorded as the domain's active profile
     """
     from dataclasses import asdict
     
@@ -453,7 +625,10 @@ def apply_exiftool_profile(profile_data):
         logger.debug(f"Verified FileType: {final_config.exiftool_values.FileType}")
     if hasattr(final_config.exiftool_values, 'ImageWidth'):
         logger.debug(f"Verified ImageWidth: {final_config.exiftool_values.ImageWidth}")
-    
+
+    if profile_name:
+        set_active_profile('exiftool', profile_name)
+
     return True
 
 
@@ -753,7 +928,11 @@ def save_exiftool_profile(profile_name: str, profile_data):
     
     logger.debug(f"=== SAVING EXIFTOOL PROFILE ===")
     logger.debug(f"Profile name: {profile_name}")
-    
+
+    if is_protected_profile('exiftool', profile_name):
+        logger.warning(f"'{profile_name}' is a built-in profile and cannot be overwritten")
+        return False
+
     try:
         # Get current exiftool config or create new one
         try:
@@ -819,10 +998,14 @@ def delete_exiftool_profile(profile_name: str) -> bool:
     """
     from AV_Spex.utils.config_setup import ExiftoolConfig
     from dataclasses import asdict
-    
+
+    if is_protected_profile('exiftool', profile_name):
+        logger.warning(f"'{profile_name}' is a built-in profile and cannot be deleted")
+        return False
+
     try:
         exiftool_config = config_mgr.get_config('exiftool', ExiftoolConfig)
-        
+
         if profile_name not in exiftool_config.exiftool_profiles:
             logger.warning(f"Profile '{profile_name}' not found, cannot delete")
             return False
@@ -846,7 +1029,7 @@ def delete_exiftool_profile(profile_name: str) -> bool:
         logger.error(f"Error deleting exiftool profile '{profile_name}': {str(e)}")
         return False
     
-def apply_mediainfo_profile(profile_data):
+def apply_mediainfo_profile(profile_data, profile_name: Optional[str] = None):
     """
     Apply a MediaInfo profile to the current spex configuration.
     
@@ -861,6 +1044,7 @@ def apply_mediainfo_profile(profile_data):
     Args:
         profile_data: MediainfoProfile dataclass instance or dict with
                      nested 'general', 'video', 'audio' sections
+        profile_name: When given, recorded as the domain's active profile
     """
     from dataclasses import asdict
     
@@ -904,7 +1088,10 @@ def apply_mediainfo_profile(profile_data):
     mi_values = final_config.mediainfo_values
     if isinstance(mi_values, dict) and 'expected_general' in mi_values:
         logger.debug(f"Verified expected_general has {len(mi_values['expected_general'])} fields")
-    
+
+    if profile_name:
+        set_active_profile('mediainfo', profile_name)
+
     return True
 
 
@@ -975,7 +1162,11 @@ def save_mediainfo_profile(profile_name: str, profile_data) -> bool:
     
     logger.debug(f"=== SAVING MEDIAINFO PROFILE ===")
     logger.debug(f"Profile name: {profile_name}")
-    
+
+    if is_protected_profile('mediainfo', profile_name):
+        logger.warning(f"'{profile_name}' is a built-in profile and cannot be overwritten")
+        return False
+
     try:
         # Get current mediainfo config or create new one
         try:
@@ -1043,10 +1234,14 @@ def delete_mediainfo_profile(profile_name: str) -> bool:
     """
     from AV_Spex.utils.config_setup import MediainfoConfig
     from dataclasses import asdict
-    
+
+    if is_protected_profile('mediainfo', profile_name):
+        logger.warning(f"'{profile_name}' is a built-in profile and cannot be deleted")
+        return False
+
     try:
         mediainfo_config = config_mgr.get_config('mediainfo', MediainfoConfig)
-        
+
         if profile_name not in mediainfo_config.mediainfo_profiles:
             logger.warning(f"Profile '{profile_name}' not found, cannot delete")
             return False
@@ -1071,7 +1266,7 @@ def delete_mediainfo_profile(profile_name: str) -> bool:
         return False
 
 
-def apply_ffprobe_profile(profile_data):
+def apply_ffprobe_profile(profile_data, profile_name: Optional[str] = None):
     """
     Apply an FFprobe profile to the current spex configuration.
     
@@ -1086,6 +1281,7 @@ def apply_ffprobe_profile(profile_data):
     Args:
         profile_data: FfprobeProfile dataclass instance or dict with
                      nested 'video_stream', 'audio_stream', 'format' sections
+        profile_name: When given, recorded as the domain's active profile
     """
     from dataclasses import asdict
     
@@ -1127,7 +1323,10 @@ def apply_ffprobe_profile(profile_data):
     ff_values = final_config.ffmpeg_values
     if isinstance(ff_values, dict) and 'video_stream' in ff_values:
         logger.debug(f"Verified video_stream has {len(ff_values['video_stream'])} fields")
-    
+
+    if profile_name:
+        set_active_profile('ffprobe', profile_name)
+
     return True
 
 
@@ -1189,7 +1388,11 @@ def save_ffprobe_profile(profile_name: str, profile_data) -> bool:
     
     logger.debug(f"=== SAVING FFPROBE PROFILE ===")
     logger.debug(f"Profile name: {profile_name}")
-    
+
+    if is_protected_profile('ffprobe', profile_name):
+        logger.warning(f"'{profile_name}' is a built-in profile and cannot be overwritten")
+        return False
+
     try:
         # Get current ffprobe config or create new one
         try:
@@ -1256,10 +1459,14 @@ def delete_ffprobe_profile(profile_name: str) -> bool:
         bool: True if successful, False otherwise
     """
     from dataclasses import asdict
-    
+
+    if is_protected_profile('ffprobe', profile_name):
+        logger.warning(f"'{profile_name}' is a built-in profile and cannot be deleted")
+        return False
+
     try:
         ffprobe_config = config_mgr.get_config('ffprobe', FfprobeConfig)
-        
+
         if profile_name not in ffprobe_config.ffprobe_profiles:
             logger.warning(f"Profile '{profile_name}' not found, cannot delete")
             return False
@@ -1278,9 +1485,164 @@ def delete_ffprobe_profile(profile_name: str) -> bool:
         
         logger.info(f"Deleted ffprobe profile: {profile_name}")
         return True
-        
+
     except Exception as e:
         logger.error(f"Error deleting ffprobe profile '{profile_name}': {str(e)}")
+        return False
+
+
+def save_filename_profile(profile_name: str, profile_data) -> bool:
+    """
+    Save a filename profile to the configuration.
+
+    Args:
+        profile_name (str): Name for the profile
+        profile_data: FilenameProfile dataclass or dict with profile data
+
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    logger.debug(f"=== SAVING FILENAME PROFILE ===")
+    logger.debug(f"Profile name: {profile_name}")
+
+    if is_protected_profile('filename', profile_name):
+        logger.warning(f"'{profile_name}' is a built-in profile and cannot be overwritten")
+        return False
+
+    try:
+        filename_config = config_mgr.get_config('filename', FilenameConfig)
+
+        updated_profiles = {}
+        for name, existing_profile in (filename_config.filename_profiles or {}).items():
+            updated_profiles[name] = _as_plain_dict(existing_profile)
+        updated_profiles[profile_name] = _as_plain_dict(profile_data)
+
+        config_mgr.replace_config_section('filename', 'filename_profiles', updated_profiles)
+
+        verification_config = config_mgr.get_config('filename', FilenameConfig)
+        if profile_name in verification_config.filename_profiles:
+            logger.info(f"Successfully saved filename profile: {profile_name}")
+            return True
+        logger.error(f"Verification failed: Profile '{profile_name}' not found after save")
+        return False
+
+    except Exception as e:
+        logger.error(f"Error saving filename profile '{profile_name}': {str(e)}")
+        return False
+
+
+def delete_filename_profile(profile_name: str) -> bool:
+    """
+    Delete a filename profile from the configuration.
+
+    Args:
+        profile_name (str): Name of the profile to delete
+
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    if is_protected_profile('filename', profile_name):
+        logger.warning(f"'{profile_name}' is a built-in profile and cannot be deleted")
+        return False
+
+    try:
+        filename_config = config_mgr.get_config('filename', FilenameConfig)
+
+        if profile_name not in filename_config.filename_profiles:
+            logger.warning(f"Profile '{profile_name}' not found, cannot delete")
+            return False
+
+        updated_profiles = {
+            name: _as_plain_dict(profile)
+            for name, profile in filename_config.filename_profiles.items()
+            if name != profile_name
+        }
+        config_mgr.replace_config_section('filename', 'filename_profiles', updated_profiles)
+
+        logger.info(f"Deleted filename profile: {profile_name}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error deleting filename profile '{profile_name}': {str(e)}")
+        return False
+
+
+def save_signalflow_profile(profile_name: str, profile_data) -> bool:
+    """
+    Save a signal flow profile to the configuration.
+
+    Args:
+        profile_name (str): Name for the profile
+        profile_data: SignalflowProfile dataclass or dict with profile data
+
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    logger.debug(f"=== SAVING SIGNALFLOW PROFILE ===")
+    logger.debug(f"Profile name: {profile_name}")
+
+    if is_protected_profile('signalflow', profile_name):
+        logger.warning(f"'{profile_name}' is a built-in profile and cannot be overwritten")
+        return False
+
+    try:
+        signalflow_config = config_mgr.get_config('signalflow', SignalflowConfig)
+
+        updated_profiles = {}
+        for name, existing_profile in (signalflow_config.signalflow_profiles or {}).items():
+            updated_profiles[name] = _as_plain_dict(existing_profile)
+
+        new_profile = _as_plain_dict(profile_data)
+        new_profile.setdefault('name', profile_name)
+        updated_profiles[profile_name] = new_profile
+
+        config_mgr.replace_config_section('signalflow', 'signalflow_profiles', updated_profiles)
+
+        verification_config = config_mgr.get_config('signalflow', SignalflowConfig)
+        if profile_name in verification_config.signalflow_profiles:
+            logger.info(f"Successfully saved signalflow profile: {profile_name}")
+            return True
+        logger.error(f"Verification failed: Profile '{profile_name}' not found after save")
+        return False
+
+    except Exception as e:
+        logger.error(f"Error saving signalflow profile '{profile_name}': {str(e)}")
+        return False
+
+
+def delete_signalflow_profile(profile_name: str) -> bool:
+    """
+    Delete a signal flow profile from the configuration.
+
+    Args:
+        profile_name (str): Name of the profile to delete
+
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    if is_protected_profile('signalflow', profile_name):
+        logger.warning(f"'{profile_name}' is a built-in profile and cannot be deleted")
+        return False
+
+    try:
+        signalflow_config = config_mgr.get_config('signalflow', SignalflowConfig)
+
+        if profile_name not in signalflow_config.signalflow_profiles:
+            logger.warning(f"Profile '{profile_name}' not found, cannot delete")
+            return False
+
+        updated_profiles = {
+            name: _as_plain_dict(profile)
+            for name, profile in signalflow_config.signalflow_profiles.items()
+            if name != profile_name
+        }
+        config_mgr.replace_config_section('signalflow', 'signalflow_profiles', updated_profiles)
+
+        logger.info(f"Deleted signalflow profile: {profile_name}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error deleting signalflow profile '{profile_name}': {str(e)}")
         return False
 
 
@@ -1343,6 +1705,7 @@ profile_step1 = {
     "outputs": {
         "access_file": False,
         "report": False,
+        "save_console_pdf": False,
         "qctools_ext": "qctools.xml.gz",
         "frame_analysis": {
             "enable_border_detection": False,
@@ -1418,6 +1781,7 @@ profile_step2 = {
     "outputs": {
         "access_file": False,
         "report": True,
+        "save_console_pdf": False,
         "qctools_ext": "qctools.xml.gz",
         "frame_analysis": {
             "enable_bitplane_check": True,
@@ -1495,6 +1859,7 @@ profile_allOff = {
     "outputs": {
         "access_file": False,
         "report": False,
+        "save_console_pdf": False,
         "qctools_ext": "qctools.xml.gz",
         "frame_analysis": {
             "enable_bitplane_check": False,
@@ -1573,6 +1938,7 @@ profile_vendor = {
     "outputs": {
         "access_file": False,
         "report": True,
+        "save_console_pdf": True,
         "qctools_ext": "qctools.xml.gz",
         "frame_analysis": {
             "enable_bitplane_check": False,

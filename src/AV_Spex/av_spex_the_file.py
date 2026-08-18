@@ -215,7 +215,7 @@ The scripts will confirm that the digital files conform to predetermined specifi
     # qct-parse / CLAMS feature toggles
     qct_group = parser.add_argument_group("qct-parse / CLAMS")
     qct_group.add_argument('--enable-audio-analysis', choices=['on', 'off'],
-                           help='Enable/disable qct-parse audio analysis (clipping, channel imbalance, audible timecode, audio dropout). Auto-enables qct_parse.run_tool.')
+                           help='Enable/disable qct-parse audio analysis (clipping, channel imbalance, identical channels, audible timecode, audio dropout). Auto-enables qct_parse.run_tool.')
     qct_group.add_argument('--enable-clamped-levels', choices=['on', 'off'],
                            help='Enable/disable clamped video levels detection in qct-parse. Auto-enables qct_parse.run_tool.')
     qct_group.add_argument('--enable-clams-detection', choices=['on', 'off'],
@@ -433,7 +433,7 @@ def _import_profile_from_file(file_path, tool_name, import_func, save_func, appl
         print(f"Error: Failed to save {tool_name} profile '{profile_name}'")
         return
 
-    apply_func(profile)
+    apply_func(profile, profile_name=profile_name)
     config_mgr.save_config('spex', is_last_used=True)
     print(f"{tool_name.capitalize()} profile '{profile_name}' imported from '{file_path}' and applied.")
 
@@ -460,7 +460,7 @@ def run_cli_mode(args):
     if args.exiftool_profile:
         profile = config_edit.get_exiftool_profile(args.exiftool_profile)
         if profile:
-            config_edit.apply_exiftool_profile(profile)
+            config_edit.apply_exiftool_profile(profile, profile_name=args.exiftool_profile)
             config_mgr.save_config('spex', is_last_used=True)
         else:
             available = config_edit.get_available_exiftool_profiles()
@@ -469,7 +469,7 @@ def run_cli_mode(args):
     if args.mediainfo_profile:
         profile = config_edit.get_mediainfo_profile(args.mediainfo_profile)
         if profile:
-            config_edit.apply_mediainfo_profile(profile)
+            config_edit.apply_mediainfo_profile(profile, profile_name=args.mediainfo_profile)
             config_mgr.save_config('spex', is_last_used=True)
         else:
             available = config_edit.get_available_mediainfo_profiles()
@@ -478,7 +478,7 @@ def run_cli_mode(args):
     if args.ffprobe_profile:
         profile = config_edit.get_ffprobe_profile(args.ffprobe_profile)
         if profile:
-            config_edit.apply_ffprobe_profile(profile)
+            config_edit.apply_ffprobe_profile(profile, profile_name=args.ffprobe_profile)
             config_mgr.save_config('spex', is_last_used=True)
         else:
             available = config_edit.get_available_ffprobe_profiles()
@@ -514,7 +514,7 @@ def run_cli_mode(args):
         sn_name = _sn_aliases.get(args.sn_config_changes, args.sn_config_changes)
         sn_profile = config_edit.get_signalflow_profile(sn_name)
         if sn_profile:
-            config_edit.apply_signalflow_profile(sn_profile)
+            config_edit.apply_signalflow_profile(sn_profile, profile_name=sn_name)
             config_mgr.save_config('spex', is_last_used=True)
         else:
             from .utils.config_setup import SignalflowConfig
@@ -526,7 +526,7 @@ def run_cli_mode(args):
         fn_name = _fn_aliases.get(args.fn_config_changes, args.fn_config_changes)
         fn_config = config_mgr.get_config('filename', FilenameConfig)
         if fn_name in fn_config.filename_profiles:
-            config_edit.apply_filename_profile(fn_config.filename_profiles[fn_name])
+            config_edit.apply_filename_profile(fn_config.filename_profiles[fn_name], profile_name=fn_name)
             config_mgr.save_config('spex', is_last_used=True)
         else:
             available = list(fn_config.filename_profiles.keys())

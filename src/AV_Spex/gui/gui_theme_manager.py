@@ -1,5 +1,5 @@
 from PyQt6.QtWidgets import QApplication, QGroupBox, QPushButton, QComboBox, QTextEdit
-from PyQt6.QtGui import QPalette, QFont, QPixmap
+from PyQt6.QtGui import QPalette, QFont, QPixmap, QColor
 from PyQt6.QtCore import QObject, pyqtSignal, Qt, QSize
 
 import os
@@ -56,6 +56,37 @@ class ThemeManager(QObject):
     
     # === GROUPBOX STYLING ===
     
+    # === DISABLED-STATE COLORS ===
+
+    @staticmethod
+    def blend(color_a, color_b, ratio):
+        """Blend two QColors. ratio 0.0 returns color_a, 1.0 returns color_b."""
+        return QColor(
+            round(color_a.red() * (1 - ratio) + color_b.red() * ratio),
+            round(color_a.green() * (1 - ratio) + color_b.green() * ratio),
+            round(color_a.blue() * (1 - ratio) + color_b.blue() * ratio),
+        )
+
+    def disabled_colors(self):
+        """Return (background, text, border) hex strings for disabled widgets.
+
+        These are computed rather than read from the palette on purpose. The
+        platform palette cannot be relied on for a disabled look: on macOS
+        here every Disabled ColorGroup entry matches its Active counterpart,
+        and Window/PlaceholderText are identical to Button/ButtonText — so
+        palette-derived "disabled" colors render exactly like enabled ones.
+        Blending the normal colors toward each other always moves in the
+        contrasting direction, so this works in light and dark themes alike.
+        """
+        palette = self.app.palette() if self.app else QPalette()
+        button = palette.color(QPalette.ColorRole.Button)
+        text = palette.color(QPalette.ColorRole.ButtonText)
+        return (
+            self.blend(button, text, 0.07).name(),   # slightly shifted background
+            self.blend(text, button, 0.55).name(),   # clearly muted text
+            self.blend(text, button, 0.70).name(),   # faint border
+        )
+
     def style_groupbox(self, group_box, title_position=None):
         """
         Apply consistent styling to a group box based on current theme.
@@ -72,6 +103,7 @@ class ThemeManager(QObject):
         palette = self.app.palette()
         midlight_color = palette.color(palette.ColorRole.Midlight).name()
         text_color = palette.color(palette.ColorRole.Text).name()
+        _, disabled_text_color, disabled_border_color = self.disabled_colors()
         
         # If title_position is None, use a simpler approach
         if title_position is None:
@@ -102,6 +134,13 @@ class ThemeManager(QObject):
                 padding: 0 10px;
                 color: {text_color};
             }}
+            QGroupBox:disabled {{
+                color: {disabled_text_color};
+                border: 2px solid {disabled_border_color};
+            }}
+            QGroupBox::title:disabled {{
+                color: {disabled_text_color};
+            }}
         """)
 
     # === BUTTON STYLING ===
@@ -123,7 +162,8 @@ class ThemeManager(QObject):
         highlight_text_color = palette.color(palette.ColorRole.HighlightedText).name()
         button_color = palette.color(palette.ColorRole.Button).name()
         button_text_color = palette.color(palette.ColorRole.ButtonText).name()
-        
+        disabled_button_color, disabled_text_color, disabled_border_color = self.disabled_colors()
+
         # Apply special styling if requested
         if special_style == "check_spex":
             button.setStyleSheet("""
@@ -186,7 +226,9 @@ class ThemeManager(QObject):
                 }
             """)
         else:
-            # Apply standard button styling
+            # Apply standard button styling. The explicit colors override the
+            # native disabled look, so a :disabled rule is required for
+            # disabled buttons to visibly gray out.
             button.setStyleSheet(f"""
                 QPushButton {{
                     font-weight: bold;
@@ -199,6 +241,11 @@ class ThemeManager(QObject):
                 QPushButton:hover {{
                     background-color: {highlight_color};
                     color: {highlight_text_color};
+                }}
+                QPushButton:disabled {{
+                    background-color: {disabled_button_color};
+                    color: {disabled_text_color};
+                    border: 1px solid {disabled_border_color};
                 }}
             """)
     
@@ -236,8 +283,10 @@ class ThemeManager(QObject):
         
         # Border color from shadow or mid
         border_color = palette.color(palette.ColorRole.Mid).name()
-        
-        # Apply style based on current palette
+        disabled_button_color, disabled_text_color, disabled_border_color = self.disabled_colors()
+
+        # Apply style based on current palette. As with buttons, the explicit
+        # colors override the native disabled look, so :disabled is required.
         combo_box.setStyleSheet(f"""
             QComboBox {{
                 font-weight: bold;
@@ -250,6 +299,11 @@ class ThemeManager(QObject):
             QComboBox:hover {{
                 background-color: {highlight_color};
                 color: {highlight_text_color};
+            }}
+            QComboBox:disabled {{
+                background-color: {disabled_button_color};
+                color: {disabled_text_color};
+                border: 1px solid {disabled_border_color};
             }}
             QComboBox::drop-down {{
                 subcontrol-origin: padding;
