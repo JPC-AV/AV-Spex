@@ -969,13 +969,12 @@ def build_crop_filter(active_area, trailing_comma: bool = True) -> str:
 
 def _opencv_has_ffmpeg() -> bool:
     """True if this OpenCV build has the FFmpeg videoio backend compiled in."""
+    # Imported lazily so this module doesn't pull the GUI dependency graph in.
+    from AV_Spex.utils.dependency_checker import opencv_ffmpeg_support
     try:
-        for line in cv2.getBuildInformation().splitlines():
-            if 'FFMPEG' in line and ':' in line:
-                return line.split(':', 1)[1].strip().upper().startswith('YES')
+        return opencv_ffmpeg_support()[0]
     except Exception:
-        pass
-    return False
+        return False
 
 
 class SophisticatedBorderDetector:
