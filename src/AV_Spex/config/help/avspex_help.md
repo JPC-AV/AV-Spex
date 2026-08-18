@@ -151,21 +151,24 @@ Click **Check Spex!** to start processing.
 
 ### Spex Tab
 
-The Spex tab shows the expected metadata values that AV Spex validates against, as a grid of cards — one per category: **Filename**, **Signal Flow**, **MediaInfo**, **Exiftool**, **FFprobe**, and **qct-parse Thresholds**. Each card displays:
+The Spex tab shows the expected metadata values that AV Spex validates against, laid out as a two-column grid of cards — one per category: **Filename**, **Signal Flow**, **MediaInfo**, **Exiftool**, **FFprobe**, and **qct-parse Thresholds**. Each card displays:
 
-- A **profile dropdown** to select which saved profile is active for that category
-- A **status line** stating the active profile. If you change expected values after applying a profile, the card honestly reports *Modified from "profile name"* rather than silently deselecting; if no profile has been recorded yet it reads *No profile recorded — showing current values*
-- A one-line **summary** of the key expected values (e.g. `FFV1 · 720×486 · Interlaced BFF`)
-- **View** — opens a structured, read-only window listing every expected value for that category
+- A one-line **description** of what that category checks
+- A **profile dropdown** listing every saved profile for the category, built-in and custom. Choosing one applies it immediately and saves it as your current settings — there is no separate Apply step. Until a profile has been applied, the dropdown sits on *Select a profile...*
+- A **status line** stating the active profile. If you change expected values after applying a profile, the card honestly reports *Modified from "profile name" — current values differ from the saved profile* rather than silently deselecting. If no profile has been recorded yet it reads *No profile recorded — showing current values*, and if the recorded profile has since been deleted the card says so instead of pretending it is still active
+- A one-line **summary** of the key expected values — for example `FFV1 · 720×486 · Interlaced BFF` for MediaInfo, or `Sony BVH3100 → Leitch DPS575 → Blackmagic UltraStudio` for Signal Flow
+- **View** — opens a structured, read-only window listing every expected value for that category, grouped into sections
 - **Edit...** — modifies the selected custom profile. For the built-in default profiles this button becomes **Duplicate...**, which copies the profile's values into a new custom profile
-- **New...** — creates a custom profile, starting from the current expected values
-- **Delete** — removes the selected custom profile (disabled for built-in profiles)
+- **New...** — creates a custom profile, pre-filled with the current expected values
+- **Delete** — removes the selected custom profile (disabled for built-in profiles, and when no profile is selected)
+
+The dropdown, **View**, and profile dialogs all re-read the saved configuration each time they are used, so the tab reflects what is actually on disk even if a config file was imported or hand-edited while AV Spex was open.
 
 The built-in default profiles cannot be overwritten or deleted. To change expected values — for example, to validate PAL transfers or a different audio codec — create your own custom profile with **New...** or **Duplicate...**. See the [Custom Metadata Profiles](#custom-metadata-profiles) section below for details.
 
-The qct-parse Thresholds card is read-only; it summarizes the content thresholds and SMPTE color bars limits used by the qct-parse analyses.
+The qct-parse Thresholds card has no profiles: it is read-only, with only a **View** button, and summarizes the content thresholds and SMPTE color bars limits used by the qct-parse analyses.
 
-The Signal Flow card is only available for MKV input, since the signal flow equipment chain is validated against embedded Matroska tags.
+The Signal Flow card applies only to MKV input, since the signal flow equipment chain is validated against embedded Matroska tags. Selecting any other container in the Checks tab's video file extension setting grays out the whole card and its status line reads *Signal flow tags require MKV input*; switching back to MKV restores it.
 
 ![The Spex tab](spex_tab_example.png)
 
@@ -201,15 +204,15 @@ Once your Spex selections are complete, navigate to the Checks tab and click **C
 
 ## Custom Metadata Profiles
 
-AV Spex supports custom profiles for ExifTool, MediaInfo, and FFprobe. This is useful when processing collections with different technical specifications — for example, PAL vs. NTSC transfers, or FLAC vs. PCM audio.
+AV Spex supports custom profiles for five of the six Spex categories — **Filename**, **Signal Flow**, **MediaInfo**, **Exiftool**, and **FFprobe** — all managed the same way, from that category's card in the Spex tab. (The qct-parse Thresholds card is read-only and has no profiles.) Custom profiles are useful when processing collections with different technical specifications — for example, PAL vs. NTSC transfers, or FLAC vs. PCM audio.
 
-Each card in the Spex tab includes:
-- A **profile dropdown** to select from saved profiles
+Each profile-backed card in the Spex tab includes:
+- A **profile dropdown** to select from saved profiles, applied as soon as you choose one
 - **New...** to define a new set of expected values (pre-filled from the current ones)
 - **Edit...** to modify an existing custom profile — or **Duplicate...** to copy a built-in profile into an editable custom one
 - **Delete** to remove a custom profile
 
-Default profiles are protected from modification and deletion — Edit becomes Duplicate and Delete is disabled for them. Custom profiles are saved to the user config directory and persist across sessions. Custom filename and signal flow profiles can be created, edited, and deleted the same way as the metadata tool profiles.
+Default profiles are protected from modification and deletion — Edit becomes Duplicate and Delete is disabled for them. This protection holds no matter how a profile is saved: importing a config that contains a profile named after a built-in adds it under a new name rather than replacing the original, and the shipped definitions are restored on every load, so a built-in profile always means what it says. Custom profiles are saved to the user config directory and persist across sessions and application updates.
 
 Multiple acceptable values can be defined for any field. For example, if a collection includes both FLAC and PCM audio, the expected `codec_name` can be set to `["flac", "pcm_s24le"]`.
 
@@ -689,6 +692,8 @@ Stores expected metadata values organized by tool. Multiple acceptable values ar
 ```
 
 Sections include: `filename_values`, `mediainfo_values` (general, video, audio track values), `exiftool_values`, `ffmpeg_values` (video stream, audio stream, format values), `mediatrace_values` (custom MKV tags like `ENCODER_SETTINGS`), `qct_parse_values` (color bar thresholds and content filter definitions), and `signalflow_profiles` (the equipment signal chain profiles selectable from the Spex tab).
+
+The config also carries `active_profiles` — the name of the profile last applied for each category, which is what the Spex tab's cards report in their status lines. It records only the name; the expected values themselves live in the sections above. If you edit those values by hand without changing `active_profiles`, the card reports the category as *Modified* from the named profile, which is exactly what has happened.
 
 ### Managing Configs
 
