@@ -1031,3 +1031,81 @@ def test_partial_period_failure_still_returns_a_result(tmp_path, monkeypatch):
     )
 
     assert result is not None
+
+
+# ===========================================================================
+# Empty analysis periods: never silently, never a crash (fixes B + D)
+# ===========================================================================
+
+def test_validate_periods_never_returns_empty_keeps_least_black():
+    """D: dropping every candidate would strand BRNG analysis with nothing to do."""
+    fake_self = MagicMock()
+    fake_self.duration = 1800.0
+    fake_self._shift_period_away_from_black = ISA._shift_period_away_from_black.__get__(fake_self)
+    fake_self._fit_period_in_content_gap = lambda *a, **kw: None   # no gap anywhere
+
+    out = ISA._validate_periods_against_black_segments(
+        fake_self,
+        # 100%, 100%, then 57% black — the last is the least-bad candidate
+        periods=[(1435.0, 60), (1565.0, 60), (1765.0, 60)],
+        black_segments=[(0.0, 1799.0)],
+        effective_start=10.0,
+        period_duration=60,
+    )
+
+    assert out, "validation must never hand back an empty period list"
+    assert out == [(1765.0, 60)], "should keep the candidate with the least black"
+
+
+def test_validate_periods_empty_input_stays_empty():
+    """No candidates in means no candidates out — the fallback needs something to pick."""
+    fake_self = MagicMock()
+    fake_self.duration = 1800.0
+    out = ISA._validate_periods_against_black_segments(
+        fake_self, periods=[], black_segments=[(0.0, 100.0)],
+        effective_start=0.0, period_duration=60,
+    )
+    assert out == []
+
+
+def test_no_analysis_periods_returns_none_rather_than_crashing(tmp_path):
+    """B: the removed branch called a method that hasn't existed since Sept 2025."""
+    analyzer = fa.DifferentialBRNGAnalyzer.__new__(fa.DifferentialBRNGAnalyzer)
+    analyzer.video_path = Path("/v/in.mkv")
+    analyzer.active_area = None
+    analyzer.signals = None
+    analyzer.check_cancelled = lambda: False
+
+    result = analyzer.analyze_with_differential_detection(
+        output_dir=tmp_path, analysis_periods=None, duration_limit=300,
+        skip_start_seconds=0.0,
+    )
+
+    assert result is None
+
+
+def test_no_analysis_periods_does_not_call_the_renamed_method(tmp_path, monkeypatch):
+    """Guards against 'fixing' this by renaming the call — the args were reordered too."""
+    analyzer = fa.DifferentialBRNGAnalyzer.__new__(fa.DifferentialBRNGAnalyzer)
+    analyzer.video_path = Path("/v/in.mkv")
+    analyzer.active_area = None
+    analyzer.signals = None
+    analyzer.check_cancelled = lambda: False
+
+    monkeypatch.setattr(
+        fa.DifferentialBRNGAnalyzer, "_create_comparison_videos_for_period",
+        lambda self, *a, **kw: pytest.fail(
+            "an empty period list must not fall back to an arbitrary whole-file window"))
+
+    assert analyzer.analyze_with_differential_detection(
+        output_dir=tmp_path, analysis_periods=[], duration_limit=300) is None
+
+
+def test_differential_analyzer_has_no_stale_method_reference():
+    """The Sept 2025 rename left one call site behind; keep it from coming back."""
+    import inspect
+    src = inspect.getsource(fa.DifferentialBRNGAnalyzer)
+    assert "self._create_comparison_videos(" not in src, (
+        "_create_comparison_videos was renamed to _create_comparison_videos_for_period "
+        "(and its start/duration args swapped) in commit 90aa139"
+    )

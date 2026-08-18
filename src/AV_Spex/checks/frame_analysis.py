@@ -1886,50 +1886,20 @@ class DifferentialBRNGAnalyzer:
 
             logger.info(f"  Analyzed {len(violations)} frames with potential violations across all periods\n")
         else:
-            # Original single-period analysis (similar handling)
-            logger.debug(f"  Creating temporary comparison videos (duration: {duration_limit}s)")
-            
-            temp_dir = output_dir / "temp_brng"
-            temp_dir.mkdir(exist_ok=True)
-            
-            highlighted_path = temp_dir / f"{self.video_path.stem}_highlighted.mp4"
-            original_path = temp_dir / f"{self.video_path.stem}_original.mp4"
-            
-            if not self._create_comparison_videos(highlighted_path, original_path, 
-                                                duration_limit, skip_start_seconds):
-                logger.error("Failed to create comparison videos")
-                return None
-            
-            self._emit_progress(40)
-            
-            temp_video_paths.append({
-                'highlighted': highlighted_path,
-                'original': original_path,
-                'start_time': skip_start_seconds,
-                'duration': duration_limit,
-                'temp_dir': temp_dir
-            })
-            
-            violations = self._analyze_differential_violations(
-                highlighted_path, original_path, skip_start_seconds,
-                qctools_violations=qctools_violations,
-                progress_range=(40, 85)
+            # No periods survived selection. _validate_periods_against_black_segments
+            # already tried to shift each candidate away from black content and then
+            # to shrink it into the largest non-black gap, so an empty list means the
+            # file has no analyzable non-black window at all — a finding, not an edge
+            # case. Analyzing an arbitrary fixed window here would measure the very
+            # black content period selection just rejected.
+            logger.warning(
+                "  No analyzable periods: every candidate overlapped black content and "
+                "could not be shifted or shrunk to fit. BRNG analysis is skipped for this "
+                "file — this is NOT a clean result, nothing was examined."
             )
-            # Handle both tuple (new) and list (legacy) returns
-            period_summaries = []
-            if isinstance(violations, tuple):
-                violations, single_stats = violations
-                period_summaries.append({
-                    'period_num': 1,
-                    'start_time': skip_start_seconds,
-                    'end_time': skip_start_seconds + duration_limit,
-                    'qctools_frames_targeted': single_stats['qctools_frames_targeted'],
-                    'frames_mapped': single_stats['frames_mapped_to_period'],
-                    'total_samples': single_stats['total_samples_analyzed'],
-                    'frames_checked': single_stats['frames_checked'],
-                    'violations_found': single_stats['violations_found']
-                })
-        
+            self._emit_progress(100)
+            return None
+
         self._emit_progress(85)
         
         # Generate patterns and reports
@@ -3640,9 +3610,13 @@ class IntegratedSignalstatsAnalyzer:
             
         Returns:
             Validated list of periods with black-overlapping ones shifted or removed.
+            Never empty when given candidates: if every one is dropped, the least-black
+            candidate is kept as a last resort, since analyzing a partly-black window
+            still says more than skipping the file's BRNG analysis entirely.
         """
         validated = []
-        
+        dropped = []  # (overlap_pct, start, dur) for the last-resort fallback
+
         for start, dur in periods:
             end = start + dur
             
@@ -3688,6 +3662,21 @@ class IntegratedSignalstatsAnalyzer:
                         validated.append(fitted)
                     else:
                         logger.warning(f"    → Could not find valid non-black replacement, dropping period")
+                        dropped.append((overlap_pct, start, dur))
+
+        if not validated and dropped:
+            # Everything was dropped. Rather than leaving BRNG analysis with nothing
+            # to look at, keep the candidate that had the least black in it and say
+            # plainly that the sample is compromised.
+            overlap_pct, start, dur = min(dropped, key=lambda d: d[0])
+            start_tc = f"{int(start // 60):02d}:{start % 60:05.2f}"
+            logger.warning(
+                f"  Every candidate period was dropped as black. Keeping the least-black "
+                f"one ({start_tc}, {overlap_pct:.0f}% black) as a last resort — BRNG "
+                f"results for this file are measured on mostly-black content and should "
+                f"be treated as low confidence."
+            )
+            validated.append((start, dur))
 
         return validated
 
