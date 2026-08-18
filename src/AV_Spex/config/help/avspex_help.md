@@ -470,9 +470,19 @@ Because only a few minutes of a tape are actually examined, *where* those period
 
 **Repairs**: A period that ends up overlapping bars or black by more than a quarter of its length is shifted outward in 5-second steps, alternating forward and backward, until it finds a position that overlaps by 10% or less and stays clear of the other periods. If no such position exists, the period is shrunk to fit the largest clean gap in the content (down to a 10-second minimum) — this is what happens on short tapes whose entire non-black content is shorter than one configured period. A period that can't be repaired either way is dropped.
 
+If *every* candidate is dropped — a tape with no window of picture content long enough to sample — the least-black candidate is kept anyway rather than abandoning the analysis, and the results are flagged as low confidence (below). Measuring mostly-black frames and saying so is more useful than reporting nothing. Only when there were no candidates at all is BRNG analysis skipped outright; the log says so explicitly, because a skipped analysis is an absence of evidence, not a clean result.
+
 **When there are no violations to aim at**: On a clean tape the placement falls back to periods centered on frames that border detection found visually clean, and failing that to periods spread evenly across the content. If violation clustering or the repair pass left fewer periods than requested, the count is topped up with evenly spaced periods that avoid the existing ones, so the report always samples the requested number of places.
 
 **Refinement**: Signalstats runs on the selected periods first, and its findings can revise the periods before BRNG analysis runs. A period whose active picture area turns out to hold essentially no out-of-range signal — nothing for the differential detector to find — is swapped for the next-best unused candidate. Each period's diagnosis also sets how densely BRNG analysis samples it: periods with real content violations are sampled heavily, near-clean periods lightly.
+
+**How much to trust the sample**: BRNG results only mean what they appear to mean if the intended periods were actually sampled, so each result carries a confidence level, and anything short of normal is printed as a yellow caveat box above the BRNG numbers in the HTML report:
+
+- **Normal** — the intended periods were placed on picture content and examined. No caveat is shown.
+- **⚠️ Partial coverage** — some periods could not be examined. What was analyzed is valid, but it isn't the full intended sample, so violations may exist in the parts that were missed. The caveat names how many of the periods were covered.
+- **⚠️ Low confidence** — the last-resort case above: no period free of black content could be found, so the numbers describe black frames rather than picture. The caveat names the period that was used and how black it was, and says to treat the values as indicative only.
+
+Both conditions can occur together. The level reported is the more severe one — sitting on black content makes the numbers *wrong*, whereas partial coverage only makes them *incomplete* — while the caveat text keeps every reason, so nothing is lost to that precedence.
 
 **Where the periods appear**: In `{video_id}_enhanced_frame_analysis.json` (alongside the detected black segments) and as the shaded tan bands on the color bars evaluation timeline in the HTML report. The timeline's dashed BRNG trace is the same measure that drives period placement, so the trace's peaks and the shaded bands should visibly coincide.
 
