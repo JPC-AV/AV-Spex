@@ -231,9 +231,11 @@ class ComplexWindow(QWidget, ThemeableMixin):
         self._add_option(layout, self.run_clams_detection_cb, self._desc_label(
             "Run the CLAMS SSIM-based SMPTE bars detector and the "
             "cross-correlation tone detector together. Detected regions "
-            "guide qct-parse's bars scans, and the head-bars end time "
-            "used for BRNG-skip and access-file trim is merged from "
-            "both detectors (latest end wins)."))
+            "guide qct-parse's bars scans, and the head-bars end time used "
+            "for BRNG-skip and access-file trim is settled by consensus "
+            "between the two detectors: where they disagree, SSIM decides, "
+            "and a head claim CLAMS contradicts is dropped rather than "
+            "trimmed on."))
 
         self.colorbars_group.setLayout(layout)
         main_layout.addWidget(self.colorbars_group)

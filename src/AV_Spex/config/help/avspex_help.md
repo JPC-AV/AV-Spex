@@ -116,6 +116,12 @@ The GUI has four tabs: **Import**, **Checks**, **Spex**, and **Complex**
 
 The Import tab is where you select input directories for processing and manage configuration files. It includes options to import, export, or reset the Checks and Spex configurations as JSON files.
 
+**Import Directory...** adds a directory to the *Selected Directories* list; add as many as you like to process a batch, and use **Delete Selected** to remove one. This tab also holds the buttons that start a run, so it is where you end up after configuring the other tabs:
+
+- **Check Spex!** — process every directory in the list with your current settings
+- **Dry Run** — apply your configuration changes and report what would happen, without running any tools on the video files
+- **Show Processing Window** — reopen the processing console for the current or most recent run
+
 ![The Import tab](import_tab_example.png)
 
 #### Import and Export Config
@@ -143,29 +149,41 @@ The Checks tab controls which tools and processing steps are run. It includes:
   - **Step 2**: Run QCTools and qct-parse (bar detection, evaluate bars, thumbnail export, audio analysis, clamped levels, chroma phase errors) plus CLAMS bars/tone detection and frame analysis (bitplane check, border detection, BRNG, signalstats); check fixity and validate stream fixity; generate the HTML report
   - **Vendor**: Run the metadata tools and MediaConch without comparing them against Spex values, embed stream fixity, and generate the HTML report — for checking vendor-supplied files before the full QC pass
   - **Off**: Turn off all tools
-- **Checks Options**: Enable or disable individual tools and checks using checkboxes. Each tool has a **Run Tool** option (generates a sidecar file) and a **Check Tool** option (compares the sidecar output against expected Spex values).
 
-Click **Check Spex!** to start processing.
+  **Manage Profiles** opens a dialog listing your saved checks profiles, with buttons to create, edit, delete, and apply them. **Save Current as Profile** stores whatever the checkboxes currently say as a new named profile of your own.
+- **Checks Options**: The individual settings, grouped by what they affect. Every checkbox carries its description inline, so nothing is hidden behind a tooltip:
+  - **Input** — **Video File Extension**, the container AV Spex looks for in each input directory. Choosing a non-MKV container automatically disables the options that only work on Matroska: embedded stream fixity, the mediatrace custom-tag check, and the signal flow check
+  - **Validation** — **Validate Filename**, checking the input filename against the active Filename profile
+  - **Outputs** — the access copy with its sub-options, and the HTML report. Sub-options that depend on another setting say so on a *Requires:* line and stay grayed out until that setting is on (the QCTools file extension lives on the Complex tab, with the rest of the QCTools settings)
+  - **Fixity** — the whole-file and embedded stream fixity steps, each with its own hash algorithm dropdown (`md5` or `sha256`)
+  - **Tools** — one box per metadata tool (ExifTool, FFprobe, MediaInfo, MediaTrace, mkvalidator), each with a **Run Tool** option (generates the sidecar file) and a **Check Tool** option (compares that sidecar against the expected Spex values). MediaConch has its own box, showing the active policy in a dropdown with buttons to import a new policy XML or export the current one
+
+The heavier analysis steps are not on this tab — they live on the Complex tab, described below.
+
+When your selections are set, go to the **Import** tab and click **Check Spex!** to start processing, or **Dry Run** to apply your configuration changes without processing any files.
 
 ![The Checks tab](checks_tab_example.png)
 
 ### Spex Tab
 
-The Spex tab shows the expected metadata values that AV Spex validates against, as a grid of cards — one per category: **Filename**, **Signal Flow**, **MediaInfo**, **Exiftool**, **FFprobe**, and **qct-parse Thresholds**. Each card displays:
+The Spex tab shows the expected metadata values that AV Spex validates against, laid out as a two-column grid of cards — one per category: **Filename**, **Signal Flow**, **MediaInfo**, **Exiftool**, **FFprobe**, and **qct-parse Thresholds**. Each card displays:
 
-- A **profile dropdown** to select which saved profile is active for that category
-- A **status line** stating the active profile. If you change expected values after applying a profile, the card honestly reports *Modified from "profile name"* rather than silently deselecting; if no profile has been recorded yet it reads *No profile recorded — showing current values*
-- A one-line **summary** of the key expected values (e.g. `FFV1 · 720×486 · Interlaced BFF`)
-- **View** — opens a structured, read-only window listing every expected value for that category
+- A one-line **description** of what that category checks
+- A **profile dropdown** listing every saved profile for the category, built-in and custom. Choosing one applies it immediately and saves it as your current settings — there is no separate Apply step. Until a profile has been applied, the dropdown sits on *Select a profile...*
+- A **status line** stating the active profile. If you change expected values after applying a profile, the card honestly reports *Modified from "profile name" — current values differ from the saved profile* rather than silently deselecting. If no profile has been recorded yet it reads *No profile recorded — showing current values*, and if the recorded profile has since been deleted the card says so instead of pretending it is still active
+- A one-line **summary** of the key expected values — for example `FFV1 · 720×486 · Interlaced BFF` for MediaInfo, or `Sony BVH3100 → Leitch DPS575 → Blackmagic UltraStudio` for Signal Flow
+- **View** — opens a structured, read-only window listing every expected value for that category, grouped into sections
 - **Edit...** — modifies the selected custom profile. For the built-in default profiles this button becomes **Duplicate...**, which copies the profile's values into a new custom profile
-- **New...** — creates a custom profile, starting from the current expected values
-- **Delete** — removes the selected custom profile (disabled for built-in profiles)
+- **New...** — creates a custom profile, pre-filled with the current expected values
+- **Delete** — removes the selected custom profile (disabled for built-in profiles, and when no profile is selected)
+
+The dropdown, **View**, and profile dialogs all re-read the saved configuration each time they are used, so the tab reflects what is actually on disk even if a config file was imported or hand-edited while AV Spex was open.
 
 The built-in default profiles cannot be overwritten or deleted. To change expected values — for example, to validate PAL transfers or a different audio codec — create your own custom profile with **New...** or **Duplicate...**. See the [Custom Metadata Profiles](#custom-metadata-profiles) section below for details.
 
-The qct-parse Thresholds card is read-only; it summarizes the content thresholds and SMPTE color bars limits used by the qct-parse analyses.
+The qct-parse Thresholds card has no profiles: it is read-only, with only a **View** button, and summarizes the content thresholds and SMPTE color bars limits used by the qct-parse analyses.
 
-The Signal Flow card is only available for MKV input, since the signal flow equipment chain is validated against embedded Matroska tags.
+The Signal Flow card applies only to MKV input, since the signal flow equipment chain is validated against embedded Matroska tags. Selecting any other container in the Checks tab's video file extension setting grays out the whole card and its status line reads *Signal flow tags require MKV input*; switching back to MKV restores it.
 
 ![The Spex tab](spex_tab_example.png)
 
@@ -195,21 +213,21 @@ Checks marked "via qct-parse" read the QCTools report through the qct-parse tool
 
 ![The Complex tab](complex_tab_example.png)
 
-Once your Spex selections are complete, navigate to the Checks tab and click **Check Spex!**.
+Once your selections are complete, return to the Import tab and click **Check Spex!**.
 
 ---
 
 ## Custom Metadata Profiles
 
-AV Spex supports custom profiles for ExifTool, MediaInfo, and FFprobe. This is useful when processing collections with different technical specifications — for example, PAL vs. NTSC transfers, or FLAC vs. PCM audio.
+AV Spex supports custom profiles for five of the six Spex categories — **Filename**, **Signal Flow**, **MediaInfo**, **Exiftool**, and **FFprobe** — all managed the same way, from that category's card in the Spex tab. (The qct-parse Thresholds card is read-only and has no profiles.) Custom profiles are useful when processing collections with different technical specifications — for example, PAL vs. NTSC transfers, or FLAC vs. PCM audio.
 
-Each card in the Spex tab includes:
-- A **profile dropdown** to select from saved profiles
+Each profile-backed card in the Spex tab includes:
+- A **profile dropdown** to select from saved profiles, applied as soon as you choose one
 - **New...** to define a new set of expected values (pre-filled from the current ones)
 - **Edit...** to modify an existing custom profile — or **Duplicate...** to copy a built-in profile into an editable custom one
 - **Delete** to remove a custom profile
 
-Default profiles are protected from modification and deletion — Edit becomes Duplicate and Delete is disabled for them. Custom profiles are saved to the user config directory and persist across sessions. Custom filename and signal flow profiles can be created, edited, and deleted the same way as the metadata tool profiles.
+Default profiles are protected from modification and deletion — Edit becomes Duplicate and Delete is disabled for them. This protection holds no matter how a profile is saved: importing a config that contains a profile named after a built-in adds it under a new name rather than replacing the original, and the shipped definitions are restored on every load, so a built-in profile always means what it says. Custom profiles are saved to the user config directory and persist across sessions and application updates.
 
 Multiple acceptable values can be defined for any field. For example, if a collection includes both FLAC and PCM audio, the expected `codec_name` can be set to `["flac", "pcm_s24le"]`.
 
@@ -306,7 +324,14 @@ Available when Detect Color Bars is on. Exports thumbnail images of frames that 
 
 **Fragment merging**: A continuous span can dip below threshold briefly and be reported as several adjacent fragments; fragments separated by less than the configured merge gap (1 s for bars, 5 s for tone) are coalesced back into a single span.
 
-**How the results are used**: CLAMS runs before qct-parse, and all detected bars and tone regions are passed to qct-parse, which runs additional windowed bars scans over them beyond the head of the tape. The head color-bars end time that drives the BRNG-skip window and the access-file trim is then merged from both detectors: when CLAMS's primary bars detection starts within the first 10 seconds of the file, the later of the two end times (qct-parse or CLAMS) wins — and if only one detector found head bars, its end time is used on its own. Only primary-pass CLAMS detections participate in this merge; mid-file bars are report-only.
+**How the results are used**: CLAMS runs before qct-parse, and all detected bars and tone regions are passed to qct-parse, which runs additional windowed bars scans over them beyond the head of the tape. The head color-bars end time that drives the BRNG-skip window and the access-file trim is then decided by a consensus between the two detectors. A bars span counts as *head* bars only if it starts within the first 30 seconds of the file, and only primary-pass CLAMS detections take part — mid-file bars are report-only. From there:
+
+- **Both detectors found head bars and agree** (their end times are within 3 seconds of each other) — the later end time wins.
+- **Both found head bars but disagree** — the disputed span between the two end times is re-checked with CLAMS's SSIM comparison. If that span isn't bars, the earlier end time wins; otherwise the later one does. This arbitration exists because qct-parse works from luma statistics, which can't distinguish color bars from a bright, saturated slate.
+- **Only qct-parse found head bars** — if CLAMS ran and its SSIM scan of that same region says the region is not bars, the claim is *demoted*: no head-bars end time is set at all, so nothing is trimmed from the access file and no analysis window is skipped. A false trim removes real program content, so an uncorroborated claim is discarded rather than trusted.
+- **Only CLAMS found head bars** — its end time is used.
+
+Separately from that single end time, the full set of bars spans found by *either* detector is excluded from BRNG, signalstats, and duplicate-frame analysis, and from the qct-parse color bars evaluation. Over-excluding there is cheap, while analyzing bars as if they were program content skews the results. The access-file trim and chroma phase detection intentionally use only the head end time.
 
 Numeric tuning of the CLAMS parameters (SSIM threshold, sample ratio, minimum durations, etc.) is JSON-only — only the on/off toggle is exposed in the GUI and CLI. Edit the saved `last_used_checks_config.json` directly if you need to adjust those.
 
@@ -445,9 +470,19 @@ Because only a few minutes of a tape are actually examined, *where* those period
 
 **Repairs**: A period that ends up overlapping bars or black by more than a quarter of its length is shifted outward in 5-second steps, alternating forward and backward, until it finds a position that overlaps by 10% or less and stays clear of the other periods. If no such position exists, the period is shrunk to fit the largest clean gap in the content (down to a 10-second minimum) — this is what happens on short tapes whose entire non-black content is shorter than one configured period. A period that can't be repaired either way is dropped.
 
+If *every* candidate is dropped — a tape with no window of picture content long enough to sample — the least-black candidate is kept anyway rather than abandoning the analysis, and the results are flagged as low confidence (below). Measuring mostly-black frames and saying so is more useful than reporting nothing. Only when there were no candidates at all is BRNG analysis skipped outright; the log says so explicitly, because a skipped analysis is an absence of evidence, not a clean result.
+
 **When there are no violations to aim at**: On a clean tape the placement falls back to periods centered on frames that border detection found visually clean, and failing that to periods spread evenly across the content. If violation clustering or the repair pass left fewer periods than requested, the count is topped up with evenly spaced periods that avoid the existing ones, so the report always samples the requested number of places.
 
 **Refinement**: Signalstats runs on the selected periods first, and its findings can revise the periods before BRNG analysis runs. A period whose active picture area turns out to hold essentially no out-of-range signal — nothing for the differential detector to find — is swapped for the next-best unused candidate. Each period's diagnosis also sets how densely BRNG analysis samples it: periods with real content violations are sampled heavily, near-clean periods lightly.
+
+**How much to trust the sample**: BRNG results only mean what they appear to mean if the intended periods were actually sampled, so each result carries a confidence level, and anything short of normal is printed as a yellow caveat box above the BRNG numbers in the HTML report:
+
+- **Normal** — the intended periods were placed on picture content and examined. No caveat is shown.
+- **⚠️ Partial coverage** — some periods could not be examined. What was analyzed is valid, but it isn't the full intended sample, so violations may exist in the parts that were missed. The caveat names how many of the periods were covered.
+- **⚠️ Low confidence** — the last-resort case above: no period free of black content could be found, so the numbers describe black frames rather than picture. The caveat names the period that was used and how black it was, and says to treat the values as indicative only.
+
+Both conditions can occur together. The level reported is the more severe one — sitting on black content makes the numbers *wrong*, whereas partial coverage only makes them *incomplete* — while the caveat text keeps every reason, so nothing is lost to that precedence.
 
 **Where the periods appear**: In `{video_id}_enhanced_frame_analysis.json` (alongside the detected black segments) and as the shaded tan bands on the color bars evaluation timeline in the HTML report. The timeline's dashed BRNG trace is the same measure that drives period placement, so the trace's peaks and the shaded bands should visibly coincide.
 
@@ -689,6 +724,8 @@ Stores expected metadata values organized by tool. Multiple acceptable values ar
 ```
 
 Sections include: `filename_values`, `mediainfo_values` (general, video, audio track values), `exiftool_values`, `ffmpeg_values` (video stream, audio stream, format values), `mediatrace_values` (custom MKV tags like `ENCODER_SETTINGS`), `qct_parse_values` (color bar thresholds and content filter definitions), and `signalflow_profiles` (the equipment signal chain profiles selectable from the Spex tab).
+
+The config also carries `active_profiles` — the name of the profile last applied for each category, which is what the Spex tab's cards report in their status lines. It records only the name; the expected values themselves live in the sections above. If you edit those values by hand without changing `active_profiles`, the card reports the category as *Modified* from the named profile, which is exactly what has happened.
 
 ### Managing Configs
 

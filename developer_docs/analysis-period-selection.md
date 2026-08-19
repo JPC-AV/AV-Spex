@@ -157,6 +157,24 @@ For each period, total overlap with all avoid-segments is summed:
   is shorter than one configured period.
 - **Still nothing** → the period is dropped (and `_fill_periods_to_count` may later replace it).
 
+**Last-resort keep**: `_validate_periods_against_black_segments` never returns empty when it was
+given candidates. If every one is dropped, the candidate with the *least* black overlap is kept and
+`self.last_resort_period_note` is set (sticky for the run — validation is called from several
+places, and any one firing means the sample is compromised). Analyzing a partly-black window and
+labeling it beats skipping the file's BRNG analysis silently.
+
+**Confidence signal**: `resolve_period_confidence(last_resort_note, coverage_note)` folds the
+signals into `BRNGAnalysisResult.period_confidence` (`PERIOD_CONFIDENCE_LEVELS` = `normal` |
+`partial_coverage` | `last_resort`) plus a `period_confidence_note` joining every reason.
+`last_resort` outranks `partial_coverage` — black content makes the numbers wrong, partial coverage
+only makes them incomplete. `generate_frame_analysis_html` renders anything non-`normal` as a yellow
+caveat box above the BRNG figures.
+
+Note that an empty period list therefore means *no candidates existed at all*, not "all were
+rejected" — `run_differential_analysis` skips BRNG entirely in that case and logs that nothing was
+examined, rather than falling back to a fixed window (removed in d58a800, since that window would
+have measured the very black content selection had just rejected).
+
 ---
 
 ## Stage 3 — Refinement after signalstats
