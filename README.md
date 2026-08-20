@@ -144,9 +144,9 @@ The Checks tab controls which tools and processing steps are run. It includes:
   - **Step 2**: Run QCTools and qct-parse (bar detection, evaluate bars, thumbnail export, audio analysis, clamped levels, chroma phase errors) plus CLAMS bars/tone detection and frame analysis (bitplane check, border detection, BRNG, signalstats); check fixity and validate stream fixity; generate the HTML report
   - **Vendor**: Run the metadata tools and MediaConch without comparing them against Spex values, embed stream fixity, and generate the HTML report — for checking vendor-supplied files before the full QC pass
   - **Off**: Turn off all tools
-- **Checks Options**: Enable or disable individual tools and checks using checkboxes. Each tool has a **Run Tool** option (generates a sidecar file) and a **Check Tool** option (compares the sidecar output against expected Spex values).
+- **Checks Options**: The individual settings, grouped by what they affect — **Input** (the container extension to look for), **Validation** (filename checking), **Outputs** (access copy and HTML report), **Fixity** (whole-file and embedded stream hashing, each with its own algorithm), and **Tools** (one box per metadata tool, each with a **Run Tool** option that generates the sidecar file and a **Check Tool** option that compares it against expected Spex values, plus MediaConch and its policy). Every checkbox carries its description inline.
 
-Click **Check Spex!** to start processing.
+When your selections are set, go to the **Import** tab and click **Check Spex!** to start processing.
 
 ### Spex Tab
 
@@ -154,11 +154,14 @@ Click **Check Spex!** to start processing.
   <img src="https://github.com/JPC-AV/JPC_AV_videoQC/blob/main/images_for_readme/avspex_spex_tab.png?raw=true" alt="AV Spex Spex Tab"/>
 </p>
 
-The Spex tab displays the expected metadata values that AV Spex validates against, organized by tool. It includes:
+The Spex tab displays the expected metadata values that AV Spex validates against, as a two-column grid of cards — one per category: **Filename**, **Signal Flow**, **MediaInfo**, **Exiftool**, **FFprobe**, and **qct-parse Thresholds**. Each card shows:
 
-- **Filename / Signal Flow**: Dropdown menus to select the active filename convention and signal flow equipment profiles
-- **ExifTool / MediaInfo / FFprobe**: Dropdown menus to select named expected-values profiles for each metadata tool (see [Custom Metadata Profiles](#custom-metadata-profiles) below)
-- **Open Section**: View the current expected values for any section (read-only for default profiles)
+- A **profile dropdown** listing that category's saved profiles, built-in and custom. Choosing one applies it immediately — there is no separate Apply step
+- A **status line** naming the active profile, which reports *Modified from "profile name"* if you change expected values afterward rather than silently deselecting
+- A one-line **summary** of the key expected values (e.g. `FFV1 · 720×486 · Interlaced BFF`)
+- **View** / **Edit…** / **New…** / **Delete** buttons (see [Custom Metadata Profiles](#custom-metadata-profiles) below)
+
+The qct-parse Thresholds card is read-only, with only a **View** button. The Signal Flow card applies only to MKV input and is grayed out for other containers, since its equipment chain is validated against embedded Matroska tags.
 
 ### Complex Tab
 
@@ -188,7 +191,7 @@ The Complex tab configures the advanced analysis steps — typically run during 
 
 Checks marked "via qct-parse" read the QCTools report through the qct-parse tool, and enabling any of them turns qct-parse on automatically — there is no separate qct-parse "Run Tool" checkbox on this tab. Turning off all qct-parse-backed checks turns the tool off.
 
-Once your Spex selections are complete, navigate to the Checks tab and click **Check Spex!**.
+Once your selections are complete, return to the Import tab and click **Check Spex!**.
 
 ---
 
@@ -198,14 +201,16 @@ Once your Spex selections are complete, navigate to the Checks tab and click **C
   <img src="https://github.com/JPC-AV/JPC_AV_videoQC/blob/main/images_for_readme/avspex_mediainfo_profile_gui.png?raw=true" alt="AV Spex Custom MediaInfo Profile Window"/>
 </p>
 
-AV Spex supports custom profiles for ExifTool, MediaInfo, and FFprobe. This is useful when processing collections with different technical specifications — for example, PAL vs. NTSC transfers, or FLAC vs. PCM audio.
+AV Spex supports custom profiles for five of the six Spex categories — **Filename**, **Signal Flow**, **MediaInfo**, **Exiftool**, and **FFprobe** — all managed the same way from that category's card in the Spex tab. (The qct-parse Thresholds card is read-only and has no profiles.) This is useful when processing collections with different technical specifications — for example, PAL vs. NTSC transfers, or FLAC vs. PCM audio.
 
-Each tool's section in the Spex tab includes:
-- A **profile dropdown** to select from saved profiles
-- **Create Custom Profile...** to define a new set of expected values
-- **Edit Selected Profile...** to modify an existing custom profile
+Each profile-backed card includes:
+- A **profile dropdown** to select from saved profiles, applied as soon as you choose one
+- **View** to see every expected value for that category in a read-only window
+- **New...** to define a new set of expected values, pre-filled from the current ones
+- **Edit...** to modify an existing custom profile — or **Duplicate...** to copy a built-in profile into an editable custom one
+- **Delete** to remove a custom profile
 
-Default profiles are protected from accidental modification or deletion. Custom profiles are saved to the user config directory and persist across sessions.
+Default profiles are protected from modification and deletion: Edit becomes Duplicate and Delete is disabled for them, importing a config containing a profile named after a built-in adds it under a new name rather than replacing the original, and the shipped definitions are restored on every load. Custom profiles are saved to the user config directory and persist across sessions.
 
 Multiple acceptable values can be defined for any field. For example, if a collection includes both FLAC and PCM audio, the expected `codec_name` can be set to `["flac", "pcm_s24le"]`.
 
@@ -284,7 +289,7 @@ Like audio analysis, this runs inside qct-parse and the CLI auto-enables `qct_pa
 - **SSIM bars detector** — uses the structural similarity index (SSIM) to identify SMPTE color bars by comparing frames against a reference pattern, providing a side-by-side comparison with qct-parse's own bars detector.
 - **Cross-correlation tone detector** — identifies spans of monotonic audio, such as the 1 kHz tones that accompany SMPTE bars. Useful for locating bars-and-tones segments at the head of a tape.
 
-Detected CLAMS regions are passed to qct-parse to guide additional windowed bars scans, and the head color-bars end time used for downstream BRNG-skip and access-file trim decisions is merged from both detectors — the later end time wins.
+Detected CLAMS regions are passed to qct-parse to guide additional windowed bars scans, and the head color-bars end time used for downstream BRNG-skip and access-file trim decisions is settled by a consensus between the two detectors. A bars span counts as *head* bars only if it starts within the first 30 seconds. When both detectors agree (their end times within 3 seconds), the later end wins; when they disagree, the disputed span is re-checked with SSIM, which decides — qct-parse works from luma statistics, which can't tell color bars from a bright, saturated slate. If only qct-parse found head bars and a CLAMS SSIM scan of that region says it isn't bars, the claim is dropped entirely and no end time is set, since a false trim would remove real program content.
 
 ```bash
 av-spex --enable-clams-detection on
@@ -496,9 +501,13 @@ A per-file log is written inside each `_qc_metadata` directory:
 `{video_id}_qc_metadata/{video_id}_avspex_processing.log`
 Re-running a file appends to its existing log rather than overwriting it, so the full processing history of the file is preserved in one place. Each new run is separated from the previous one by a `NEW PROCESSING RUN` banner, followed by the run's start timestamp.
 
-Each run also writes a timestamped application log:
+Each run also writes a timestamped application log, in a date-stamped subdirectory. The location depends on how AV Spex is running — the installed app writes to the user Logs directory, while running from source keeps logs beside the code:
 ```
-/.../Library/Logs/AVSpex/YYYY-MM-DD/YYYY-MM-DD_HH-MM-SS_JPC_AV_log.log
+# Installed app (DMG / Homebrew)
+~/Library/Logs/AVSpex/YYYY-MM-DD/YYYY-MM-DD_HH-MM-SS_AVSpex.log
+
+# Running from source
+logs/YYYY-MM-DD/YYYY-MM-DD_HH-MM-SS_AVSpex.log
 ```
 
 ---
