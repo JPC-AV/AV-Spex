@@ -802,9 +802,13 @@ A per-file log is written inside each `_qc_metadata` directory:
 `{video_id}_qc_metadata/{video_id}_avspex_processing.log`
 Re-running a file appends to its existing log rather than overwriting it, so the full processing history of the file is preserved in one place. Each new run is separated from the previous one by a `NEW PROCESSING RUN` banner, followed by the run's start timestamp.
 
-Each run also writes a timestamped application log:
+Each run also writes a timestamped application log, in a date-stamped subdirectory. Where it lands depends on how AV Spex is running — the installed app writes to your user Logs directory, while running from source keeps logs beside the code:
 ```
-/.../Library/Logs/AVSpex/YYYY-MM-DD/YYYY-MM-DD_HH-MM-SS_JPC_AV_log.log
+# Installed app (DMG / Homebrew)
+~/Library/Logs/AVSpex/YYYY-MM-DD/YYYY-MM-DD_HH-MM-SS_AVSpex.log
+
+# Running from source
+logs/YYYY-MM-DD/YYYY-MM-DD_HH-MM-SS_AVSpex.log
 ```
 
 ---
