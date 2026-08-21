@@ -5150,12 +5150,47 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                 assessment_icon = '✅'
             
             html += f"""
-            <div style="background-color: {assessment_bg}; padding: 12px 16px; margin: 10px 0; 
+            <div style="background-color: {assessment_bg}; padding: 12px 16px; margin: 10px 0;
                         border-left: 4px solid {assessment_border}; border-radius: 0 4px 4px 0;">
                 <p style="margin: 0; font-size: 14px;"><strong>{assessment_icon} Assessment:</strong> {assessment}</p>
             </div>
             """
-            
+
+            # ── Sampling-confidence caveat ──
+            # The numbers below only mean what they appear to mean if the intended
+            # periods were actually sampled. Say otherwise before the reader
+            # interprets them: 'last_resort' means they describe black frames,
+            # 'partial_coverage' means they are valid but incomplete.
+            confidence = brng_data.get('period_confidence', 'normal')
+            if confidence and confidence != 'normal':
+                caveat_defaults = {
+                    'last_resort': (
+                        "⚠️ Low confidence",
+                        "Analysis periods could not be placed on picture content.",
+                        "Treat the values below as indicative only — they are not a "
+                        "representative sample of this file's picture content.",
+                    ),
+                    'partial_coverage': (
+                        "⚠️ Partial coverage",
+                        "Some analysis periods could not be examined.",
+                        "The periods that were analyzed are valid, but this is not the "
+                        "full intended sample — violations may exist in the parts that "
+                        "could not be examined.",
+                    ),
+                }
+                heading, default_note, qualifier = caveat_defaults.get(
+                    confidence, ("⚠️ Reduced confidence",
+                                 "The intended analysis sample was not fully achieved.",
+                                 "Interpret the values below with care."))
+                confidence_note = brng_data.get('period_confidence_note') or default_note
+                html += f"""
+            <div style="background-color: #fff3cd; padding: 12px 16px; margin: 10px 0;
+                        border-left: 4px solid #bf971b; border-radius: 0 4px 4px 0;">
+                <p style="margin: 0; font-size: 14px;"><strong>{heading}:</strong> {confidence_note}</p>
+                <p style="margin: 6px 0 0 0; font-size: 13px; color: #6b5a3e;">{qualifier}</p>
+            </div>
+            """
+
             # ── Period-by-Period Analysis ──
             if period_summaries:
                 # Calculate overall time range

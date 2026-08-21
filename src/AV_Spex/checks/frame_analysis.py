@@ -72,6 +72,12 @@ class BRNGAnalysisResult:
     refinement_recommendations: Dict = None
     analysis_periods: List[Tuple[float, int]] = None
     period_summaries: List[Dict] = None
+    # How much the sampled periods can be trusted — see PERIOD_CONFIDENCE_LEVELS.
+    # 'partial_coverage': some periods could not be examined, so the result is
+    # incomplete. 'last_resort': the periods that were examined sit on black
+    # content, so the numbers describe black frames rather than picture.
+    period_confidence: str = 'normal'
+    period_confidence_note: Optional[str] = None
 
 @dataclass
 class SignalstatsResult:
@@ -929,6 +935,32 @@ def probe_video_properties(video_path) -> Dict[str, Any]:
             'duration': 0, 'opencv_usable': False}
 
 
+# How far a BRNG result can be trusted, least to most compromised. 'normal' means
+# the intended sample was analyzed; 'partial_coverage' means some periods could not
+# be examined; 'last_resort' means the periods that *were* examined sit on black
+# content because no picture content could be sampled.
+PERIOD_CONFIDENCE_LEVELS = ('normal', 'partial_coverage', 'last_resort')
+
+
+def resolve_period_confidence(last_resort_note: str = None,
+                              coverage_note: str = None) -> Tuple[str, Optional[str]]:
+    """Fold the confidence signals into one level plus a note covering all of them.
+
+    Both can apply at once (a mostly-black sample where some periods also failed).
+    The level reports the more severe one — being measured on black content makes
+    the numbers wrong, whereas partial coverage only makes them incomplete — while
+    the note keeps every reason, so nothing is lost to the precedence choice.
+    """
+    notes = [n for n in (last_resort_note, coverage_note) if n]
+    if last_resort_note:
+        level = 'last_resort'
+    elif coverage_note:
+        level = 'partial_coverage'
+    else:
+        level = 'normal'
+    return level, (' '.join(notes) if notes else None)
+
+
 def is_valid_active_area(active_area) -> bool:
     """True if `active_area` is a usable (x, y, w, h) crop rectangle.
 
@@ -1733,7 +1765,8 @@ class DifferentialBRNGAnalyzer:
                                        skip_start_seconds: float = 0,
                                        qctools_violations: List[FrameViolation] = None,
                                        analysis_periods: List[Tuple[float, int]] = None,
-                                       upstream_context: 'UpstreamAnalysisContext' = None) -> BRNGAnalysisResult:
+                                       upstream_context: 'UpstreamAnalysisContext' = None,
+                                       period_confidence_note: str = None) -> BRNGAnalysisResult:
         """
         Perform differential BRNG detection by creating highlighted and original versions.
         Now supports analyzing specific periods from signalstats.
@@ -1741,6 +1774,8 @@ class DifferentialBRNGAnalyzer:
         Args:
             upstream_context: Findings from border detection and signalstats that
                 inform sensitivity, sampling density, and thumbnail selection.
+            period_confidence_note: Set when period selection had to fall back to a
+                mostly-black window; recorded on the result so the report can caveat it.
         """
         output_dir = Path(output_dir)
         output_dir.mkdir(exist_ok=True)
@@ -1750,6 +1785,8 @@ class DifferentialBRNGAnalyzer:
         
         # Store paths to temporary videos for thumbnail creation
         temp_video_paths = []
+        # Set when some (but not all) periods fail to produce comparison videos
+        coverage_note = None
 
         self._emit_progress(0)
 
@@ -1883,53 +1920,28 @@ class DifferentialBRNGAnalyzer:
                     f"  BRNG analysis covered {total_periods - periods_failed} of "
                     f"{total_periods} period(s); {periods_failed} could not be analyzed"
                 )
+                coverage_note = (
+                    f"Only {total_periods - periods_failed} of {total_periods} analysis "
+                    f"periods could be examined; violations may exist in the "
+                    f"{periods_failed} period(s) that failed."
+                )
 
             logger.info(f"  Analyzed {len(violations)} frames with potential violations across all periods\n")
         else:
-            # Original single-period analysis (similar handling)
-            logger.debug(f"  Creating temporary comparison videos (duration: {duration_limit}s)")
-            
-            temp_dir = output_dir / "temp_brng"
-            temp_dir.mkdir(exist_ok=True)
-            
-            highlighted_path = temp_dir / f"{self.video_path.stem}_highlighted.mp4"
-            original_path = temp_dir / f"{self.video_path.stem}_original.mp4"
-            
-            if not self._create_comparison_videos(highlighted_path, original_path, 
-                                                duration_limit, skip_start_seconds):
-                logger.error("Failed to create comparison videos")
-                return None
-            
-            self._emit_progress(40)
-            
-            temp_video_paths.append({
-                'highlighted': highlighted_path,
-                'original': original_path,
-                'start_time': skip_start_seconds,
-                'duration': duration_limit,
-                'temp_dir': temp_dir
-            })
-            
-            violations = self._analyze_differential_violations(
-                highlighted_path, original_path, skip_start_seconds,
-                qctools_violations=qctools_violations,
-                progress_range=(40, 85)
+            # No periods survived selection. _validate_periods_against_black_segments
+            # already tried to shift each candidate away from black content and then
+            # to shrink it into the largest non-black gap, so an empty list means the
+            # file has no analyzable non-black window at all — a finding, not an edge
+            # case. Analyzing an arbitrary fixed window here would measure the very
+            # black content period selection just rejected.
+            logger.warning(
+                "  No analyzable periods: every candidate overlapped black content and "
+                "could not be shifted or shrunk to fit. BRNG analysis is skipped for this "
+                "file — this is NOT a clean result, nothing was examined."
             )
-            # Handle both tuple (new) and list (legacy) returns
-            period_summaries = []
-            if isinstance(violations, tuple):
-                violations, single_stats = violations
-                period_summaries.append({
-                    'period_num': 1,
-                    'start_time': skip_start_seconds,
-                    'end_time': skip_start_seconds + duration_limit,
-                    'qctools_frames_targeted': single_stats['qctools_frames_targeted'],
-                    'frames_mapped': single_stats['frames_mapped_to_period'],
-                    'total_samples': single_stats['total_samples_analyzed'],
-                    'frames_checked': single_stats['frames_checked'],
-                    'violations_found': single_stats['violations_found']
-                })
-        
+            self._emit_progress(100)
+            return None
+
         self._emit_progress(85)
         
         # Generate patterns and reports
@@ -1980,7 +1992,10 @@ class DifferentialBRNGAnalyzer:
                 pass
         
         self._emit_progress(100)
-        
+
+        confidence_level, confidence_note = resolve_period_confidence(
+            last_resort_note=period_confidence_note, coverage_note=coverage_note)
+
         return BRNGAnalysisResult(
             violations=violations,
             aggregate_patterns=aggregate_patterns,
@@ -1989,9 +2004,11 @@ class DifferentialBRNGAnalyzer:
             requires_border_adjustment=aggregate_patterns.get('requires_border_adjustment', False),
             refinement_recommendations=aggregate_patterns.get('expansion_recommendations'),
             analysis_periods=analysis_periods if analysis_periods else None,
-            period_summaries=period_summaries if period_summaries else None
+            period_summaries=period_summaries if period_summaries else None,
+            period_confidence=confidence_level,
+            period_confidence_note=confidence_note
         )
-    
+
     def _create_comparison_videos_for_period(self, highlighted_path: Path, original_path: Path,
                                             start_time: float, duration: int,
                                             progress_range: Tuple[int, int] = None) -> bool:
@@ -3156,6 +3173,11 @@ class IntegratedSignalstatsAnalyzer:
         self._init_video_properties()
         self._brng_cache = None
         self._brng_cache_active_area = None
+        # Set by _validate_periods_against_black_segments when it has to keep a
+        # mostly-black period rather than return nothing. Sticky for the whole
+        # run (validation is called from several places); cleared by
+        # EnhancedFrameAnalysis.analyze() at the start of each file.
+        self.last_resort_period_note = None
 
     def _emit_progress(self, percent: int):
         """Emit signalstats analysis progress as a percentage (0-100)."""
@@ -3640,9 +3662,13 @@ class IntegratedSignalstatsAnalyzer:
             
         Returns:
             Validated list of periods with black-overlapping ones shifted or removed.
+            Never empty when given candidates: if every one is dropped, the least-black
+            candidate is kept as a last resort, since analyzing a partly-black window
+            still says more than skipping the file's BRNG analysis entirely.
         """
         validated = []
-        
+        dropped = []  # (overlap_pct, start, dur) for the last-resort fallback
+
         for start, dur in periods:
             end = start + dur
             
@@ -3688,6 +3714,30 @@ class IntegratedSignalstatsAnalyzer:
                         validated.append(fitted)
                     else:
                         logger.warning(f"    → Could not find valid non-black replacement, dropping period")
+                        dropped.append((overlap_pct, start, dur))
+
+        if not validated and dropped:
+            # Everything was dropped. Rather than leaving BRNG analysis with nothing
+            # to look at, keep the candidate that had the least black in it and say
+            # plainly that the sample is compromised.
+            overlap_pct, start, dur = min(dropped, key=lambda d: d[0])
+            start_tc = f"{int(start // 60):02d}:{start % 60:05.2f}"
+            logger.warning(
+                f"  Every candidate period was dropped as black. Keeping the least-black "
+                f"one ({start_tc}, {overlap_pct:.0f}% black) as a last resort — BRNG "
+                f"results for this file are measured on mostly-black content and should "
+                f"be treated as low confidence."
+            )
+            validated.append((start, dur))
+            # Sticky: only ever set, never cleared here, since validation runs at
+            # several points in a single analysis and any one of them firing means
+            # the sampled periods are compromised.
+            self.last_resort_period_note = (
+                f"No period free of black content could be found. The least-black "
+                f"candidate ({start_tc}, {overlap_pct:.0f}% black) was analyzed instead, "
+                f"so these results describe mostly-black frames rather than picture "
+                f"content."
+            )
 
         return validated
 
@@ -5228,6 +5278,9 @@ class EnhancedFrameAnalysis:
         if self.signals and hasattr(self.signals, 'frame_analysis_progress'):
             self.signals.frame_analysis_progress.emit(0)
 
+        # Clear the sticky last-resort marker so it reflects this file only
+        self.signalstats_analyzer.last_resort_period_note = None
+
         frame_config = self.checks_config.outputs.frame_analysis
         
         # Check which steps are enabled (handle both bool and str types)
@@ -5549,7 +5602,8 @@ class EnhancedFrameAnalysis:
                 skip_start_seconds=color_bars_end_time,
                 qctools_violations=violations,
                 analysis_periods=analysis_periods,
-                upstream_context=upstream_context
+                upstream_context=upstream_context,
+                period_confidence_note=self.signalstats_analyzer.last_resort_period_note
             )
             results['brng_analysis'] = asdict(brng_results) if brng_results else None
             
@@ -5697,7 +5751,8 @@ class EnhancedFrameAnalysis:
                         skip_start_seconds=color_bars_end_time,
                         qctools_violations=violations,
                         analysis_periods=analysis_periods,
-                        upstream_context=upstream_context
+                        upstream_context=upstream_context,
+                        period_confidence_note=self.signalstats_analyzer.last_resort_period_note
                     )
 
                     if self.check_cancelled():
