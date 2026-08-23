@@ -8,6 +8,8 @@ os.environ["NUMEXPR_MAX_THREADS"] = "11" # troubleshooting goofy numbpy related 
 
 import csv
 from base64 import b64encode
+from dataclasses import dataclass, field
+from typing import List, Optional
 import json
 import re
 import subprocess
@@ -365,85 +367,149 @@ def find_frame_analysis_outputs(source_directory, destination_directory, video_i
 
     return frame_outputs
 
-def find_report_csvs(report_directory):
+@dataclass
+class ReportArtifacts:
+    """Sidecar files discovered for one video's HTML report.
 
-    qctools_colorbars_duration_output = None
-    qctools_bars_eval_check_output = None
-    qctools_bars_eval_timestamps = None
-    colorbars_values_output = None
-    windowed_colorbars_values = []
-    qctools_content_check_outputs = []
-    qctools_profile_check_output = None
-    qctools_profile_timestamps = None
-    profile_fails_csv = None
-    tags_check_output = None
-    tag_fails_csv = None
-    colorbars_eval_fails_csv = None
-    audio_clipping_csv = None
-    channel_imbalance_csv = None
-    identical_channels_csv = None
-    audible_timecode_csv = None
-    audio_dropout_csv = None
-    clamped_levels_csv = None
-    clamped_traces_csv = None
-    chroma_phase_summary_csv = None
-    chroma_phase_events_csv = None
-    tone_leak_summary_csv = None
-    tone_leak_events_csv = None
-    difference_csv = None
+    Every field defaults to None (or an empty list), so a report section can
+    test its own inputs without knowing which analyses actually ran. Adding a
+    new sidecar means adding a field here and a branch in find_report_csvs() —
+    nothing downstream has to be renumbered.
+
+    Most of these live in the report directory ({video_id}_report_csvs). The
+    mkvalidator pair is the exception and is noted below.
+    """
+
+    # qct-parse — color bars detection and evaluation
+    qctools_colorbars_duration_output: Optional[str] = None
+    qctools_bars_eval_check_output: Optional[str] = None
+    colorbars_values_output: Optional[str] = None
+    windowed_colorbars_values: List[str] = field(default_factory=list)
+    colorbars_eval_fails_csv: Optional[str] = None
+
+    # qct-parse — threshold profile and tag checks
+    qctools_content_check_outputs: List[str] = field(default_factory=list)
+    qctools_profile_check_output: Optional[str] = None
+    profile_fails_csv: Optional[str] = None
+    tags_check_output: Optional[str] = None
+    tag_fails_csv: Optional[str] = None
+
+    # qct-parse — audio analysis
+    audio_clipping_csv: Optional[str] = None
+    channel_imbalance_csv: Optional[str] = None
+    identical_channels_csv: Optional[str] = None
+    audible_timecode_csv: Optional[str] = None
+    audio_dropout_csv: Optional[str] = None
+
+    # qct-parse — video signal analysis
+    clamped_levels_csv: Optional[str] = None
+    clamped_traces_csv: Optional[str] = None
+    chroma_phase_summary_csv: Optional[str] = None
+    chroma_phase_events_csv: Optional[str] = None
+    tone_leak_summary_csv: Optional[str] = None
+    tone_leak_events_csv: Optional[str] = None
+
+    # CLAMS detectors (run independently of qct-parse)
+    clams_bars_durations_csv: Optional[str] = None
+    clams_tone_durations_csv: Optional[str] = None
+
+    # mkvalidator. These two live in the _qc_metadata directory rather than the
+    # report directory, because the mkvalidator check runs before the report
+    # directory exists. The summary is written whenever the check ran; the
+    # clusters CSV only when at least one WRN0C2 was found.
+    mkvalidator_summary_path: Optional[str] = None
+    mkvalidator_clusters_csv: Optional[str] = None
+
+    # Metadata tool comparison
+    difference_csv: Optional[str] = None
+
+
+# Filename fragment -> ReportArtifacts field, for the qct-parse sidecars that
+# map one-to-one. Order matters: the first matching fragment wins, so
+# 'clamped_traces' must be tested before the 'clamped_levels' prefix it shares
+# a stem with, and the same for the eval-summary/eval-failures pair.
+_QCT_PARSE_SIDECARS = (
+    ("qct-parse_colorbars_durations",     "qctools_colorbars_duration_output"),
+    ("qct-parse_colorbars_eval_summary",  "qctools_bars_eval_check_output"),
+    ("qct-parse_colorbars_eval_failures", "colorbars_eval_fails_csv"),
+    ("qct-parse_profile_summary",         "qctools_profile_check_output"),
+    ("qct-parse_profile_failures",        "profile_fails_csv"),
+    ("qct-parse_tags_summary.csv",        "tags_check_output"),
+    ("qct-parse_tags_failures",           "tag_fails_csv"),
+    ("qct-parse_audio_clipping",          "audio_clipping_csv"),
+    ("qct-parse_channel_imbalance",       "channel_imbalance_csv"),
+    ("qct-parse_identical_channels",      "identical_channels_csv"),
+    ("qct-parse_audible_timecode",        "audible_timecode_csv"),
+    ("qct-parse_audio_dropout",           "audio_dropout_csv"),
+    ("qct-parse_clamped_traces",          "clamped_traces_csv"),
+    ("qct-parse_clamped_levels",          "clamped_levels_csv"),
+    ("qct-parse_chroma_phase_summary",    "chroma_phase_summary_csv"),
+    ("qct-parse_chroma_phase_events",     "chroma_phase_events_csv"),
+    ("qct-parse_tone_leak_summary",       "tone_leak_summary_csv"),
+    ("qct-parse_tone_leak_events",        "tone_leak_events_csv"),
+)
+
+
+def find_report_csvs(report_directory, destination_directory=None, video_id=None) -> ReportArtifacts:
+    """Discover every sidecar the HTML report can render.
+
+    This is the single discovery point for report inputs: qct-parse and CLAMS
+    sidecars from report_directory, and the mkvalidator pair from
+    destination_directory (the _qc_metadata dir), which is scanned only when
+    destination_directory and video_id are both supplied.
+
+    Args:
+        report_directory: the {video_id}_report_csvs directory
+        destination_directory: the {video_id}_qc_metadata directory, for the
+            mkvalidator sidecars
+        video_id: used to build the mkvalidator filenames
+
+    Returns:
+        ReportArtifacts, with absent sidecars left as None / empty list.
+    """
+    artifacts = ReportArtifacts()
 
     if os.path.isdir(report_directory):
         for file in os.listdir(report_directory):
             file_path = os.path.join(report_directory, file)
-            if os.path.isfile(file_path) and not file.startswith('.DS_Store'):
-                if file.startswith("qct-parse_"):
-                    if "qct-parse_colorbars_durations" in file:
-                        qctools_colorbars_duration_output = file_path
-                    elif "qct-parse_colorbars_eval_summary" in file:
-                        qctools_bars_eval_check_output = file_path
-                    elif "qct-parse_colorbars_values" in file:
-                        if file == "qct-parse_colorbars_values.csv":
-                            colorbars_values_output = file_path
-                        else:
-                            windowed_colorbars_values.append(file_path)
-                    elif "qct-parse_contentFilter" in file:
-                        qctools_content_check_outputs.append(file_path)
-                    elif "qct-parse_profile_summary" in file:
-                        qctools_profile_check_output = file_path
-                    elif "qct-parse_profile_failures" in file:
-                        profile_fails_csv = file_path
-                    elif "qct-parse_tags_summary.csv" in file:
-                        tags_check_output = file_path
-                    elif "qct-parse_tags_failures" in file:
-                        tag_fails_csv = file_path
-                    elif "qct-parse_colorbars_eval_failures" in file:
-                        colorbars_eval_fails_csv = file_path
-                    elif "qct-parse_audio_clipping" in file:
-                        audio_clipping_csv = file_path
-                    elif "qct-parse_channel_imbalance" in file:
-                        channel_imbalance_csv = file_path
-                    elif "qct-parse_identical_channels" in file:
-                        identical_channels_csv = file_path
-                    elif "qct-parse_audible_timecode" in file:
-                        audible_timecode_csv = file_path
-                    elif "qct-parse_audio_dropout" in file:
-                        audio_dropout_csv = file_path
-                    elif "qct-parse_clamped_traces" in file:
-                        clamped_traces_csv = file_path
-                    elif "qct-parse_clamped_levels" in file:
-                        clamped_levels_csv = file_path
-                    elif "qct-parse_chroma_phase_summary" in file:
-                        chroma_phase_summary_csv = file_path
-                    elif "qct-parse_chroma_phase_events" in file:
-                        chroma_phase_events_csv = file_path
-                    elif "qct-parse_tone_leak_summary" in file:
-                        tone_leak_summary_csv = file_path
-                    elif "qct-parse_tone_leak_events" in file:
-                        tone_leak_events_csv = file_path
-                elif "metadata_difference" in file:
-                    difference_csv = file_path
+            if not os.path.isfile(file_path) or file.startswith('.DS_Store'):
+                continue
 
-    return qctools_colorbars_duration_output, qctools_bars_eval_check_output, colorbars_values_output, windowed_colorbars_values, qctools_content_check_outputs, qctools_profile_check_output, profile_fails_csv, tags_check_output, tag_fails_csv, colorbars_eval_fails_csv, audio_clipping_csv, channel_imbalance_csv, identical_channels_csv, audible_timecode_csv, audio_dropout_csv, clamped_levels_csv, clamped_traces_csv, chroma_phase_summary_csv, chroma_phase_events_csv, tone_leak_summary_csv, tone_leak_events_csv, difference_csv
+            if file.startswith("qct-parse_"):
+                # The two multi-file cases are handled before the 1:1 table.
+                if "qct-parse_colorbars_values" in file:
+                    if file == "qct-parse_colorbars_values.csv":
+                        artifacts.colorbars_values_output = file_path
+                    else:
+                        artifacts.windowed_colorbars_values.append(file_path)
+                    continue
+
+                if "qct-parse_contentFilter" in file:
+                    artifacts.qctools_content_check_outputs.append(file_path)
+                    continue
+
+                for fragment, attr in _QCT_PARSE_SIDECARS:
+                    if fragment in file:
+                        setattr(artifacts, attr, file_path)
+                        break
+
+            elif file == "clams_bars_colorbars_durations.csv":
+                artifacts.clams_bars_durations_csv = file_path
+            elif file == "clams_tone_detection_durations.csv":
+                artifacts.clams_tone_durations_csv = file_path
+            elif "metadata_difference" in file:
+                artifacts.difference_csv = file_path
+
+    if destination_directory and video_id:
+        summary = os.path.join(destination_directory, f"{video_id}_mkvalidator_summary.txt")
+        if os.path.isfile(summary):
+            artifacts.mkvalidator_summary_path = summary
+
+        clusters = os.path.join(destination_directory, f"{video_id}_mkvalidator_clusters.csv")
+        if os.path.isfile(clusters):
+            artifacts.mkvalidator_clusters_csv = clusters
+
+    return artifacts
 
 
 def read_xml_file(xml_file_path):
@@ -6265,33 +6331,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     if signals:
         signals.report_progress.emit(0)
 
-    qctools_colorbars_duration_output, qctools_bars_eval_check_output, colorbars_values_output, windowed_colorbars_values, qctools_content_check_outputs, qctools_profile_check_output, profile_fails_csv, tags_check_output, tag_fails_csv, colorbars_eval_fails_csv, audio_clipping_csv, channel_imbalance_csv, identical_channels_csv, audible_timecode_csv, audio_dropout_csv, clamped_levels_csv, clamped_traces_csv, chroma_phase_summary_csv, chroma_phase_events_csv, tone_leak_summary_csv, tone_leak_events_csv, difference_csv = find_report_csvs(report_directory)
-
-    # CLAMS bars-detection durations CSV (filename matches the writer in
-    # checks/bars_detection_clams.py); present only when the parallel detector ran.
-    clams_bars_durations_csv = os.path.join(report_directory, "clams_bars_colorbars_durations.csv")
-    if not os.path.isfile(clams_bars_durations_csv):
-        clams_bars_durations_csv = None
-
-    # CLAMS tone-detection durations CSV (filename matches the writer in
-    # checks/tone_detection_clams.py); present only when the detector ran.
-    clams_tone_durations_csv = os.path.join(report_directory, "clams_tone_detection_durations.csv")
-    if not os.path.isfile(clams_tone_durations_csv):
-        clams_tone_durations_csv = None
-
-    # mkvalidator sidecars (filenames match the writers in checks/mkvalidator_check.py).
-    # Unlike the qct-parse/CLAMS sidecars these live in the _qc_metadata directory
-    # (destination_directory), not the report dir, because the mkvalidator check runs
-    # before the report dir exists. The summary sidecar holds the validity verdict and
-    # is written whenever the check ran; the clusters CSV holds the WRN0C2 byte offsets
-    # and is present only when at least one WRN0C2 was found.
-    mkvalidator_summary_path = os.path.join(destination_directory, f"{video_id}_mkvalidator_summary.txt")
-    if not os.path.isfile(mkvalidator_summary_path):
-        mkvalidator_summary_path = None
-
-    mkvalidator_clusters_csv = os.path.join(destination_directory, f"{video_id}_mkvalidator_clusters.csv")
-    if not os.path.isfile(mkvalidator_clusters_csv):
-        mkvalidator_clusters_csv = None
+    artifacts = find_report_csvs(report_directory, destination_directory, video_id)
 
     if check_cancelled():
         return
@@ -6305,15 +6345,15 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     generated_thumbs = {}
     thumbnail_tasks = []
 
-    if profile_fails_csv and video_path:
-        profile_fails_csv_path = os.path.join(report_directory, profile_fails_csv)
+    if artifacts.profile_fails_csv and video_path:
+        profile_fails_csv_path = os.path.join(report_directory, artifacts.profile_fails_csv)
         failureInfoSummary_profile = summarize_failures(profile_fails_csv_path)
         for timestamp, info_list in failureInfoSummary_profile.items():
             for info in info_list:
                 thumbnail_tasks.append((info['tag'], info['tagValue'], timestamp, 'threshold_profile'))
 
-    if tag_fails_csv and video_path:
-        tag_fails_csv_path = os.path.join(report_directory, tag_fails_csv)
+    if artifacts.tag_fails_csv and video_path:
+        tag_fails_csv_path = os.path.join(report_directory, artifacts.tag_fails_csv)
         failureInfoSummary_tags = summarize_failures(tag_fails_csv_path)
         for timestamp, info_list in failureInfoSummary_tags.items():
             for info in info_list:
@@ -6325,8 +6365,8 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     colorbars_peaks = []
     eval_video_duration = None
     eval_video_fps = None
-    if colorbars_eval_fails_csv and video_path:
-        colorbars_eval_fails_csv_path = os.path.join(report_directory, colorbars_eval_fails_csv)
+    if artifacts.colorbars_eval_fails_csv and video_path:
+        colorbars_eval_fails_csv_path = os.path.join(report_directory, artifacts.colorbars_eval_fails_csv)
         eval_video_duration = _get_video_duration(video_path)
         eval_video_fps = _get_video_frame_rate(video_path)
         colorbars_peaks = select_failure_peaks(colorbars_eval_fails_csv_path, duration=eval_video_duration)
@@ -6394,7 +6434,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
 
     # Initialize and create html from 
     mc_csv_html, mediaconch_csv_filename = prepare_file_section(mediaconch_csv, lambda path: csv_to_html_table(path, style_mismatched=False, mismatch_color="#ffbaba", match_color="#d2ffed", check_fail=True))
-    diff_csv_html, difference_csv_filename = prepare_file_section(difference_csv, lambda path: csv_to_html_table(path, style_mismatched=True, mismatch_color="#ffbaba", match_color="#d2ffed", check_fail=False))
+    diff_csv_html, difference_csv_filename = prepare_file_section(artifacts.difference_csv, lambda path: csv_to_html_table(path, style_mismatched=True, mismatch_color="#ffbaba", match_color="#d2ffed", check_fail=False))
     exif_file_content, exif_file_filename = prepare_file_section(exiftool_output_path)
     mi_file_content, mi_file_filename = prepare_file_section(mediainfo_output_path)
     ffprobe_file_content, ffprobe_file_filename = prepare_file_section(ffprobe_output_path)
@@ -6404,20 +6444,20 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     # Get qct-parse thumbs if they exists
     thumbs_dict = find_qct_thumbs(report_directory)
 
-    if profile_fails_csv:
-        profile_fails_csv_path = os.path.join(report_directory, profile_fails_csv)
+    if artifacts.profile_fails_csv:
+        profile_fails_csv_path = os.path.join(report_directory, artifacts.profile_fails_csv)
         failureInfoSummary_profile = summarize_failures(profile_fails_csv_path)
     else:
         failureInfoSummary_profile = None
 
-    if tag_fails_csv:
-        tag_fails_csv_path = os.path.join(report_directory, tag_fails_csv)
+    if artifacts.tag_fails_csv:
+        tag_fails_csv_path = os.path.join(report_directory, artifacts.tag_fails_csv)
         failureInfoSummary_tags = summarize_failures(tag_fails_csv_path)
     else:
         failureInfoSummary_tags = None
 
-    if colorbars_eval_fails_csv:
-        colorbars_eval_fails_csv_path = os.path.join(report_directory, colorbars_eval_fails_csv)
+    if artifacts.colorbars_eval_fails_csv:
+        colorbars_eval_fails_csv_path = os.path.join(report_directory, artifacts.colorbars_eval_fails_csv)
         failureInfoSummary_colorbars = summarize_failures(colorbars_eval_fails_csv_path)
     else:
         failureInfoSummary_colorbars = None
@@ -6428,7 +6468,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     # Detected bars runs (head + additional). These are the regions the bars
     # evaluation skips, so the timeline shades them; the windowed graphs below
     # reuse the same parse for their timecode labels.
-    qct_duration_runs = _parse_bars_durations_csv(qctools_colorbars_duration_output)
+    qct_duration_runs = _parse_bars_durations_csv(artifacts.qctools_colorbars_duration_output)
     bars_regions = [(bars_start, bars_end) for _, bars_start, bars_end in qct_duration_runs]
 
     # Create graphs for all existing csv files (existing code...)
@@ -6436,17 +6476,17 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     # so it stays a separate variable rather than being folded into
     # colorbars_eval_html.
     colorbars_timeline_html = None
-    if qctools_bars_eval_check_output and failureInfoSummary_colorbars:
+    if artifacts.qctools_bars_eval_check_output and failureInfoSummary_colorbars:
         # Pies summarize the per-tag failure share; the timeline below them
         # carries the failure specifics (distribution + peak thumbnails)
-        colorbars_eval_html = make_profile_piecharts(qctools_bars_eval_check_output, thumbs_dict, failureInfoSummary_colorbars, video_id, failure_csv_path=colorbars_eval_fails_csv_path, check_cancelled=check_cancelled, failure_details=False)
+        colorbars_eval_html = make_profile_piecharts(artifacts.qctools_bars_eval_check_output, thumbs_dict, failureInfoSummary_colorbars, video_id, failure_csv_path=colorbars_eval_fails_csv_path, check_cancelled=check_cancelled, failure_details=False)
         colorbars_timeline_html = make_eval_bars_timeline_html(
             colorbars_eval_fails_csv_path, video_id, peaks=colorbars_peaks,
             video_duration=eval_video_duration, frame_rate=eval_video_fps,
             analysis_periods=get_frame_analysis_periods(frame_outputs),
             black_segments=get_frame_analysis_black_segments(frame_outputs),
             bars_regions=bars_regions)
-    elif qctools_bars_eval_check_output and failureInfoSummary_colorbars is None:
+    elif artifacts.qctools_bars_eval_check_output and failureInfoSummary_colorbars is None:
        color_bars_segment = f"""
         <div style="display: flex; flex-direction: column; align-items: start; background-color: #f5e9e3; padding: 10px;"> 
             <p><b>All QCTools values of the video file are within the median values of the color bars.</b></p>
@@ -6477,9 +6517,9 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
                 """
     smpte_reference = False
     colorbars_box_only = False
-    if colorbars_values_output:
+    if artifacts.colorbars_values_output:
         try:
-            with open(colorbars_values_output, 'r') as f:
+            with open(artifacts.colorbars_values_output, 'r') as f:
                 first_line = f.readline().strip()
             if first_line == "SMPTE_FALLBACK":
                 smpte_reference = True
@@ -6495,7 +6535,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
                 colorbars_html = smpte_selected_box
             else:
                 # Real detected-vs-SMPTE comparison CSV -> render the graph.
-                graph_html = make_color_bars_graphs(video_id, qctools_colorbars_duration_output, colorbars_values_output, thumbs_dict)
+                graph_html = make_color_bars_graphs(video_id, artifacts.qctools_colorbars_duration_output, artifacts.colorbars_values_output, thumbs_dict)
                 evaluate_reference = config_mgr.get_config('checks', ChecksConfig).tools.qct_parse.evaluateBarsReference
                 if evaluate_reference == 'smpte':
                     # SMPTE was the evaluation reference but bars were detected:
@@ -6524,13 +6564,13 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         windowed_duration_lookup[label] = f"{_fmt(start_s)} - {_fmt(end_s)}"
 
     windowed_colorbars_html_list = []
-    for wv_path in sorted(windowed_colorbars_values):
+    for wv_path in sorted(artifacts.windowed_colorbars_values):
         try:
             region_name = os.path.basename(wv_path).replace("qct-parse_colorbars_values_", "").replace(".csv", "")
             dur_str = windowed_duration_lookup.get(region_name)
             idx_str = region_name.replace("additional-", "")
             wv_html = make_color_bars_graphs(
-                video_id, qctools_colorbars_duration_output, wv_path, thumbs_dict,
+                video_id, artifacts.qctools_colorbars_duration_output, wv_path, thumbs_dict,
                 duration_override=dur_str,
                 bars_label=f'{video_id} Additional Bars',
                 thumb_profile_filter=f'additional_bars_{idx_str}',
@@ -6540,60 +6580,60 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         except Exception as e:
             logger.error(f"Error rendering windowed bars graph for {wv_path}: {e}")
 
-    if qctools_profile_check_output and failureInfoSummary_profile:
-        profile_summary_html = make_profile_piecharts(qctools_profile_check_output, thumbs_dict, failureInfoSummary_profile, video_id, failure_csv_path=profile_fails_csv_path, check_cancelled=check_cancelled)
+    if artifacts.qctools_profile_check_output and failureInfoSummary_profile:
+        profile_summary_html = make_profile_piecharts(artifacts.qctools_profile_check_output, thumbs_dict, failureInfoSummary_profile, video_id, failure_csv_path=profile_fails_csv_path, check_cancelled=check_cancelled)
     else:
         profile_summary_html = None
 
-    if qctools_content_check_outputs:
+    if artifacts.qctools_content_check_outputs:
         content_summary_html_list = []
-        for output_csv in qctools_content_check_outputs:
+        for output_csv in artifacts.qctools_content_check_outputs:
             content_summary_html = make_content_summary_html(output_csv, thumbs_dict, paper_bgcolor='#f5e9e3')
             content_summary_html_list.append(content_summary_html)
     else:
         content_summary_html_list = None
 
-    if tags_check_output and failureInfoSummary_tags:
-        tags_summary_html = make_profile_piecharts(tags_check_output, thumbs_dict, failureInfoSummary_tags, video_id, failure_csv_path=tag_fails_csv_path, check_cancelled=check_cancelled)
+    if artifacts.tags_check_output and failureInfoSummary_tags:
+        tags_summary_html = make_profile_piecharts(artifacts.tags_check_output, thumbs_dict, failureInfoSummary_tags, video_id, failure_csv_path=tag_fails_csv_path, check_cancelled=check_cancelled)
     else:
         tags_summary_html = None
 
     # Side-by-side comparison of qct-parse and CLAMS bars detectors. None
     # unless at least one of the two CSVs is present.
     bars_comparison_html = make_bars_detection_comparison_html(
-        qctools_colorbars_duration_output,
-        clams_bars_durations_csv,
-    ) if clams_bars_durations_csv else None
+        artifacts.qctools_colorbars_duration_output,
+        artifacts.clams_bars_durations_csv,
+    ) if artifacts.clams_bars_durations_csv else None
 
     # CLAMS tone detection results.
-    tone_detection_html = make_tone_detection_html(clams_tone_durations_csv)
-    mkvalidator_html = make_mkvalidator_html(mkvalidator_summary_path, mkvalidator_clusters_csv, video_path)
+    tone_detection_html = make_tone_detection_html(artifacts.clams_tone_durations_csv)
+    mkvalidator_html = make_mkvalidator_html(artifacts.mkvalidator_summary_path, artifacts.mkvalidator_clusters_csv, video_path)
 
-    audio_clipping_html = make_audio_clipping_html(audio_clipping_csv) if audio_clipping_csv else None
-    channel_imbalance_html = make_channel_imbalance_html(channel_imbalance_csv) if channel_imbalance_csv else None
-    identical_channels_html = make_identical_channels_html(identical_channels_csv) if identical_channels_csv else None
-    audible_timecode_html = make_audible_timecode_html(audible_timecode_csv) if audible_timecode_csv else None
-    audio_dropout_html = make_audio_dropout_html(audio_dropout_csv) if audio_dropout_csv else None
-    clamped_levels_html = make_clamped_levels_html(clamped_levels_csv, clamped_traces_csv) if clamped_levels_csv else None
-    chroma_phase_html = make_chroma_phase_html(chroma_phase_summary_csv, chroma_phase_events_csv) if chroma_phase_summary_csv else None
-    tone_leak_html = make_tone_leak_html(tone_leak_summary_csv, tone_leak_events_csv) if tone_leak_summary_csv else None
+    audio_clipping_html = make_audio_clipping_html(artifacts.audio_clipping_csv) if artifacts.audio_clipping_csv else None
+    channel_imbalance_html = make_channel_imbalance_html(artifacts.channel_imbalance_csv) if artifacts.channel_imbalance_csv else None
+    identical_channels_html = make_identical_channels_html(artifacts.identical_channels_csv) if artifacts.identical_channels_csv else None
+    audible_timecode_html = make_audible_timecode_html(artifacts.audible_timecode_csv) if artifacts.audible_timecode_csv else None
+    audio_dropout_html = make_audio_dropout_html(artifacts.audio_dropout_csv) if artifacts.audio_dropout_csv else None
+    clamped_levels_html = make_clamped_levels_html(artifacts.clamped_levels_csv, artifacts.clamped_traces_csv) if artifacts.clamped_levels_csv else None
+    chroma_phase_html = make_chroma_phase_html(artifacts.chroma_phase_summary_csv, artifacts.chroma_phase_events_csv) if artifacts.chroma_phase_summary_csv else None
+    tone_leak_html = make_tone_leak_html(artifacts.tone_leak_summary_csv, artifacts.tone_leak_events_csv) if artifacts.tone_leak_summary_csv else None
     dropped_sample_html = generate_dropped_sample_html(frame_outputs) if frame_outputs else ""
     duplicate_frame_html = generate_duplicate_frame_html(frame_outputs) if frame_outputs else ""
     bitplane_html = generate_bitplane_html(frame_outputs) if frame_outputs else ""
 
     existing_thumbs = find_qct_thumbs(report_directory)
     no_qct_parse_files = (
-        not profile_fails_csv and
-        not tag_fails_csv and
-        not colorbars_eval_fails_csv and
-        not audio_clipping_csv and
-        not channel_imbalance_csv and
-        not identical_channels_csv and
-        not audible_timecode_csv and
-        not audio_dropout_csv and
-        not clamped_levels_csv and
-        not chroma_phase_summary_csv and
-        not tone_leak_summary_csv and
+        not artifacts.profile_fails_csv and
+        not artifacts.tag_fails_csv and
+        not artifacts.colorbars_eval_fails_csv and
+        not artifacts.audio_clipping_csv and
+        not artifacts.channel_imbalance_csv and
+        not artifacts.identical_channels_csv and
+        not artifacts.audible_timecode_csv and
+        not artifacts.audio_dropout_csv and
+        not artifacts.clamped_levels_csv and
+        not artifacts.chroma_phase_summary_csv and
+        not artifacts.tone_leak_summary_csv and
         not existing_thumbs
     )
 
@@ -6737,7 +6777,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         toc_entries.append(('section-audio-analysis', 'Audio Analysis Results'))
     if dropped_sample_html:
         toc_entries.append(('section-dropped-sample', 'Dropped Sample Detection'))
-    if difference_csv:
+    if artifacts.difference_csv:
         toc_entries.append(('section-difference-csv', 'Difference CSV'))
     if profile_summary_html:
         toc_entries.append(('section-profile-summary', 'QCT-Parse Profile Summary'))
@@ -7221,7 +7261,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     if dropped_sample_html:
         html_template += f'<div id="section-dropped-sample">{dropped_sample_html}</div>'
 
-    if difference_csv:
+    if artifacts.difference_csv:
         html_template += f"""
         <h3 id="section-difference-csv">{difference_csv_filename}</h3>
         {diff_csv_html}
