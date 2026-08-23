@@ -9,7 +9,7 @@ os.environ["NUMEXPR_MAX_THREADS"] = "11" # troubleshooting goofy numbpy related 
 import csv
 from base64 import b64encode
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import json
 import re
 import subprocess
@@ -422,6 +422,21 @@ class ReportArtifacts:
 
     # Metadata tool comparison
     difference_csv: Optional[str] = None
+
+
+@dataclass
+class ReportSection:
+    """One block of the report body, with the TOC entries that point into it.
+
+    html: the block's markup. An empty string means the section is omitted, so
+        availability is expressed once — where the markup is built — instead of
+        being restated in a separate TOC condition.
+    toc: (anchor_id, label) pairs the "Jump to section" nav shows for this
+        block. Usually one; a block may contribute several (frame analysis,
+        which reads its own rendered anchors) or none (a divider).
+    """
+    html: str
+    toc: Tuple[Tuple[str, str], ...] = ()
 
 
 # Filename fragment -> ReportArtifacts field, for the qct-parse sidecars that
@@ -6284,6 +6299,296 @@ def make_mkvalidator_html(summary_path, clusters_csv_path, video_path=None):
     """
 
 
+# Static methodology copy for the CLAMS Detection section. Held as a module
+# constant rather than inline so the assembly code below stays readable.
+CLAMS_METHODOLOGY_HTML = """
+        <a id="link_clams_methodology" href="javascript:void(0);"
+           onclick="toggleContent('clams_methodology', 'What is CLAMS Detection? ▼', 'What is CLAMS Detection? ▲')"
+           style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+           What is CLAMS Detection? ▼</a>
+        <div id="clams_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px;
+             margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+            <p style="margin: 0 0 10px 0;">
+                <strong>CLAMS</strong> (Computational Linguistics Applications for Multimedia Services) is an
+                open-source project led by Brandeis University that builds reusable tools for analyzing
+                audiovisual collections. AV Spex adapts two CLAMS apps —
+                <a href="https://github.com/clamsproject/app-barsdetection" style="color: #378d6a;">app-barsdetection</a>
+                and <a href="https://github.com/clamsproject/app-tonedetection" style="color: #378d6a;">app-tonedetection</a> —
+                porting just their detection cores into the AV Spex pipeline. Both upstream apps are
+                distributed under the Apache License 2.0.
+            </p>
+            <p style="margin: 0 0 6px 0; font-weight: bold;">How bars detection works:</p>
+            <p style="margin: 0 0 10px 0;">
+                Frames are sampled (every 30th frame by default) and converted to grayscale. Each sample
+                is compared to a bundled SMPTE color bars reference image using
+                <strong>structural similarity (SSIM)</strong>. A frame is considered to match when its
+                SSIM score exceeds the primary threshold (<code style="background:#eee; padding:1px 4px; border-radius:2px;">0.7</code>),
+                and a run of consecutive matching samples becomes a detected bars span once it
+                exceeds the minimum frame count.
+            </p>
+            <p style="margin: 0 0 6px 0; font-weight: bold;">How tone detection works:</p>
+            <p style="margin: 0 0 10px 0;">
+                The audio track is decoded to 16 kHz mono via ffmpeg and split into consecutive 250 ms
+                chunks. Adjacent chunks are compared using <strong>numpy cross-correlation</strong>;
+                when their similarity stays at or above the tolerance
+                (<code style="background:#eee; padding:1px 4px; border-radius:2px;">1.0</code> by default),
+                the run is extended. Runs that survive a minimum-duration filter
+                (<code style="background:#eee; padding:1px 4px; border-radius:2px;">2000 ms</code> by default)
+                are reported as detected tones.
+            </p>
+            <p style="margin: 0 0 6px 0; font-weight: bold;">Two-pass cross-validation:</p>
+            <p style="margin: 0 0 6px 0;">
+                Color bars and reference tone are typically authored together at the head of a tape, so
+                the two detectors should largely agree. AV Spex runs them in two passes:
+            </p>
+            <ol style="margin: 4px 0 10px 20px; padding: 0;">
+                <li style="margin-bottom: 4px;"><strong>Primary pass</strong> — each detector scans the
+                    file independently with its default thresholds.</li>
+                <li style="margin-bottom: 4px;"><strong>Head re-check</strong> — if the primary bars pass
+                    found nothing near the head of the file, the recorded SSIM scores over the first two
+                    minutes are re-evaluated at the relaxed threshold
+                    (<code style="background:#eee; padding:1px 4px; border-radius:2px;">0.6</code>).
+                    This catches real but degraded head bars that score just under the primary
+                    threshold.</li>
+                <li style="margin-bottom: 4px;"><strong>Second pass</strong> — when one detector finds a
+                    span the other missed, a targeted windowed scan is run on the other detector with
+                    <em>relaxed</em> thresholds (bars: SSIM ≥
+                    <code style="background:#eee; padding:1px 4px; border-radius:2px;">0.6</code>, sample
+                    ratio <code style="background:#eee; padding:1px 4px; border-radius:2px;">5</code>;
+                    tone: tolerance
+                    <code style="background:#eee; padding:1px 4px; border-radius:2px;">0.7</code>,
+                    min duration
+                    <code style="background:#eee; padding:1px 4px; border-radius:2px;">500 ms</code>).
+                    A ±5 s slack is added around the trigger window because bars and tone don't always
+                    start and stop in lockstep.</li>
+            </ol>
+            <p style="margin: 0 0 10px 0;">
+                Re-scan rows are highlighted in the result tables below. The head-bars end time used
+                downstream (the BRNG-skip window, access-file trim) is a <strong>cross-validated
+                consensus</strong> of qct-parse and CLAMS: when the two detectors disagree, the disputed
+                span is checked against the recorded SSIM scores — a span whose scores never approach
+                the bars threshold is rejected, and a head claim from one detector that the other
+                decisively contradicts is treated as unconfirmed rather than trusted.
+            </p>
+            <p style="margin: 0 0 6px 0; font-weight: bold;">Fragment merging:</p>
+            <p style="margin: 0 0 10px 0;">
+                A continuous tone or bars span can dip below threshold for a brief chunk and be reported
+                as several adjacent fragments. After detection, AV Spex coalesces fragments separated by
+                less than the configured <code style="background:#eee; padding:1px 4px; border-radius:2px;">merge_gap_seconds</code>
+                (defaults: 1 s for bars, 5 s for tone) back into a single span so the report reflects
+                the underlying continuous signal.
+            </p>
+            <p style="margin: 0; color: #777;">
+                Both detectors write a per-pass durations CSV alongside the report; the bars detector
+                additionally writes a per-sampled-frame SSIM scores CSV
+                (<code style="background:#eee; padding:1px 4px; border-radius:2px;">pass, frame,
+                timestamp, ssim_score, exceeds_threshold</code>). Those recorded scores are also what
+                the head re-check and the consensus arbitration read.
+            </p>
+        </div>
+"""
+
+
+def _build_toc_html(toc_entries):
+    """Render the "Jump to section" nav from (anchor, label) pairs."""
+    if toc_entries:
+        toc_links = ''.join(
+            f'<li style="margin: 0;">'
+            f'<a class="toc-pill" href="#{anchor}">{label}</a></li>'
+            for anchor, label in toc_entries
+        )
+        toc_html = (
+            '<nav aria-label="Report sections" '
+            'style="background-color: #f5e9e3; border: 1px solid #4d2b12; '
+            'border-radius: 4px; padding: 14px 18px; margin: 18px 0;">'
+            '<p style="font-weight: bold; margin: 0 0 10px 0; color: #4d2b12; '
+            'font-size: 14px;">Jump to section</p>'
+            '<ul style="list-style: none; padding: 0; margin: 0; '
+            'display: flex; flex-wrap: wrap; gap: 8px;">'
+            f'{toc_links}'
+            '</ul></nav>'
+        )
+    else:
+        toc_html = ''
+    return toc_html
+
+
+def _dangling_toc_anchors(sections):
+    """TOC anchors with no matching element id anywhere in the assembled body.
+
+    Building the nav from the section list guarantees the two agree on order
+    and on which sections appear. It cannot guarantee that an anchor *string*
+    matches the id actually written into that section's markup — a typo in
+    either half still produces a link that scrolls nowhere. This catches that.
+    """
+    body = ''.join(section.html for section in sections)
+    return [
+        anchor
+        for section in sections
+        for anchor, _label in section.toc
+        if f'id="{anchor}"' not in body and f"id='{anchor}'" not in body
+    ]
+
+
+def _report_head_html(video_id, logo_image_path, color_strip_store, waveform_store, toc_html):
+    """The document head: styles, scripts, masthead and the TOC nav."""
+    return f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>AV Spex Report</title>
+        <style>
+            body {{
+                font-family: Arial, sans-serif;
+                background-color: #fcfdff;
+                color: #011054;
+                margin: 30px;
+            }}
+            h1 {{
+                font-size: 24px;
+                text-align: center;
+                margin-top: 20px;
+                color: #378d6a;
+            }}
+            h2 {{
+                font-size: 20px;
+                font-weight: bold;
+                margin-top: 30px;
+                color: #0a5f1c;
+                text-decoration: underline;
+            }}
+            h3 {{
+                font-size: 18px;
+                margin-top: 20px;
+                color: #bf971b;
+            }}
+            table {{
+                border-collapse: collapse;
+                margin-top: 10px;
+                margin-bottom: 20px;
+                border: 2px solid #4d2b12;
+            }}
+            th, td {{
+                border: 1.5px solid #4d2b12;
+                padding: 8px;
+                text-align: left;
+            }}
+            th {{
+                background-color: #fbe4eb;
+                font-weight: bold;
+            }}
+            pre {{
+                background-color: #f5e9e3;
+                border: 1px solid #4d2b12;
+                padding: 10px;
+                white-space: pre-wrap;
+                word-wrap: break-word;
+            }}
+            .xml-content {{
+                background-color: #f8f9fa;
+                border: 1px solid #6c757d;
+                padding: 15px;
+                white-space: pre-wrap;
+                word-wrap: break-word;
+                font-family: 'Courier New', monospace;
+                font-size: 12px;
+                max-height: 400px;
+                overflow-y: auto;
+            }}
+            .metadata-content {{
+                background-color: #f5e9e3;
+                border: 1px solid #4d2b12;
+                padding: 10px;
+                white-space: pre-wrap;
+                word-wrap: break-word;
+                font-family: monospace;
+                max-height: 400px;
+                overflow-y: auto;
+            }}
+            .color-strip-divider {{
+                display: block;
+                width: 100%;
+                height: auto;
+                margin: 25px 0;
+                border-radius: 3px;
+                image-rendering: pixelated;          /* Chrome/Edge */
+                image-rendering: crisp-edges;         /* Firefox */
+                -ms-interpolation-mode: nearest-neighbor; /* legacy IE */
+            }}
+            .cell-match {{
+                background-color: #d2ffed;
+            }}
+            .cell-mismatch {{
+                background-color: #ff9999;
+            }}
+            [id^="section-"] {{
+                scroll-margin-top: 16px;
+            }}
+            .toc-pill {{
+                display: inline-block;
+                padding: 6px 14px;
+                background-color: #fcfdff;
+                color: #378d6a;
+                border: 1px solid #378d6a;
+                border-radius: 999px;
+                text-decoration: none;
+                font-size: 13px;
+                font-weight: 500;
+                transition: background-color 0.15s ease, color 0.15s ease;
+            }}
+            .toc-pill:hover,
+            .toc-pill:focus {{
+                background-color: #378d6a;
+                color: #fcfdff;
+                outline: none;
+            }}
+        </style>
+        <script>
+        function openImage(imgData, caption) {{
+            var newWindow = window.open('', '_blank');
+            newWindow.document.write('<html><head><title>' + caption + '</title></head><body style="margin:0; background:#000; display:flex; align-items:center; justify-content:center; height:100vh;">');
+            newWindow.document.write('<img src="' + imgData + '" style="max-width:100%; max-height:100%; object-fit:contain;">');
+            newWindow.document.write('</body></html>');
+            newWindow.document.close();
+        }}
+
+        function toggleTable(tagId) {{
+            var table = document.getElementById('table_' + tagId);
+            var link = document.getElementById('link_' + tagId);
+            if (table.style.display === 'none') {{
+                table.style.display = 'block';
+                link.textContent = 'Hide all failures ▲';
+            }} else {{
+                table.style.display = 'none';
+                link.textContent = 'Show all failures ▼';
+            }}
+        }}
+
+        function toggleContent(contentId, showText, hideText) {{
+            var content = document.getElementById(contentId);
+            var link = document.getElementById('link_' + contentId);
+            if (content.style.display === 'none') {{
+                content.style.display = 'block';
+                link.textContent = hideText;
+            }} else {{
+                content.style.display = 'none';
+                link.textContent = showText;
+            }}
+        }}
+        </script>
+        <img src="{logo_image_path}" alt="AV Spex Logo" style="display: block; margin-left: auto; margin-right: auto; width: 25%; margin-top: 20px;">
+    </head>
+    <body>
+        <h1>AV Spex Report</h1>
+        <h2>{video_id}</h2>
+        {color_strip_store}
+        {waveform_store}
+        {toc_html}
+    """
+
+
 def generate_final_report(video_id, source_directory, report_directory, destination_directory,
                          video_path=None, check_cancelled=None, signals=None):
     """
@@ -6719,27 +7024,55 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         waveform_divider = f'<div style="text-align: center;"><img src="{eq_image_path}" style="width: 10%;"></div>'
         waveform_init_script = ""
 
-    # Build a "Jump to section" table of contents from the conditional flags
-    # computed above. Each entry is (anchor_id, label). Order matches the
-    # render order below, so sections are listed the way they appear.
-    _has_audio_results = bool(
-        audio_clipping_html or channel_imbalance_html
-        or identical_channels_html
-        or audible_timecode_html or audio_dropout_html
-        or tone_leak_html
-    )
-    toc_entries = []
+    # ------------------------------------------------------------------
+    # Section assembly
+    #
+    # Each block of the report owns both its markup and the TOC entries that
+    # point into it, and both outputs are derived from this one ordered list.
+    # That is the whole point of the structure: the "Jump to section" nav can
+    # no longer drift out of order or out of sync with the body, because it is
+    # not restated alongside the body — it is read off the same sequence.
+    #
+    # A block whose markup is empty contributes nothing to either output, so
+    # availability is expressed once, where the markup is built.
+    # ------------------------------------------------------------------
+    sections: List[ReportSection] = []
+
+    def add_section(html, *toc_entries):
+        """Append a rendered block plus any TOC entries pointing into it."""
+        if html:
+            sections.append(ReportSection(html=html, toc=tuple(toc_entries)))
+
     if fixity_html:
-        toc_entries.append(('section-fixity', 'Fixity'))
+        add_section(f"""
+        <h3 id="section-fixity">Fixity</h3>
+        {fixity_html}
+        """, ('section-fixity', 'Fixity'))
+
     if mediaconch_csv:
-        toc_entries.append(('section-mediaconch-csv', 'MediaConch CSV'))
+        add_section(f"""
+        <h3 id="section-mediaconch-csv">{mediaconch_csv_filename}</h3>
+        {mc_csv_html}
+        """, ('section-mediaconch-csv', 'MediaConch CSV'))
+
+    # MediaConch policy is collapsible
     if mediaconch_policy_content and mediaconch_policy_name:
-        toc_entries.append(('section-mediaconch-policy', 'MediaConch Policy'))
+        add_section(f"""
+        <h3 id="section-mediaconch-policy">MediaConch Policy File: {mediaconch_policy_name}</h3>
+        <a id="link_mediaconch_policy" href="javascript:void(0);" onclick="toggleContent('mediaconch_policy', 'Show policy content ▼', 'Hide policy content ▲')" style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block;">Show policy content ▼</a>
+        <div id="mediaconch_policy" class="xml-content" style="display: none;">{mediaconch_policy_content}</div>
+        """, ('section-mediaconch-policy', 'MediaConch Policy'))
+
     if mkvalidator_html:
-        toc_entries.append(('section-mkvalidator', 'mkvalidator'))
+        add_section(f"""
+        <h3 id="section-mkvalidator">mkvalidator</h3>
+        {mkvalidator_html}
+        """, ('section-mkvalidator', 'mkvalidator'))
+
+    # Frame analysis brings its own headings, so it is passed through whole and
+    # its TOC entries are read back out of the markup — only the subsections
+    # that actually rendered are listed, falling back to the section heading.
     if frame_analysis_html:
-        # Link to the individual frame-analysis subsections rather than the
-        # section heading; only list the ones that were actually rendered
         frame_subsections = [
             ('section-border-detection', 'Border Detection'),
             ('section-signalstats', 'Signalstats Analysis'),
@@ -6749,437 +7082,117 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
             (anchor, label) for anchor, label in frame_subsections
             if f"id='{anchor}'" in frame_analysis_html
         ]
-        if rendered:
-            toc_entries.extend(rendered)
-        else:
-            toc_entries.append(('section-frame-analysis', 'Frame Analysis Results'))
-    if bitplane_html:
-        toc_entries.append(('section-bitplane', 'Bitplane Check'))
-    if duplicate_frame_html:
-        toc_entries.append(('section-duplicate-frame', 'Duplicate Frame Detection'))
-    if no_qct_parse_files:
-        toc_entries.append(('section-qct-parse-notice', 'QCT-Parse Analysis'))
-    if colorbars_html:
-        toc_entries.append(('section-colorbars', 'Color Bars Detection'))
-    for region_name, _ in windowed_colorbars_html_list:
-        toc_entries.append((f'section-colorbars-{region_name}', 'Additional Color Bars'))
-    if bars_comparison_html or tone_detection_html:
-        toc_entries.append(('section-clams-detection', 'CLAMS Detection'))
-    if colorbars_eval_html:
-        toc_entries.append(('section-colorbars-eval', 'Colorbars Threshold Evaluation'))
-    if colorbars_timeline_html:
-        toc_entries.append(('section-timeline', 'Timeline of Signal Distribution'))
-    if clamped_levels_html:
-        toc_entries.append(('section-clamped-levels', 'Clamped Levels Detection'))
-    if chroma_phase_html:
-        toc_entries.append(('section-chroma-phase', 'Chroma Phase Detection'))
-    if _has_audio_results:
-        toc_entries.append(('section-audio-analysis', 'Audio Analysis Results'))
-    if dropped_sample_html:
-        toc_entries.append(('section-dropped-sample', 'Dropped Sample Detection'))
-    if artifacts.difference_csv:
-        toc_entries.append(('section-difference-csv', 'Difference CSV'))
-    if profile_summary_html:
-        toc_entries.append(('section-profile-summary', 'QCT-Parse Profile Summary'))
-    if tags_summary_html:
-        toc_entries.append(('section-tags-summary', 'QCT-Parse Tag Check Summary'))
-    if content_summary_html_list:
-        toc_entries.append(('section-content-summary', 'QCT-Parse Content Detection'))
-    if exiftool_output_path:
-        toc_entries.append(('section-exiftool', 'ExifTool Output'))
-    if mediainfo_output_path:
-        toc_entries.append(('section-mediainfo', 'MediaInfo Output'))
-    if ffprobe_output_path:
-        toc_entries.append(('section-ffprobe', 'FFprobe Output'))
-
-    if toc_entries:
-        toc_links = ''.join(
-            f'<li style="margin: 0;">'
-            f'<a class="toc-pill" href="#{anchor}">{label}</a></li>'
-            for anchor, label in toc_entries
-        )
-        toc_html = (
-            '<nav aria-label="Report sections" '
-            'style="background-color: #f5e9e3; border: 1px solid #4d2b12; '
-            'border-radius: 4px; padding: 14px 18px; margin: 18px 0;">'
-            '<p style="font-weight: bold; margin: 0 0 10px 0; color: #4d2b12; '
-            'font-size: 14px;">Jump to section</p>'
-            '<ul style="list-style: none; padding: 0; margin: 0; '
-            'display: flex; flex-wrap: wrap; gap: 8px;">'
-            f'{toc_links}'
-            '</ul></nav>'
-        )
-    else:
-        toc_html = ''
-
-    # HTML template with JavaScript functions
-    html_template = f"""
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>AV Spex Report</title>
-        <style>
-            body {{
-                font-family: Arial, sans-serif;
-                background-color: #fcfdff;
-                color: #011054;
-                margin: 30px;
-            }}
-            h1 {{
-                font-size: 24px;
-                text-align: center;
-                margin-top: 20px;
-                color: #378d6a;
-            }}
-            h2 {{
-                font-size: 20px;
-                font-weight: bold;
-                margin-top: 30px;
-                color: #0a5f1c;
-                text-decoration: underline;
-            }}
-            h3 {{
-                font-size: 18px;
-                margin-top: 20px;
-                color: #bf971b;
-            }}
-            table {{
-                border-collapse: collapse;
-                margin-top: 10px;
-                margin-bottom: 20px;
-                border: 2px solid #4d2b12;
-            }}
-            th, td {{
-                border: 1.5px solid #4d2b12;
-                padding: 8px;
-                text-align: left;
-            }}
-            th {{
-                background-color: #fbe4eb;
-                font-weight: bold;
-            }}
-            pre {{
-                background-color: #f5e9e3;
-                border: 1px solid #4d2b12;
-                padding: 10px;
-                white-space: pre-wrap;
-                word-wrap: break-word;
-            }}
-            .xml-content {{
-                background-color: #f8f9fa;
-                border: 1px solid #6c757d;
-                padding: 15px;
-                white-space: pre-wrap;
-                word-wrap: break-word;
-                font-family: 'Courier New', monospace;
-                font-size: 12px;
-                max-height: 400px;
-                overflow-y: auto;
-            }}
-            .metadata-content {{
-                background-color: #f5e9e3;
-                border: 1px solid #4d2b12;
-                padding: 10px;
-                white-space: pre-wrap;
-                word-wrap: break-word;
-                font-family: monospace;
-                max-height: 400px;
-                overflow-y: auto;
-            }}
-            .color-strip-divider {{
-                display: block;
-                width: 100%;
-                height: auto;
-                margin: 25px 0;
-                border-radius: 3px;
-                image-rendering: pixelated;          /* Chrome/Edge */
-                image-rendering: crisp-edges;         /* Firefox */
-                -ms-interpolation-mode: nearest-neighbor; /* legacy IE */
-            }}
-            .cell-match {{
-                background-color: #d2ffed;
-            }}
-            .cell-mismatch {{
-                background-color: #ff9999;
-            }}
-            [id^="section-"] {{
-                scroll-margin-top: 16px;
-            }}
-            .toc-pill {{
-                display: inline-block;
-                padding: 6px 14px;
-                background-color: #fcfdff;
-                color: #378d6a;
-                border: 1px solid #378d6a;
-                border-radius: 999px;
-                text-decoration: none;
-                font-size: 13px;
-                font-weight: 500;
-                transition: background-color 0.15s ease, color 0.15s ease;
-            }}
-            .toc-pill:hover,
-            .toc-pill:focus {{
-                background-color: #378d6a;
-                color: #fcfdff;
-                outline: none;
-            }}
-        </style>
-        <script>
-        function openImage(imgData, caption) {{
-            var newWindow = window.open('', '_blank');
-            newWindow.document.write('<html><head><title>' + caption + '</title></head><body style="margin:0; background:#000; display:flex; align-items:center; justify-content:center; height:100vh;">');
-            newWindow.document.write('<img src="' + imgData + '" style="max-width:100%; max-height:100%; object-fit:contain;">');
-            newWindow.document.write('</body></html>');
-            newWindow.document.close();
-        }}
-
-        function toggleTable(tagId) {{
-            var table = document.getElementById('table_' + tagId);
-            var link = document.getElementById('link_' + tagId);
-            if (table.style.display === 'none') {{
-                table.style.display = 'block';
-                link.textContent = 'Hide all failures ▲';
-            }} else {{
-                table.style.display = 'none';
-                link.textContent = 'Show all failures ▼';
-            }}
-        }}
-
-        function toggleContent(contentId, showText, hideText) {{
-            var content = document.getElementById(contentId);
-            var link = document.getElementById('link_' + contentId);
-            if (content.style.display === 'none') {{
-                content.style.display = 'block';
-                link.textContent = hideText;
-            }} else {{
-                content.style.display = 'none';
-                link.textContent = showText;
-            }}
-        }}
-        </script>
-        <img src="{logo_image_path}" alt="AV Spex Logo" style="display: block; margin-left: auto; margin-right: auto; width: 25%; margin-top: 20px;">
-    </head>
-    <body>
-        <h1>AV Spex Report</h1>
-        <h2>{video_id}</h2>
-        {color_strip_store}
-        {waveform_store}
-        {toc_html}
-    """
-
-    if check_cancelled():
-        return
-
-    if fixity_html:
-        html_template += f"""
-        <h3 id="section-fixity">Fixity</h3>
-        {fixity_html}
-        """
-
-    if mediaconch_csv:
-        html_template += f"""
-        <h3 id="section-mediaconch-csv">{mediaconch_csv_filename}</h3>
-        {mc_csv_html}
-        """
-
-    # Add MediaConch policy section if available - NOW WITH COLLAPSIBLE FUNCTIONALITY
-    if mediaconch_policy_content and mediaconch_policy_name:
-        html_template += f"""
-        <h3 id="section-mediaconch-policy">MediaConch Policy File: {mediaconch_policy_name}</h3>
-        <a id="link_mediaconch_policy" href="javascript:void(0);" onclick="toggleContent('mediaconch_policy', 'Show policy content ▼', 'Hide policy content ▲')" style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block;">Show policy content ▼</a>
-        <div id="mediaconch_policy" class="xml-content" style="display: none;">{mediaconch_policy_content}</div>
-        """
-
-    if mkvalidator_html:
-        html_template += f"""
-        <h3 id="section-mkvalidator">mkvalidator</h3>
-        {mkvalidator_html}
-        """
-
-    if frame_analysis_html:
-        html_template += frame_analysis_html
+        add_section(frame_analysis_html,
+                    *(rendered or [('section-frame-analysis', 'Frame Analysis Results')]))
 
     # Bitplane check and duplicate frame detection render side-by-side so
     # each fills the vertical space of the taller section.
     if bitplane_html or duplicate_frame_html:
-        html_template += (
+        block = (
             '<div style="display: flex; flex-wrap: wrap; gap: 24px; '
             'align-items: flex-start; margin-top: 20px;">'
         )
+        block_toc = []
         if bitplane_html:
-            html_template += (
+            block += (
                 '<div id="section-bitplane" style="flex: 1 1 380px; min-width: 0;">'
                 f'{bitplane_html}</div>'
             )
+            block_toc.append(('section-bitplane', 'Bitplane Check'))
         if duplicate_frame_html:
-            html_template += (
+            block += (
                 '<div id="section-duplicate-frame" '
                 'style="flex: 2 1 600px; min-width: 0; overflow-x: auto;">'
                 f'{duplicate_frame_html}</div>'
             )
-        html_template += '</div>'
+            block_toc.append(('section-duplicate-frame', 'Duplicate Frame Detection'))
+        block += '</div>'
+        add_section(block, *block_toc)
 
+    # Divider closing out the frame-analysis group. Carries no TOC entry.
     if frame_analysis_html or bitplane_html or duplicate_frame_html:
-        html_template += color_strip_divider
+        add_section(color_strip_divider)
 
-    # Rest of the HTML template remains the same...
     if no_qct_parse_files:
-        html_template += """
+        add_section("""
         <h3 id="section-qct-parse-notice">QCT-Parse Analysis</h3>
         <div style="background-color: #fff3cd; padding: 15px; border: 1px solid #856404; margin: 10px 0; border-radius: 5px;">
             <p style="margin: 0; color: #856404;"><strong>Information:</strong> QCT-Parse analysis was not performed for this video. Quality control analysis sections are not available in this report.</p>
         </div>
-        """
+        """, ('section-qct-parse-notice', 'QCT-Parse Analysis'))
 
+    # Head bars graph plus one graph per additional (mid-file) bars region,
+    # laid out in a single wrapping flex row.
     if colorbars_html or windowed_colorbars_html_list:
-        html_template += '<div style="display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start;">'
+        block = '<div style="display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start;">'
+        block_toc = []
         if colorbars_html:
             if colorbars_box_only:
                 colorbars_header = "Color Bars Detection"
             else:
                 colorbars_header = f"SMPTE Colorbars vs {video_id} Colorbars"
-            html_template += f"""
+            block += f"""
             <div id="section-colorbars" style="flex: 1 1 720px; max-width: 100%; min-width: 0; overflow: hidden;">
                 <h3>{colorbars_header}</h3>
                 {colorbars_html}
             </div>"""
+            block_toc.append(('section-colorbars', 'Color Bars Detection'))
         for region_name, wv_html in windowed_colorbars_html_list:
-            html_template += f"""
+            block += f"""
             <div id="section-colorbars-{region_name}" style="flex: 1 1 720px; max-width: 100%; min-width: 0; overflow: hidden;">
                 <h3>SMPTE Colorbars vs Additional {video_id} Colorbars</h3>
                 {wv_html}
             </div>"""
-        html_template += '</div>'
+            block_toc.append((f'section-colorbars-{region_name}', 'Additional Color Bars'))
+        block += '</div>'
+        add_section(block, *block_toc)
 
     if bars_comparison_html or tone_detection_html:
-        html_template += '<h3 id="section-clams-detection">CLAMS Detection</h3>'
-        html_template += """
-        <a id="link_clams_methodology" href="javascript:void(0);"
-           onclick="toggleContent('clams_methodology', 'What is CLAMS Detection? ▼', 'What is CLAMS Detection? ▲')"
-           style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
-           What is CLAMS Detection? ▼</a>
-        <div id="clams_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px;
-             margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
-            <p style="margin: 0 0 10px 0;">
-                <strong>CLAMS</strong> (Computational Linguistics Applications for Multimedia Services) is an
-                open-source project led by Brandeis University that builds reusable tools for analyzing
-                audiovisual collections. AV Spex adapts two CLAMS apps —
-                <a href="https://github.com/clamsproject/app-barsdetection" style="color: #378d6a;">app-barsdetection</a>
-                and <a href="https://github.com/clamsproject/app-tonedetection" style="color: #378d6a;">app-tonedetection</a> —
-                porting just their detection cores into the AV Spex pipeline. Both upstream apps are
-                distributed under the Apache License 2.0.
-            </p>
-            <p style="margin: 0 0 6px 0; font-weight: bold;">How bars detection works:</p>
-            <p style="margin: 0 0 10px 0;">
-                Frames are sampled (every 30th frame by default) and converted to grayscale. Each sample
-                is compared to a bundled SMPTE color bars reference image using
-                <strong>structural similarity (SSIM)</strong>. A frame is considered to match when its
-                SSIM score exceeds the primary threshold (<code style="background:#eee; padding:1px 4px; border-radius:2px;">0.7</code>),
-                and a run of consecutive matching samples becomes a detected bars span once it
-                exceeds the minimum frame count.
-            </p>
-            <p style="margin: 0 0 6px 0; font-weight: bold;">How tone detection works:</p>
-            <p style="margin: 0 0 10px 0;">
-                The audio track is decoded to 16 kHz mono via ffmpeg and split into consecutive 250 ms
-                chunks. Adjacent chunks are compared using <strong>numpy cross-correlation</strong>;
-                when their similarity stays at or above the tolerance
-                (<code style="background:#eee; padding:1px 4px; border-radius:2px;">1.0</code> by default),
-                the run is extended. Runs that survive a minimum-duration filter
-                (<code style="background:#eee; padding:1px 4px; border-radius:2px;">2000 ms</code> by default)
-                are reported as detected tones.
-            </p>
-            <p style="margin: 0 0 6px 0; font-weight: bold;">Two-pass cross-validation:</p>
-            <p style="margin: 0 0 6px 0;">
-                Color bars and reference tone are typically authored together at the head of a tape, so
-                the two detectors should largely agree. AV Spex runs them in two passes:
-            </p>
-            <ol style="margin: 4px 0 10px 20px; padding: 0;">
-                <li style="margin-bottom: 4px;"><strong>Primary pass</strong> — each detector scans the
-                    file independently with its default thresholds.</li>
-                <li style="margin-bottom: 4px;"><strong>Head re-check</strong> — if the primary bars pass
-                    found nothing near the head of the file, the recorded SSIM scores over the first two
-                    minutes are re-evaluated at the relaxed threshold
-                    (<code style="background:#eee; padding:1px 4px; border-radius:2px;">0.6</code>).
-                    This catches real but degraded head bars that score just under the primary
-                    threshold.</li>
-                <li style="margin-bottom: 4px;"><strong>Second pass</strong> — when one detector finds a
-                    span the other missed, a targeted windowed scan is run on the other detector with
-                    <em>relaxed</em> thresholds (bars: SSIM ≥
-                    <code style="background:#eee; padding:1px 4px; border-radius:2px;">0.6</code>, sample
-                    ratio <code style="background:#eee; padding:1px 4px; border-radius:2px;">5</code>;
-                    tone: tolerance
-                    <code style="background:#eee; padding:1px 4px; border-radius:2px;">0.7</code>,
-                    min duration
-                    <code style="background:#eee; padding:1px 4px; border-radius:2px;">500 ms</code>).
-                    A ±5 s slack is added around the trigger window because bars and tone don't always
-                    start and stop in lockstep.</li>
-            </ol>
-            <p style="margin: 0 0 10px 0;">
-                Re-scan rows are highlighted in the result tables below. The head-bars end time used
-                downstream (the BRNG-skip window, access-file trim) is a <strong>cross-validated
-                consensus</strong> of qct-parse and CLAMS: when the two detectors disagree, the disputed
-                span is checked against the recorded SSIM scores — a span whose scores never approach
-                the bars threshold is rejected, and a head claim from one detector that the other
-                decisively contradicts is treated as unconfirmed rather than trusted.
-            </p>
-            <p style="margin: 0 0 6px 0; font-weight: bold;">Fragment merging:</p>
-            <p style="margin: 0 0 10px 0;">
-                A continuous tone or bars span can dip below threshold for a brief chunk and be reported
-                as several adjacent fragments. After detection, AV Spex coalesces fragments separated by
-                less than the configured <code style="background:#eee; padding:1px 4px; border-radius:2px;">merge_gap_seconds</code>
-                (defaults: 1 s for bars, 5 s for tone) back into a single span so the report reflects
-                the underlying continuous signal.
-            </p>
-            <p style="margin: 0; color: #777;">
-                Both detectors write a per-pass durations CSV alongside the report; the bars detector
-                additionally writes a per-sampled-frame SSIM scores CSV
-                (<code style="background:#eee; padding:1px 4px; border-radius:2px;">pass, frame,
-                timestamp, ssim_score, exceeds_threshold</code>). Those recorded scores are also what
-                the head re-check and the consensus arbitration read.
-            </p>
-        </div>
-        """
+        block = '<h3 id="section-clams-detection">CLAMS Detection</h3>'
+        block += CLAMS_METHODOLOGY_HTML
         if bars_comparison_html:
-            html_template += f"""
+            block += f"""
             <h4 style="font-size: 16px; margin-top: 16px; color: #4d2b12;">Bars Detection (qct-parse vs CLAMS SSIM)</h4>
             {bars_comparison_html}
             """
         if tone_detection_html:
-            html_template += f"""
+            block += f"""
             <h4 style="font-size: 16px; margin-top: 16px; color: #4d2b12;">Tone Detection</h4>
             {tone_detection_html}
             """
+        add_section(block, ('section-clams-detection', 'CLAMS Detection'))
 
     if colorbars_eval_html:
         if smpte_reference:
             eval_header = "Values relative to SMPTE colorbar's thresholds"
         else:
             eval_header = "Values relative to colorbar's thresholds"
-        html_template += f"""
+        add_section(f"""
         <h3 id="section-colorbars-eval">{eval_header}</h3>
         {colorbars_eval_html}
-        """
+        """, ('section-colorbars-eval', 'Colorbars Threshold Evaluation'))
 
     if colorbars_timeline_html:
-        html_template += f"""
+        add_section(f"""
         <h3 id="section-timeline">Timeline of Signal Distribution</h3>
         {colorbars_timeline_html}
-        """
+        """, ('section-timeline', 'Timeline of Signal Distribution'))
 
     if clamped_levels_html:
-        html_template += f"""
+        add_section(f"""
         <h3 id="section-clamped-levels">Clamped Levels Detection</h3>
         {clamped_levels_html}
-        """
+        """, ('section-clamped-levels', 'Clamped Levels Detection'))
 
     if chroma_phase_html:
-        html_template += f"""
+        add_section(f"""
         <h3 id="section-chroma-phase">Chroma Phase Detection</h3>
         {chroma_phase_html}
-        """
+        """, ('section-chroma-phase', 'Chroma Phase Detection'))
 
+    # Audio results render as one banner-led group: the per-channel
+    # comparisons two-up, then timecode/dropout two-up, then tone leak full
+    # width, bracketed by waveform dividers. One TOC entry covers the group.
     has_audio_results = bool(
         audio_clipping_html or channel_imbalance_html
         or identical_channels_html
@@ -7188,140 +7201,158 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     )
 
     if has_audio_results:
-        html_template += (
+        block = (
             '<h2 id="section-audio-analysis" style="color: #0a5f1c; '
             'text-decoration: underline; margin-top: 30px;">'
             'Audio Analysis Results</h2>'
         )
-        html_template += waveform_divider
+        block += waveform_divider
 
-        # Clipping + Channel Imbalance + Identical Channels — the per-channel
-        # comparisons, wrapping two-up
         if audio_clipping_html or channel_imbalance_html or identical_channels_html:
-            html_template += (
+            block += (
                 '<div style="display: flex; flex-wrap: wrap; gap: 24px; '
                 'align-items: flex-start; margin: 16px 0;">'
             )
             if audio_clipping_html:
-                html_template += f"""
+                block += f"""
                 <div style="flex: 1 1 420px; min-width: 0;">
                     <h3>Audio Clipping Detection</h3>
                     {audio_clipping_html}
                 </div>
                 """
             if channel_imbalance_html:
-                html_template += f"""
+                block += f"""
                 <div style="flex: 1 1 420px; min-width: 0;">
                     <h3>Channel Imbalance Analysis</h3>
                     {channel_imbalance_html}
                 </div>
                 """
             if identical_channels_html:
-                html_template += f"""
+                block += f"""
                 <div id="section-identical-channels" style="flex: 1 1 420px; min-width: 0;">
                     <h3>Identical Channels</h3>
                     {identical_channels_html}
                 </div>
                 """
-            html_template += '</div>'
+            block += '</div>'
 
-        # Audible Timecode + Audio Dropout side-by-side
         if audible_timecode_html or audio_dropout_html:
-            html_template += (
+            block += (
                 '<div style="display: flex; flex-wrap: wrap; gap: 24px; '
                 'align-items: flex-start; margin: 16px 0;">'
             )
             if audible_timecode_html:
-                html_template += f"""
+                block += f"""
                 <div style="flex: 1 1 420px; min-width: 0;">
                     <h3>Audible Timecode Detection</h3>
                     {audible_timecode_html}
                 </div>
                 """
             if audio_dropout_html:
-                html_template += f"""
+                block += f"""
                 <div style="flex: 1 1 420px; min-width: 0;">
                     <h3>Audio Dropout Detection</h3>
                     {audio_dropout_html}
                 </div>
                 """
-            html_template += '</div>'
+            block += '</div>'
 
         # Tone Leak Detection (full width - the per-channel table is wide)
         if tone_leak_html:
-            html_template += f"""
+            block += f"""
             <div id="section-tone-leak" style="margin: 16px 0;">
                 <h3>Tone Leak Detection</h3>
                 {tone_leak_html}
             </div>
             """
 
-        html_template += waveform_divider
+        block += waveform_divider
+        add_section(block, ('section-audio-analysis', 'Audio Analysis Results'))
 
     if dropped_sample_html:
-        html_template += f'<div id="section-dropped-sample">{dropped_sample_html}</div>'
+        add_section(f'<div id="section-dropped-sample">{dropped_sample_html}</div>',
+                    ('section-dropped-sample', 'Dropped Sample Detection'))
 
     if artifacts.difference_csv:
-        html_template += f"""
+        add_section(f"""
         <h3 id="section-difference-csv">{difference_csv_filename}</h3>
         {diff_csv_html}
-        """
+        """, ('section-difference-csv', 'Difference CSV'))
 
     if profile_summary_html:
-        html_template += f"""
+        add_section(f"""
         <h3 id="section-profile-summary">qct-parse Profile Summary</h3>
         <div style="white-space: nowrap;">
             {profile_summary_html}
         </div>
-        """
+        """, ('section-profile-summary', 'QCT-Parse Profile Summary'))
 
     if tags_summary_html:
-        html_template += f"""
+        add_section(f"""
         <h3 id="section-tags-summary">qct-parse Tag Check Summary</h3>
         <div style="white-space: nowrap;">
             {tags_summary_html}
         </div>
-        """
+        """, ('section-tags-summary', 'QCT-Parse Tag Check Summary'))
 
     if content_summary_html_list:
+        block = ''
         for idx, content_summary_html in enumerate(content_summary_html_list):
-            # Only first content-detection block gets the anchor id so TOC
+            # Only the first content-detection block gets the anchor id, so TOC
             # links resolve even when multiple blocks render.
             heading_id = ' id="section-content-summary"' if idx == 0 else ''
-            html_template += f"""
+            block += f"""
             <h3{heading_id}>qct-parse Content Detection</h3>
             <div style="white-space: nowrap;">
                 {content_summary_html}
             </div>
             """
+        add_section(block, ('section-content-summary', 'QCT-Parse Content Detection'))
 
-    # Modified sections with collapsible functionality
+    # Raw tool output, each collapsible
     if exiftool_output_path:
-        html_template += f"""
+        add_section(f"""
         <h3 id="section-exiftool">{exif_file_filename}</h3>
         <a id="link_exiftool" href="javascript:void(0);" onclick="toggleContent('exiftool', 'Show content ▼', 'Hide content ▲')" style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block;">Show content ▼</a>
         <div id="exiftool" class="metadata-content" style="display: none;">{exif_file_content}</div>
-        """
+        """, ('section-exiftool', 'ExifTool Output'))
 
     if mediainfo_output_path:
-        html_template += f"""
+        add_section(f"""
         <h3 id="section-mediainfo">{mi_file_filename}</h3>
         <a id="link_mediainfo" href="javascript:void(0);" onclick="toggleContent('mediainfo', 'Show content ▼', 'Hide content ▲')" style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block;">Show content ▼</a>
         <div id="mediainfo" class="metadata-content" style="display: none;">{mi_file_content}</div>
-        """
+        """, ('section-mediainfo', 'MediaInfo Output'))
 
     if ffprobe_output_path:
-        html_template += f"""
+        add_section(f"""
         <h3 id="section-ffprobe">{ffprobe_file_filename}</h3>
         <a id="link_ffprobe" href="javascript:void(0);" onclick="toggleContent('ffprobe', 'Show content ▼', 'Hide content ▲')" style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block;">Show content ▼</a>
         <div id="ffprobe" class="metadata-content" style="display: none;">{ffprobe_file_content}</div>
-        """
+        """, ('section-ffprobe', 'FFprobe Output'))
 
     if check_cancelled():
         return
 
+    # ------------------------------------------------------------------
+    # Emit: TOC and body both come from `sections`, in the same order.
+    # ------------------------------------------------------------------
+    dangling = _dangling_toc_anchors(sections)
+    if dangling:
+        logger.warning(
+            f"Report TOC links point at section ids that were never rendered: {', '.join(dangling)}"
+        )
+
+    toc_html = _build_toc_html([entry for section in sections for entry in section.toc])
+
+    html_template = _report_head_html(
+        video_id, logo_image_path, color_strip_store, waveform_store, toc_html)
+
+    for section in sections:
+        html_template += section.html
+
     html_template += color_strip_init_script
-    html_template += waveform_init_script   
+    html_template += waveform_init_script
     html_template += """
     </body>
     </html>

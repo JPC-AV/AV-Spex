@@ -657,6 +657,74 @@ def test_find_report_csvs_missing_directory_returns_defaults(tmp_path):
 
 
 # ===========================================================================
+# Section 5b — report section assembly (ReportSection / TOC derivation)
+# ===========================================================================
+
+def test_report_section_defaults_to_no_toc_entries():
+    assert gr.ReportSection(html="<p>x</p>").toc == ()
+
+
+def test_toc_is_derived_in_section_order():
+    """The nav order is read off the section list, not restated separately."""
+    sections = [
+        gr.ReportSection('<h3 id="a">A</h3>', (('a', 'Alpha'),)),
+        gr.ReportSection('<h3 id="b">B</h3>', (('b', 'Beta'),)),
+        gr.ReportSection('<h3 id="c">C</h3>', (('c', 'Gamma'),)),
+    ]
+    entries = [e for s in sections for e in s.toc]
+    assert [a for a, _ in entries] == ['a', 'b', 'c']
+
+    html = gr._build_toc_html(entries)
+    # Links appear in the same order as the sections that produced them.
+    assert html.index('#a') < html.index('#b') < html.index('#c')
+
+
+def test_one_section_can_contribute_several_toc_entries():
+    """Frame analysis lists its rendered subsections rather than itself."""
+    section = gr.ReportSection(
+        "<div id='section-border-detection'></div><div id='section-brng-analysis'></div>",
+        (('section-border-detection', 'Border Detection'),
+         ('section-brng-analysis', 'BRNG Violation Analysis')),
+    )
+    assert len(section.toc) == 2
+    assert gr._dangling_toc_anchors([section]) == []
+
+
+def test_section_may_contribute_no_toc_entry():
+    """Dividers render markup but are not navigation targets."""
+    divider = gr.ReportSection('<img class="color-strip-divider">')
+    assert [e for s in [divider] for e in s.toc] == []
+    assert gr._dangling_toc_anchors([divider]) == []
+
+
+def test_build_toc_html_empty_when_no_entries():
+    assert gr._build_toc_html([]) == ''
+
+
+def test_dangling_toc_anchor_detected_when_id_missing():
+    """An anchor whose id was never written is a link that scrolls nowhere."""
+    sections = [gr.ReportSection('<h3 id="section-real">R</h3>',
+                                 (('section-typo', 'Typo'),))]
+    assert gr._dangling_toc_anchors(sections) == ['section-typo']
+
+
+def test_dangling_toc_anchors_accepts_single_quoted_ids():
+    """Frame analysis writes id='x'; the rest of the report writes id="x"."""
+    sections = [gr.ReportSection("<div id='section-x'>X</div>",
+                                 (('section-x', 'X'),))]
+    assert gr._dangling_toc_anchors(sections) == []
+
+
+def test_dangling_toc_anchor_resolves_against_any_section(tmp_path):
+    """An anchor may point into a sibling section's markup."""
+    sections = [
+        gr.ReportSection('<h3 id="section-a">A</h3>', (('section-b', 'B'),)),
+        gr.ReportSection('<h3 id="section-b">B</h3>'),
+    ]
+    assert gr._dangling_toc_anchors(sections) == []
+
+
+# ===========================================================================
 # Section 6 — read_xml_file
 # ===========================================================================
 
