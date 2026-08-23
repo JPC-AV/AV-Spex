@@ -51,3 +51,49 @@ def sample_thumbs_dict(tmp_path):
 def setup_logging():
     """Setup basic logging configuration for tests"""
     logging.basicConfig(level=logging.CRITICAL)
+
+# ---------------------------------------------------------------------------
+# Qt / GUI fixtures
+#
+# A session-scoped QApplication on the offscreen platform. This is enough for
+# structural and logic tests on dialogs; it is NOT suitable for asserting on
+# palette colors, because macOS reports a different palette offscreen than
+# under cocoa (see CLAUDE.md on disabled-state styling).
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="session")
+def qapp():
+    PyQt6 = pytest.importorskip("PyQt6")
+    # Qt does not infer its plugin directory from the PyQt6 package, and an
+    # unset QT_PLUGIN_PATH makes even the offscreen platform fail to load
+    # (it aborts the interpreter rather than raising). Point it at the
+    # plugins root that ships with the installed PyQt6.
+    plugins = os.path.join(os.path.dirname(PyQt6.__file__), "Qt6", "plugins")
+    if os.path.isdir(plugins):
+        os.environ.setdefault("QT_PLUGIN_PATH", plugins)
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    QApplication = pytest.importorskip("PyQt6.QtWidgets").QApplication
+    app = QApplication.instance() or QApplication([])
+    yield app
+
+
+@pytest.fixture
+def silent_dialogs(monkeypatch):
+    """Stop QMessageBox popups from blocking, and record what was raised.
+
+    Validation failures in these dialogs surface as modal warnings; without
+    this fixture a failing-validation test would hang waiting for a click.
+    """
+    QtWidgets = pytest.importorskip("PyQt6.QtWidgets")
+    seen = []
+
+    def _record(kind):
+        def _fn(parent, title, text, *a, **k):
+            seen.append((kind, title, text))
+            return QtWidgets.QMessageBox.StandardButton.Ok
+        return _fn
+
+    for kind in ("warning", "critical", "information", "question"):
+        monkeypatch.setattr(QtWidgets.QMessageBox, kind, staticmethod(_record(kind)))
+    return seen
