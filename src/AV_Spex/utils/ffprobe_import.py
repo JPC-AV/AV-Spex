@@ -14,6 +14,7 @@ from pathlib import Path
 from dataclasses import asdict
 
 from AV_Spex.utils.log_setup import logger
+from AV_Spex.utils import profile_import
 from AV_Spex.utils.config_setup import (
     FfprobeProfile, FFmpegVideoStream,
     FFmpegAudioStream, FFmpegFormat, EncoderSettings
@@ -103,8 +104,7 @@ def parse_ffprobe_json_file(file_path: str) -> Optional[Dict[str, Dict[str, Any]
 
 def _get_fields_for_dataclass(dataclass_type) -> List[str]:
     """Get field names from a dataclass type."""
-    return [f.name for f in dataclasses.fields(dataclass_type)]
-
+    return profile_import.get_dataclass_field_names(dataclass_type)
 
 def extract_video_stream_fields(stream_data: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -197,208 +197,69 @@ def extract_format_fields(format_data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _apply_defaults(fields: Dict[str, Any], dataclass_type) -> Dict[str, Any]:
-    """
-    Fill in default values for any fields missing from extracted data.
-    
-    Uses empty string for str fields and empty list for List fields.
-    
-    Args:
-        fields: Extracted field values
-        dataclass_type: The target dataclass type for introspection
-        
-    Returns:
-        Fields dict with defaults applied
-    """
-    import typing
-    type_hints = typing.get_type_hints(dataclass_type)
-    
-    for field_info in dataclasses.fields(dataclass_type):
-        field_name = field_info.name
-        if field_name not in fields:
-            field_type = type_hints.get(field_name)
-            origin = typing.get_origin(field_type)
-            
-            if origin is list or origin is typing.List:
-                fields[field_name] = []
-            elif origin is dict or origin is typing.Dict:
-                fields[field_name] = {}
-            else:
-                fields[field_name] = ""
-    
+    """Fill in default values for any fields missing from extracted data."""
+    return profile_import.apply_defaults(fields, dataclass_type)
+
+
+# FFmpegFormat.tags is a free-form dict, so introspection can supply only an
+# empty one. These are the keys AV Spex expects to be present.
+_FORMAT_TAGS_DEFAULT = {
+    'creation_time': None,
+    'ENCODER': None,
+    'TITLE': None,
+    'ENCODER_SETTINGS': None,
+    'DESCRIPTION': None,
+    'ORIGINAL MEDIA TYPE': None,
+    'ENCODED_BY': None,
+}
+
+
+def _finalize_section(section_key: str, fields: Dict[str, Any]) -> Dict[str, Any]:
+    """Supply the format tags skeleton that apply_defaults cannot infer."""
+    if section_key == 'format' and not fields.get('tags'):
+        fields['tags'] = dict(_FORMAT_TAGS_DEFAULT)
     return fields
 
 
+# The parsing and extraction above is FFprobe-specific; everything below is
+# the shared sectioned-import machinery, parameterised by this spec.
+SPEC = profile_import.ImportSpec(
+    label='FFprobe',
+    profile_class=FfprobeProfile,
+    parse=parse_ffprobe_json_file,
+    sections=(
+        profile_import.ImportSection(
+            key='video_stream', source_key='video_stream',
+            extract=extract_video_stream_fields,
+            values_class=FFmpegVideoStream),
+        profile_import.ImportSection(
+            key='audio_stream', source_key='audio_stream',
+            extract=extract_audio_stream_fields,
+            values_class=FFmpegAudioStream),
+        profile_import.ImportSection(
+            key='format', source_key='format',
+            extract=extract_format_fields,
+            values_class=FFmpegFormat),
+    ),
+    # 'tags' belongs to the signal-flow system, not to FFprobe profiles — the
+    # same exclusion config_edit._ffprobe_matches applies.
+    skip_fields=('tags',),
+    finalize=_finalize_section,
+)
+
+
 def import_ffprobe_file_to_profile(file_path: str) -> Optional[FfprobeProfile]:
-    """
-    Import an FFprobe JSON file and create a FfprobeProfile from it.
-    
-    This is the main entry point for file import, paralleling
-    mediainfo_import.import_mediainfo_file_to_profile().
-    
-    Args:
-        file_path: Path to the FFprobe JSON output file
-        
-    Returns:
-        FfprobeProfile instance or None if import fails
-    """
-    section_data = parse_ffprobe_json_file(file_path)
-    if not section_data:
-        return None
-    
-    # Extract fields for each section
-    video_fields = extract_video_stream_fields(section_data.get('video_stream', {}))
-    audio_fields = extract_audio_stream_fields(section_data.get('audio_stream', {}))
-    format_fields = extract_format_fields(section_data.get('format', {}))
-    
-    if not video_fields and not audio_fields and not format_fields:
-        logger.error("No relevant fields found in FFprobe data")
-        return None
-    
-    # Apply defaults for missing required fields
-    video_fields = _apply_defaults(video_fields, FFmpegVideoStream)
-    audio_fields = _apply_defaults(audio_fields, FFmpegAudioStream)
-    format_fields = _apply_defaults(format_fields, FFmpegFormat)
-    
-    # Handle tags default for FFmpegFormat
-    if 'tags' not in format_fields or not format_fields['tags']:
-        format_fields['tags'] = {
-            'creation_time': None,
-            'ENCODER': None,
-            'TITLE': None,
-            'ENCODER_SETTINGS': None,
-            'DESCRIPTION': None,
-            'ORIGINAL MEDIA TYPE': None,
-            'ENCODED_BY': None
-        }
-    
-    try:
-        video_stream = FFmpegVideoStream(**video_fields)
-        audio_stream = FFmpegAudioStream(**audio_fields)
-        ffmpeg_format = FFmpegFormat(**format_fields)
-        
-        profile = FfprobeProfile(
-            video_stream=video_stream,
-            audio_stream=audio_stream,
-            format=ffmpeg_format
-        )
-        
-        logger.info(f"Successfully imported FFprobe data from {file_path}")
-        logger.debug(f"Video stream fields: {list(video_fields.keys())}")
-        logger.debug(f"Audio stream fields: {list(audio_fields.keys())}")
-        logger.debug(f"Format fields: {list(format_fields.keys())}")
-        
-        return profile
-        
-    except Exception as e:
-        logger.error(f"Failed to create FfprobeProfile: {e}")
-        return None
+    """Import an FFprobe JSON file and create a FfprobeProfile from it."""
+    return profile_import.import_file_to_profile(SPEC, file_path)
 
 
 def compare_with_expected(imported_data: Dict[str, Dict],
                           expected_profile: FfprobeProfile) -> Dict[str, Dict]:
-    """
-    Compare imported FFprobe data with expected profile values.
-    
-    Returns per-section comparison results.
-    
-    Args:
-        imported_data: Dict with 'video_stream', 'audio_stream', 'format'
-                      keys containing extracted field dicts
-        expected_profile: The expected FfprobeProfile to compare against
-        
-    Returns:
-        Dict keyed by section name, each containing 'matches',
-        'mismatches', and 'missing' sub-dicts
-    """
-    expected_dict = asdict(expected_profile)
-    results = {}
-    
-    for section_name in ['video_stream', 'audio_stream', 'format']:
-        section_expected = expected_dict.get(section_name, {})
-        section_actual = imported_data.get(section_name, {})
-        
-        matches = {}
-        mismatches = {}
-        missing = {}
-        
-        for field_name, expected_value in section_expected.items():
-            # Skip tags comparison (handled by signal flow system)
-            if field_name == 'tags':
-                continue
-            
-            if field_name in section_actual:
-                actual_value = section_actual[field_name]
-                
-                # Normalize to list for comparison
-                expected_list = expected_value if isinstance(expected_value, list) else [expected_value]
-                
-                # Handle list-to-list comparison
-                if isinstance(actual_value, list) and isinstance(expected_value, list):
-                    if set(expected_value).issubset(set(actual_value)):
-                        matches[field_name] = {'expected': expected_value, 'actual': actual_value}
-                    else:
-                        mismatches[field_name] = {'expected': expected_value, 'actual': actual_value}
-                else:
-                    actual_str = str(actual_value).strip()
-                    expected_str_list = [str(e).strip() for e in expected_list]
-                    
-                    if actual_str in expected_str_list:
-                        matches[field_name] = {'expected': expected_value, 'actual': actual_value}
-                    else:
-                        mismatches[field_name] = {'expected': expected_value, 'actual': actual_value}
-            elif expected_value and expected_value != "" and expected_value != []:
-                # Only flag as missing if the expected value is non-empty
-                missing[field_name] = {'expected': expected_value, 'actual': None}
-        
-        results[section_name] = {
-            'matches': matches,
-            'mismatches': mismatches,
-            'missing': missing
-        }
-    
-    return results
+    """Compare imported FFprobe data against a profile ('tags' excluded)."""
+    return profile_import.compare_with_expected(SPEC, imported_data, expected_profile)
 
 
 def validate_file_against_profile(file_path: str,
-                                   profile: FfprobeProfile) -> Dict[str, Any]:
-    """
-    Validate an FFprobe JSON file against an expected profile.
-    
-    Args:
-        file_path: Path to the FFprobe JSON output file
-        profile: The expected FfprobeProfile
-        
-    Returns:
-        Validation results dictionary with 'valid', 'sections', and
-        aggregate counts
-    """
-    section_data = parse_ffprobe_json_file(file_path)
-    if not section_data:
-        return {
-            'valid': False,
-            'error': f"Failed to parse {file_path}",
-            'sections': {}
-        }
-    
-    # Extract profile-relevant fields from raw section data
-    imported = {
-        'video_stream': extract_video_stream_fields(section_data.get('video_stream', {})),
-        'audio_stream': extract_audio_stream_fields(section_data.get('audio_stream', {})),
-        'format': extract_format_fields(section_data.get('format', {}))
-    }
-    
-    comparison = compare_with_expected(imported, profile)
-    
-    # Aggregate across all sections
-    total_matches = sum(len(s['matches']) for s in comparison.values())
-    total_mismatches = sum(len(s['mismatches']) for s in comparison.values())
-    total_missing = sum(len(s['missing']) for s in comparison.values())
-    total_fields = total_matches + total_mismatches + total_missing
-    
-    return {
-        'valid': total_mismatches == 0 and total_missing == 0,
-        'file': file_path,
-        'total_fields': total_fields,
-        'matching_fields': total_matches,
-        'sections': comparison
-    }
+                                  profile: FfprobeProfile) -> Dict[str, Any]:
+    """Validate an FFprobe JSON file against an expected profile."""
+    return profile_import.validate_file_against_profile(SPEC, file_path, profile)

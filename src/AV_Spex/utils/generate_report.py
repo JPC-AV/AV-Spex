@@ -8,6 +8,8 @@ os.environ["NUMEXPR_MAX_THREADS"] = "11" # troubleshooting goofy numbpy related 
 
 import csv
 from base64 import b64encode
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple
 import json
 import re
 import subprocess
@@ -365,85 +367,164 @@ def find_frame_analysis_outputs(source_directory, destination_directory, video_i
 
     return frame_outputs
 
-def find_report_csvs(report_directory):
+@dataclass
+class ReportArtifacts:
+    """Sidecar files discovered for one video's HTML report.
 
-    qctools_colorbars_duration_output = None
-    qctools_bars_eval_check_output = None
-    qctools_bars_eval_timestamps = None
-    colorbars_values_output = None
-    windowed_colorbars_values = []
-    qctools_content_check_outputs = []
-    qctools_profile_check_output = None
-    qctools_profile_timestamps = None
-    profile_fails_csv = None
-    tags_check_output = None
-    tag_fails_csv = None
-    colorbars_eval_fails_csv = None
-    audio_clipping_csv = None
-    channel_imbalance_csv = None
-    identical_channels_csv = None
-    audible_timecode_csv = None
-    audio_dropout_csv = None
-    clamped_levels_csv = None
-    clamped_traces_csv = None
-    chroma_phase_summary_csv = None
-    chroma_phase_events_csv = None
-    tone_leak_summary_csv = None
-    tone_leak_events_csv = None
-    difference_csv = None
+    Every field defaults to None (or an empty list), so a report section can
+    test its own inputs without knowing which analyses actually ran. Adding a
+    new sidecar means adding a field here and a branch in find_report_csvs() —
+    nothing downstream has to be renumbered.
+
+    Most of these live in the report directory ({video_id}_report_csvs). The
+    mkvalidator pair is the exception and is noted below.
+    """
+
+    # qct-parse — color bars detection and evaluation
+    qctools_colorbars_duration_output: Optional[str] = None
+    qctools_bars_eval_check_output: Optional[str] = None
+    colorbars_values_output: Optional[str] = None
+    windowed_colorbars_values: List[str] = field(default_factory=list)
+    colorbars_eval_fails_csv: Optional[str] = None
+
+    # qct-parse — threshold profile and tag checks
+    qctools_content_check_outputs: List[str] = field(default_factory=list)
+    qctools_profile_check_output: Optional[str] = None
+    profile_fails_csv: Optional[str] = None
+    tags_check_output: Optional[str] = None
+    tag_fails_csv: Optional[str] = None
+
+    # qct-parse — audio analysis
+    audio_clipping_csv: Optional[str] = None
+    channel_imbalance_csv: Optional[str] = None
+    identical_channels_csv: Optional[str] = None
+    audible_timecode_csv: Optional[str] = None
+    audio_dropout_csv: Optional[str] = None
+
+    # qct-parse — video signal analysis
+    clamped_levels_csv: Optional[str] = None
+    clamped_traces_csv: Optional[str] = None
+    chroma_phase_summary_csv: Optional[str] = None
+    chroma_phase_events_csv: Optional[str] = None
+    tone_leak_summary_csv: Optional[str] = None
+    tone_leak_events_csv: Optional[str] = None
+
+    # CLAMS detectors (run independently of qct-parse)
+    clams_bars_durations_csv: Optional[str] = None
+    clams_tone_durations_csv: Optional[str] = None
+
+    # mkvalidator. These two live in the _qc_metadata directory rather than the
+    # report directory, because the mkvalidator check runs before the report
+    # directory exists. The summary is written whenever the check ran; the
+    # clusters CSV only when at least one WRN0C2 was found.
+    mkvalidator_summary_path: Optional[str] = None
+    mkvalidator_clusters_csv: Optional[str] = None
+
+    # Metadata tool comparison
+    difference_csv: Optional[str] = None
+
+
+@dataclass
+class ReportSection:
+    """One block of the report body, with the TOC entries that point into it.
+
+    html: the block's markup. An empty string means the section is omitted, so
+        availability is expressed once — where the markup is built — instead of
+        being restated in a separate TOC condition.
+    toc: (anchor_id, label) pairs the "Jump to section" nav shows for this
+        block. Usually one; a block may contribute several (frame analysis,
+        which reads its own rendered anchors) or none (a divider).
+    """
+    html: str
+    toc: Tuple[Tuple[str, str], ...] = ()
+
+
+# Filename fragment -> ReportArtifacts field, for the qct-parse sidecars that
+# map one-to-one. Order matters: the first matching fragment wins, so
+# 'clamped_traces' must be tested before the 'clamped_levels' prefix it shares
+# a stem with, and the same for the eval-summary/eval-failures pair.
+_QCT_PARSE_SIDECARS = (
+    ("qct-parse_colorbars_durations",     "qctools_colorbars_duration_output"),
+    ("qct-parse_colorbars_eval_summary",  "qctools_bars_eval_check_output"),
+    ("qct-parse_colorbars_eval_failures", "colorbars_eval_fails_csv"),
+    ("qct-parse_profile_summary",         "qctools_profile_check_output"),
+    ("qct-parse_profile_failures",        "profile_fails_csv"),
+    ("qct-parse_tags_summary.csv",        "tags_check_output"),
+    ("qct-parse_tags_failures",           "tag_fails_csv"),
+    ("qct-parse_audio_clipping",          "audio_clipping_csv"),
+    ("qct-parse_channel_imbalance",       "channel_imbalance_csv"),
+    ("qct-parse_identical_channels",      "identical_channels_csv"),
+    ("qct-parse_audible_timecode",        "audible_timecode_csv"),
+    ("qct-parse_audio_dropout",           "audio_dropout_csv"),
+    ("qct-parse_clamped_traces",          "clamped_traces_csv"),
+    ("qct-parse_clamped_levels",          "clamped_levels_csv"),
+    ("qct-parse_chroma_phase_summary",    "chroma_phase_summary_csv"),
+    ("qct-parse_chroma_phase_events",     "chroma_phase_events_csv"),
+    ("qct-parse_tone_leak_summary",       "tone_leak_summary_csv"),
+    ("qct-parse_tone_leak_events",        "tone_leak_events_csv"),
+)
+
+
+def find_report_csvs(report_directory, destination_directory=None, video_id=None) -> ReportArtifacts:
+    """Discover every sidecar the HTML report can render.
+
+    This is the single discovery point for report inputs: qct-parse and CLAMS
+    sidecars from report_directory, and the mkvalidator pair from
+    destination_directory (the _qc_metadata dir), which is scanned only when
+    destination_directory and video_id are both supplied.
+
+    Args:
+        report_directory: the {video_id}_report_csvs directory
+        destination_directory: the {video_id}_qc_metadata directory, for the
+            mkvalidator sidecars
+        video_id: used to build the mkvalidator filenames
+
+    Returns:
+        ReportArtifacts, with absent sidecars left as None / empty list.
+    """
+    artifacts = ReportArtifacts()
 
     if os.path.isdir(report_directory):
         for file in os.listdir(report_directory):
             file_path = os.path.join(report_directory, file)
-            if os.path.isfile(file_path) and not file.startswith('.DS_Store'):
-                if file.startswith("qct-parse_"):
-                    if "qct-parse_colorbars_durations" in file:
-                        qctools_colorbars_duration_output = file_path
-                    elif "qct-parse_colorbars_eval_summary" in file:
-                        qctools_bars_eval_check_output = file_path
-                    elif "qct-parse_colorbars_values" in file:
-                        if file == "qct-parse_colorbars_values.csv":
-                            colorbars_values_output = file_path
-                        else:
-                            windowed_colorbars_values.append(file_path)
-                    elif "qct-parse_contentFilter" in file:
-                        qctools_content_check_outputs.append(file_path)
-                    elif "qct-parse_profile_summary" in file:
-                        qctools_profile_check_output = file_path
-                    elif "qct-parse_profile_failures" in file:
-                        profile_fails_csv = file_path
-                    elif "qct-parse_tags_summary.csv" in file:
-                        tags_check_output = file_path
-                    elif "qct-parse_tags_failures" in file:
-                        tag_fails_csv = file_path
-                    elif "qct-parse_colorbars_eval_failures" in file:
-                        colorbars_eval_fails_csv = file_path
-                    elif "qct-parse_audio_clipping" in file:
-                        audio_clipping_csv = file_path
-                    elif "qct-parse_channel_imbalance" in file:
-                        channel_imbalance_csv = file_path
-                    elif "qct-parse_identical_channels" in file:
-                        identical_channels_csv = file_path
-                    elif "qct-parse_audible_timecode" in file:
-                        audible_timecode_csv = file_path
-                    elif "qct-parse_audio_dropout" in file:
-                        audio_dropout_csv = file_path
-                    elif "qct-parse_clamped_traces" in file:
-                        clamped_traces_csv = file_path
-                    elif "qct-parse_clamped_levels" in file:
-                        clamped_levels_csv = file_path
-                    elif "qct-parse_chroma_phase_summary" in file:
-                        chroma_phase_summary_csv = file_path
-                    elif "qct-parse_chroma_phase_events" in file:
-                        chroma_phase_events_csv = file_path
-                    elif "qct-parse_tone_leak_summary" in file:
-                        tone_leak_summary_csv = file_path
-                    elif "qct-parse_tone_leak_events" in file:
-                        tone_leak_events_csv = file_path
-                elif "metadata_difference" in file:
-                    difference_csv = file_path
+            if not os.path.isfile(file_path) or file.startswith('.DS_Store'):
+                continue
 
-    return qctools_colorbars_duration_output, qctools_bars_eval_check_output, colorbars_values_output, windowed_colorbars_values, qctools_content_check_outputs, qctools_profile_check_output, profile_fails_csv, tags_check_output, tag_fails_csv, colorbars_eval_fails_csv, audio_clipping_csv, channel_imbalance_csv, identical_channels_csv, audible_timecode_csv, audio_dropout_csv, clamped_levels_csv, clamped_traces_csv, chroma_phase_summary_csv, chroma_phase_events_csv, tone_leak_summary_csv, tone_leak_events_csv, difference_csv
+            if file.startswith("qct-parse_"):
+                # The two multi-file cases are handled before the 1:1 table.
+                if "qct-parse_colorbars_values" in file:
+                    if file == "qct-parse_colorbars_values.csv":
+                        artifacts.colorbars_values_output = file_path
+                    else:
+                        artifacts.windowed_colorbars_values.append(file_path)
+                    continue
+
+                if "qct-parse_contentFilter" in file:
+                    artifacts.qctools_content_check_outputs.append(file_path)
+                    continue
+
+                for fragment, attr in _QCT_PARSE_SIDECARS:
+                    if fragment in file:
+                        setattr(artifacts, attr, file_path)
+                        break
+
+            elif file == "clams_bars_colorbars_durations.csv":
+                artifacts.clams_bars_durations_csv = file_path
+            elif file == "clams_tone_detection_durations.csv":
+                artifacts.clams_tone_durations_csv = file_path
+            elif "metadata_difference" in file:
+                artifacts.difference_csv = file_path
+
+    if destination_directory and video_id:
+        summary = os.path.join(destination_directory, f"{video_id}_mkvalidator_summary.txt")
+        if os.path.isfile(summary):
+            artifacts.mkvalidator_summary_path = summary
+
+        clusters = os.path.join(destination_directory, f"{video_id}_mkvalidator_clusters.csv")
+        if os.path.isfile(clusters):
+            artifacts.mkvalidator_clusters_csv = clusters
+
+    return artifacts
 
 
 def read_xml_file(xml_file_path):
@@ -6218,540 +6299,98 @@ def make_mkvalidator_html(summary_path, clusters_csv_path, video_path=None):
     """
 
 
-def generate_final_report(video_id, source_directory, report_directory, destination_directory,
-                         video_path=None, check_cancelled=None, signals=None):
-    """
-    Generate final HTML report if configured.
-    
-    Args:
-        video_id (str): Unique identifier for the video
-        source_directory (str): Source directory for the video
-        report_directory (str): Directory containing report files
-        destination_directory (str): Destination directory for output files
-        video_path (str, optional): Path to the video file for thumbnail generation
-        check_cancelled (callable, optional): Function to check if cancelled
-        signals (object, optional): Signals for GUI updates
-        
-    Returns:
-        str or None: Path to the generated HTML report, or None
-    """
-    
-    checks_config = config_mgr.get_config('checks', ChecksConfig)
-
-    if not checks_config.outputs.report:
-        return None
-
-    try:
-        html_report_path = os.path.join(source_directory, f'{video_id}_avspex_report.html')
-        
-        # Generate HTML report with video path (no frame_analysis parameter needed)
-        write_html_report(video_id, report_directory, destination_directory, html_report_path,
-                         video_path=video_path, check_cancelled=check_cancelled, signals=signals)
-        
-        logger.info(f"HTML report generated: {html_report_path}\n")
-        if signals:
-            signals.step_completed.emit("Generate Report")
-        return html_report_path
-
-    except Exception as e:
-        logger.critical(f"Error generating HTML report: {e}")
-        import traceback
-        logger.critical(f"Traceback: {traceback.format_exc()}")
-        return None
-
-
-def write_html_report(video_id, report_directory, destination_directory, html_report_path, video_path=None, check_cancelled=None, signals=None):
-
-    if signals:
-        signals.report_progress.emit(0)
-
-    qctools_colorbars_duration_output, qctools_bars_eval_check_output, colorbars_values_output, windowed_colorbars_values, qctools_content_check_outputs, qctools_profile_check_output, profile_fails_csv, tags_check_output, tag_fails_csv, colorbars_eval_fails_csv, audio_clipping_csv, channel_imbalance_csv, identical_channels_csv, audible_timecode_csv, audio_dropout_csv, clamped_levels_csv, clamped_traces_csv, chroma_phase_summary_csv, chroma_phase_events_csv, tone_leak_summary_csv, tone_leak_events_csv, difference_csv = find_report_csvs(report_directory)
-
-    # CLAMS bars-detection durations CSV (filename matches the writer in
-    # checks/bars_detection_clams.py); present only when the parallel detector ran.
-    clams_bars_durations_csv = os.path.join(report_directory, "clams_bars_colorbars_durations.csv")
-    if not os.path.isfile(clams_bars_durations_csv):
-        clams_bars_durations_csv = None
-
-    # CLAMS tone-detection durations CSV (filename matches the writer in
-    # checks/tone_detection_clams.py); present only when the detector ran.
-    clams_tone_durations_csv = os.path.join(report_directory, "clams_tone_detection_durations.csv")
-    if not os.path.isfile(clams_tone_durations_csv):
-        clams_tone_durations_csv = None
-
-    # mkvalidator sidecars (filenames match the writers in checks/mkvalidator_check.py).
-    # Unlike the qct-parse/CLAMS sidecars these live in the _qc_metadata directory
-    # (destination_directory), not the report dir, because the mkvalidator check runs
-    # before the report dir exists. The summary sidecar holds the validity verdict and
-    # is written whenever the check ran; the clusters CSV holds the WRN0C2 byte offsets
-    # and is present only when at least one WRN0C2 was found.
-    mkvalidator_summary_path = os.path.join(destination_directory, f"{video_id}_mkvalidator_summary.txt")
-    if not os.path.isfile(mkvalidator_summary_path):
-        mkvalidator_summary_path = None
-
-    mkvalidator_clusters_csv = os.path.join(destination_directory, f"{video_id}_mkvalidator_clusters.csv")
-    if not os.path.isfile(mkvalidator_clusters_csv):
-        mkvalidator_clusters_csv = None
-
-    if check_cancelled():
-        return
-    
-    # Create thumbPath if it doesn't exist
-    thumbPath = os.path.join(report_directory, "ThumbExports")
-    if not os.path.exists(thumbPath):
-        os.makedirs(thumbPath)
-    
-    # Collect all thumbnail tasks across all failure types, then generate with progress
-    generated_thumbs = {}
-    thumbnail_tasks = []
-
-    if profile_fails_csv and video_path:
-        profile_fails_csv_path = os.path.join(report_directory, profile_fails_csv)
-        failureInfoSummary_profile = summarize_failures(profile_fails_csv_path)
-        for timestamp, info_list in failureInfoSummary_profile.items():
-            for info in info_list:
-                thumbnail_tasks.append((info['tag'], info['tagValue'], timestamp, 'threshold_profile'))
-
-    if tag_fails_csv and video_path:
-        tag_fails_csv_path = os.path.join(report_directory, tag_fails_csv)
-        failureInfoSummary_tags = summarize_failures(tag_fails_csv_path)
-        for timestamp, info_list in failureInfoSummary_tags.items():
-            for info in info_list:
-                thumbnail_tasks.append((info['tag'], info['tagValue'], timestamp, 'tag_check'))
-
-    # Color bars evaluation thumbnails illustrate the peaks of the failure
-    # timeline, so they are picked by failure-cluster density rather than by
-    # worst value (summarize_failures).
-    colorbars_peaks = []
-    eval_video_duration = None
-    eval_video_fps = None
-    if colorbars_eval_fails_csv and video_path:
-        colorbars_eval_fails_csv_path = os.path.join(report_directory, colorbars_eval_fails_csv)
-        eval_video_duration = _get_video_duration(video_path)
-        eval_video_fps = _get_video_frame_rate(video_path)
-        colorbars_peaks = select_failure_peaks(colorbars_eval_fails_csv_path, duration=eval_video_duration)
-        for peak in colorbars_peaks:
-            thumbnail_tasks.append((peak['tag'], peak['tagValue'], peak['timestamp'], 'color_bars_evaluation'))
-
-    total_thumbs = len(thumbnail_tasks)
-    for i, (tag, tagValue, timestamp, profile_name) in enumerate(thumbnail_tasks):
-        thumb_path = generate_thumbnail_for_failure(
-            video_path,
-            tag,
-            tagValue,
-            timestamp,
-            profile_name,
-            thumbPath
-        )
-        if thumb_path:
-            thumb_key = f"Failed frame \n\n{tag}:{tagValue}\n\n{timestamp}"
-            generated_thumbs[thumb_key] = (thumb_path, tag, timestamp)
-        if signals and total_thumbs > 0:
-            signals.report_progress.emit(1 + int(9 * (i + 1) / total_thumbs))
-
-    # Attach the generated thumbnail paths to their peaks for the eval-bars timeline
-    for peak in colorbars_peaks:
-        thumb_key = f"Failed frame \n\n{peak['tag']}:{peak['tagValue']}\n\n{peak['timestamp']}"
-        if thumb_key in generated_thumbs:
-            peak['thumb_path'] = generated_thumbs[thumb_key][0]
-
-    # Merge with existing thumbs (for things like color bars detection)
-    existing_thumbs = find_qct_thumbs(report_directory)
-    thumbs_dict = {**existing_thumbs, **generated_thumbs}
-
-    if signals:
-        signals.report_progress.emit(10)
-
-    # Sort thumbs_dict as before
-    sorted_thumbs_dict = {}
-    for key in sorted(thumbs_dict.keys(), key=lambda x: (parse_profile(thumbs_dict[x][1]), parse_timestamp(thumbs_dict[x][2]))):
-        sorted_thumbs_dict[key] = thumbs_dict[key]
-
-    if check_cancelled():
-        return
-    
-    # Modified to get MediaConch policy content
-    (exiftool_output_path, mediainfo_output_path, ffprobe_output_path,
-     mediaconch_csv, fixity_sidecar, fixity_summary_json,
-     mediaconch_policy_content,
-     mediaconch_policy_name) = find_qc_metadata(destination_directory)
-
-    if check_cancelled():
-        return
-
-    if signals:
-        signals.report_progress.emit(15)
-
-    # Find frame analysis outputs
-    frame_outputs = find_frame_analysis_outputs(
-        os.path.dirname(html_report_path),  # source_directory
-        destination_directory,
-        video_id
-    )
-    
-    # Generate frame analysis HTML section
-    frame_analysis_html = generate_frame_analysis_html(frame_outputs, video_id) if frame_outputs else ""
-
-    # Initialize and create html from 
-    mc_csv_html, mediaconch_csv_filename = prepare_file_section(mediaconch_csv, lambda path: csv_to_html_table(path, style_mismatched=False, mismatch_color="#ffbaba", match_color="#d2ffed", check_fail=True))
-    diff_csv_html, difference_csv_filename = prepare_file_section(difference_csv, lambda path: csv_to_html_table(path, style_mismatched=True, mismatch_color="#ffbaba", match_color="#d2ffed", check_fail=False))
-    exif_file_content, exif_file_filename = prepare_file_section(exiftool_output_path)
-    mi_file_content, mi_file_filename = prepare_file_section(mediainfo_output_path)
-    ffprobe_file_content, ffprobe_file_filename = prepare_file_section(ffprobe_output_path)
-    fixity_file_content, fixity_file_filename = prepare_file_section(fixity_sidecar)
-    fixity_html = make_fixity_section_html(fixity_summary_json, fixity_file_content)
-
-    # Get qct-parse thumbs if they exists
-    thumbs_dict = find_qct_thumbs(report_directory)
-
-    if profile_fails_csv:
-        profile_fails_csv_path = os.path.join(report_directory, profile_fails_csv)
-        failureInfoSummary_profile = summarize_failures(profile_fails_csv_path)
-    else:
-        failureInfoSummary_profile = None
-
-    if tag_fails_csv:
-        tag_fails_csv_path = os.path.join(report_directory, tag_fails_csv)
-        failureInfoSummary_tags = summarize_failures(tag_fails_csv_path)
-    else:
-        failureInfoSummary_tags = None
-
-    if colorbars_eval_fails_csv:
-        colorbars_eval_fails_csv_path = os.path.join(report_directory, colorbars_eval_fails_csv)
-        failureInfoSummary_colorbars = summarize_failures(colorbars_eval_fails_csv_path)
-    else:
-        failureInfoSummary_colorbars = None
-
-    if check_cancelled():
-        return
-
-    # Detected bars runs (head + additional). These are the regions the bars
-    # evaluation skips, so the timeline shades them; the windowed graphs below
-    # reuse the same parse for their timecode labels.
-    qct_duration_runs = _parse_bars_durations_csv(qctools_colorbars_duration_output)
-    bars_regions = [(bars_start, bars_end) for _, bars_start, bars_end in qct_duration_runs]
-
-    # Create graphs for all existing csv files (existing code...)
-    # The timeline renders as its own titled section below the evaluation pies,
-    # so it stays a separate variable rather than being folded into
-    # colorbars_eval_html.
-    colorbars_timeline_html = None
-    if qctools_bars_eval_check_output and failureInfoSummary_colorbars:
-        # Pies summarize the per-tag failure share; the timeline below them
-        # carries the failure specifics (distribution + peak thumbnails)
-        colorbars_eval_html = make_profile_piecharts(qctools_bars_eval_check_output, thumbs_dict, failureInfoSummary_colorbars, video_id, failure_csv_path=colorbars_eval_fails_csv_path, check_cancelled=check_cancelled, failure_details=False)
-        colorbars_timeline_html = make_eval_bars_timeline_html(
-            colorbars_eval_fails_csv_path, video_id, peaks=colorbars_peaks,
-            video_duration=eval_video_duration, frame_rate=eval_video_fps,
-            analysis_periods=get_frame_analysis_periods(frame_outputs),
-            black_segments=get_frame_analysis_black_segments(frame_outputs),
-            bars_regions=bars_regions)
-    elif qctools_bars_eval_check_output and failureInfoSummary_colorbars is None:
-       color_bars_segment = f"""
-        <div style="display: flex; flex-direction: column; align-items: start; background-color: #f5e9e3; padding: 10px;"> 
-            <p><b>All QCTools values of the video file are within the median values of the color bars.</b></p>
+# Static methodology copy for the CLAMS Detection section. Held as a module
+# constant rather than inline so the assembly code below stays readable.
+CLAMS_METHODOLOGY_HTML = """
+        <a id="link_clams_methodology" href="javascript:void(0);"
+           onclick="toggleContent('clams_methodology', 'What is CLAMS Detection? ▼', 'What is CLAMS Detection? ▲')"
+           style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+           What is CLAMS Detection? ▼</a>
+        <div id="clams_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px;
+             margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+            <p style="margin: 0 0 10px 0;">
+                <strong>CLAMS</strong> (Computational Linguistics Applications for Multimedia Services) is an
+                open-source project led by Brandeis University that builds reusable tools for analyzing
+                audiovisual collections. AV Spex adapts two CLAMS apps —
+                <a href="https://github.com/clamsproject/app-barsdetection" style="color: #378d6a;">app-barsdetection</a>
+                and <a href="https://github.com/clamsproject/app-tonedetection" style="color: #378d6a;">app-tonedetection</a> —
+                porting just their detection cores into the AV Spex pipeline. Both upstream apps are
+                distributed under the Apache License 2.0.
+            </p>
+            <p style="margin: 0 0 6px 0; font-weight: bold;">How bars detection works:</p>
+            <p style="margin: 0 0 10px 0;">
+                Frames are sampled (every 30th frame by default) and converted to grayscale. Each sample
+                is compared to a bundled SMPTE color bars reference image using
+                <strong>structural similarity (SSIM)</strong>. A frame is considered to match when its
+                SSIM score exceeds the primary threshold (<code style="background:#eee; padding:1px 4px; border-radius:2px;">0.7</code>),
+                and a run of consecutive matching samples becomes a detected bars span once it
+                exceeds the minimum frame count.
+            </p>
+            <p style="margin: 0 0 6px 0; font-weight: bold;">How tone detection works:</p>
+            <p style="margin: 0 0 10px 0;">
+                The audio track is decoded to 16 kHz mono via ffmpeg and split into consecutive 250 ms
+                chunks. Adjacent chunks are compared using <strong>numpy cross-correlation</strong>;
+                when their similarity stays at or above the tolerance
+                (<code style="background:#eee; padding:1px 4px; border-radius:2px;">1.0</code> by default),
+                the run is extended. Runs that survive a minimum-duration filter
+                (<code style="background:#eee; padding:1px 4px; border-radius:2px;">2000 ms</code> by default)
+                are reported as detected tones.
+            </p>
+            <p style="margin: 0 0 6px 0; font-weight: bold;">Two-pass cross-validation:</p>
+            <p style="margin: 0 0 6px 0;">
+                Color bars and reference tone are typically authored together at the head of a tape, so
+                the two detectors should largely agree. AV Spex runs them in two passes:
+            </p>
+            <ol style="margin: 4px 0 10px 20px; padding: 0;">
+                <li style="margin-bottom: 4px;"><strong>Primary pass</strong> — each detector scans the
+                    file independently with its default thresholds.</li>
+                <li style="margin-bottom: 4px;"><strong>Head re-check</strong> — if the primary bars pass
+                    found nothing near the head of the file, the recorded SSIM scores over the first two
+                    minutes are re-evaluated at the relaxed threshold
+                    (<code style="background:#eee; padding:1px 4px; border-radius:2px;">0.6</code>).
+                    This catches real but degraded head bars that score just under the primary
+                    threshold.</li>
+                <li style="margin-bottom: 4px;"><strong>Second pass</strong> — when one detector finds a
+                    span the other missed, a targeted windowed scan is run on the other detector with
+                    <em>relaxed</em> thresholds (bars: SSIM ≥
+                    <code style="background:#eee; padding:1px 4px; border-radius:2px;">0.6</code>, sample
+                    ratio <code style="background:#eee; padding:1px 4px; border-radius:2px;">5</code>;
+                    tone: tolerance
+                    <code style="background:#eee; padding:1px 4px; border-radius:2px;">0.7</code>,
+                    min duration
+                    <code style="background:#eee; padding:1px 4px; border-radius:2px;">500 ms</code>).
+                    A ±5 s slack is added around the trigger window because bars and tone don't always
+                    start and stop in lockstep.</li>
+            </ol>
+            <p style="margin: 0 0 10px 0;">
+                Re-scan rows are highlighted in the result tables below. The head-bars end time used
+                downstream (the BRNG-skip window, access-file trim) is a <strong>cross-validated
+                consensus</strong> of qct-parse and CLAMS: when the two detectors disagree, the disputed
+                span is checked against the recorded SSIM scores — a span whose scores never approach
+                the bars threshold is rejected, and a head claim from one detector that the other
+                decisively contradicts is treated as unconfirmed rather than trusted.
+            </p>
+            <p style="margin: 0 0 6px 0; font-weight: bold;">Fragment merging:</p>
+            <p style="margin: 0 0 10px 0;">
+                A continuous tone or bars span can dip below threshold for a brief chunk and be reported
+                as several adjacent fragments. After detection, AV Spex coalesces fragments separated by
+                less than the configured <code style="background:#eee; padding:1px 4px; border-radius:2px;">merge_gap_seconds</code>
+                (defaults: 1 s for bars, 5 s for tone) back into a single span so the report reflects
+                the underlying continuous signal.
+            </p>
+            <p style="margin: 0; color: #777;">
+                Both detectors write a per-pass durations CSV alongside the report; the bars detector
+                additionally writes a per-sampled-frame SSIM scores CSV
+                (<code style="background:#eee; padding:1px 4px; border-radius:2px;">pass, frame,
+                timestamp, ssim_score, exceeds_threshold</code>). Those recorded scores are also what
+                the head re-check and the consensus arbitration read.
+            </p>
         </div>
-        """
-       colorbars_eval_html = f"""
-        <div style="display:inline-block; margin-right: 10px; padding-bottom: 20px;">  
-            {color_bars_segment}
-        </div>
-        """
-    else:
-        colorbars_eval_html = None
+"""
 
-    # How the color-bars evaluation graded content, which drives the section
-    # headers and whether an info box accompanies the graph:
-    #   - "detected" reference, bars found -> detected-vs-SMPTE graph only
-    #   - "detected" reference, no bars    -> SMPTE fallback, info box only
-    #   - "smpte" reference, bars found    -> graph + "SMPTE selected" info box
-    #   - "smpte" reference, no bars       -> "SMPTE selected" info box only
-    # smpte_reference: SMPTE values were the evaluation reference (drives the
-    # "Values relative to ... thresholds" header). colorbars_box_only: the
-    # colorbars_html is just an info box with no graph (drives the graph
-    # section header).
-    smpte_selected_box = """
-                <div style="background-color: #fff3cd; padding: 15px; border: 1px solid #856404; margin: 10px 0; border-radius: 5px;">
-                    <p style="margin: 0; color: #856404;">Evaluation was performed against standard SMPTE color bar values (selected reference).</p>
-                </div>
-                """
-    smpte_reference = False
-    colorbars_box_only = False
-    if colorbars_values_output:
-        try:
-            with open(colorbars_values_output, 'r') as f:
-                first_line = f.readline().strip()
-            if first_line == "SMPTE_FALLBACK":
-                smpte_reference = True
-                colorbars_box_only = True
-                colorbars_html = """
-                <div style="background-color: #fff3cd; padding: 15px; border: 1px solid #856404; margin: 10px 0; border-radius: 5px;">
-                    <p style="margin: 0; color: #856404;"><strong>No color bars detected.</strong> Evaluation was performed using standard SMPTE color bar values.</p>
-                </div>
-                """
-            elif first_line == "SMPTE_SELECTED":
-                smpte_reference = True
-                colorbars_box_only = True
-                colorbars_html = smpte_selected_box
-            else:
-                # Real detected-vs-SMPTE comparison CSV -> render the graph.
-                graph_html = make_color_bars_graphs(video_id, qctools_colorbars_duration_output, colorbars_values_output, thumbs_dict)
-                evaluate_reference = config_mgr.get_config('checks', ChecksConfig).tools.qct_parse.evaluateBarsReference
-                if evaluate_reference == 'smpte':
-                    # SMPTE was the evaluation reference but bars were detected:
-                    # show the informational graph with the "SMPTE selected" box
-                    # below it.
-                    smpte_reference = True
-                    colorbars_html = (graph_html or "") + smpte_selected_box
-                else:
-                    colorbars_html = graph_html
-        except Exception as e:
-            logger.error(f"Error reading colorbars values file: {e}")
-            colorbars_html = None
-    else:
-        colorbars_html = None
 
-    # Render bar graphs for windowed (mid-file) bars regions.
-    # Build a lookup of region label → duration string from the qct-parse
-    # bars durations CSV (parsed above) so each graph shows the correct timecodes.
-    windowed_duration_lookup = {}
-    for label, start_s, end_s in qct_duration_runs:
-        def _fmt(seconds):
-            h = int(seconds // 3600)
-            m = int((seconds % 3600) // 60)
-            s = seconds - (h * 3600) - (m * 60)
-            return f"{h:02d}:{m:02d}:{s:06.3f}"
-        windowed_duration_lookup[label] = f"{_fmt(start_s)} - {_fmt(end_s)}"
-
-    windowed_colorbars_html_list = []
-    for wv_path in sorted(windowed_colorbars_values):
-        try:
-            region_name = os.path.basename(wv_path).replace("qct-parse_colorbars_values_", "").replace(".csv", "")
-            dur_str = windowed_duration_lookup.get(region_name)
-            idx_str = region_name.replace("additional-", "")
-            wv_html = make_color_bars_graphs(
-                video_id, qctools_colorbars_duration_output, wv_path, thumbs_dict,
-                duration_override=dur_str,
-                bars_label=f'{video_id} Additional Bars',
-                thumb_profile_filter=f'additional_bars_{idx_str}',
-            )
-            if wv_html:
-                windowed_colorbars_html_list.append((region_name, wv_html))
-        except Exception as e:
-            logger.error(f"Error rendering windowed bars graph for {wv_path}: {e}")
-
-    if qctools_profile_check_output and failureInfoSummary_profile:
-        profile_summary_html = make_profile_piecharts(qctools_profile_check_output, thumbs_dict, failureInfoSummary_profile, video_id, failure_csv_path=profile_fails_csv_path, check_cancelled=check_cancelled)
-    else:
-        profile_summary_html = None
-
-    if qctools_content_check_outputs:
-        content_summary_html_list = []
-        for output_csv in qctools_content_check_outputs:
-            content_summary_html = make_content_summary_html(output_csv, thumbs_dict, paper_bgcolor='#f5e9e3')
-            content_summary_html_list.append(content_summary_html)
-    else:
-        content_summary_html_list = None
-
-    if tags_check_output and failureInfoSummary_tags:
-        tags_summary_html = make_profile_piecharts(tags_check_output, thumbs_dict, failureInfoSummary_tags, video_id, failure_csv_path=tag_fails_csv_path, check_cancelled=check_cancelled)
-    else:
-        tags_summary_html = None
-
-    # Side-by-side comparison of qct-parse and CLAMS bars detectors. None
-    # unless at least one of the two CSVs is present.
-    bars_comparison_html = make_bars_detection_comparison_html(
-        qctools_colorbars_duration_output,
-        clams_bars_durations_csv,
-    ) if clams_bars_durations_csv else None
-
-    # CLAMS tone detection results.
-    tone_detection_html = make_tone_detection_html(clams_tone_durations_csv)
-    mkvalidator_html = make_mkvalidator_html(mkvalidator_summary_path, mkvalidator_clusters_csv, video_path)
-
-    audio_clipping_html = make_audio_clipping_html(audio_clipping_csv) if audio_clipping_csv else None
-    channel_imbalance_html = make_channel_imbalance_html(channel_imbalance_csv) if channel_imbalance_csv else None
-    identical_channels_html = make_identical_channels_html(identical_channels_csv) if identical_channels_csv else None
-    audible_timecode_html = make_audible_timecode_html(audible_timecode_csv) if audible_timecode_csv else None
-    audio_dropout_html = make_audio_dropout_html(audio_dropout_csv) if audio_dropout_csv else None
-    clamped_levels_html = make_clamped_levels_html(clamped_levels_csv, clamped_traces_csv) if clamped_levels_csv else None
-    chroma_phase_html = make_chroma_phase_html(chroma_phase_summary_csv, chroma_phase_events_csv) if chroma_phase_summary_csv else None
-    tone_leak_html = make_tone_leak_html(tone_leak_summary_csv, tone_leak_events_csv) if tone_leak_summary_csv else None
-    dropped_sample_html = generate_dropped_sample_html(frame_outputs) if frame_outputs else ""
-    duplicate_frame_html = generate_duplicate_frame_html(frame_outputs) if frame_outputs else ""
-    bitplane_html = generate_bitplane_html(frame_outputs) if frame_outputs else ""
-
-    existing_thumbs = find_qct_thumbs(report_directory)
-    no_qct_parse_files = (
-        not profile_fails_csv and
-        not tag_fails_csv and
-        not colorbars_eval_fails_csv and
-        not audio_clipping_csv and
-        not channel_imbalance_csv and
-        not identical_channels_csv and
-        not audible_timecode_csv and
-        not audio_dropout_csv and
-        not clamped_levels_csv and
-        not chroma_phase_summary_csv and
-        not tone_leak_summary_csv and
-        not existing_thumbs
-    )
-
-    if check_cancelled():
-        return
-
-    # Embed logo as a data URI so the report renders self-contained.
-    logo_image_path = image_to_data_uri(config_mgr.get_logo_path('av_spex_the_logo.png'))
-    if signals:
-        signals.report_progress.emit(20)
-
-    # Generate a color strip from the video, fall back to the static eq image
-    color_strip_b64 = None
-    if video_path:
-        color_strip_b64 = generate_color_strip_base64(video_path, signals=signals, progress_start=22, progress_end=25)
-    if signals:
-        signals.report_progress.emit(25)
- 
-    if color_strip_b64:
-        # Store the data URI once in a hidden element, reference it via JS
-        color_strip_src = f"data:image/jpeg;base64,{color_strip_b64}"
-        color_strip_store = (
-            f'<img id="color-strip-data" src="{color_strip_src}" '
-            f'alt="Color strip" class="color-strip-divider">'
-        )
-        # Subsequent uses clone the src from the stored element
-        color_strip_divider = (
-            '<img class="color-strip-divider color-strip-clone" alt="Color strip">'
-        )
-        color_strip_init_script = """
-        <script>
-        (function() {
-            var src = document.getElementById('color-strip-data').src;
-            var clones = document.getElementsByClassName('color-strip-clone');
-            for (var i = 0; i < clones.length; i++) { clones[i].src = src; }
-        })();
-        </script>"""
-    else:
-        # Fallback: use the static eq image as before
-        eq_image_path = image_to_data_uri(config_mgr.get_logo_path('germfree_eq.png'))
-        color_strip_src = eq_image_path
-        color_strip_store = (
-            f'<img src="{eq_image_path}" alt="AV Spex Graphic EQ Logo" '
-            f'style="width: 10%">'
-        )
-        color_strip_divider = color_strip_store
-        color_strip_init_script = ""
-
-    # Generate audio waveform
-    waveform_b64 = None
-    if video_path:
-        waveform_b64 = generate_audio_waveform_base64(video_path, signals=signals, progress_start=25, progress_end=95)
-
-    if waveform_b64:
-        # Note: Using class "waveform-data-store" to target via JS
-        waveform_store = (
-            f'<img class="waveform-data-store" src="data:image/jpeg;base64,{waveform_b64}" '
-            f'style="display: none;">'
-        )
-        
-        # Divider: The placeholder that will be cloned by the script
-        waveform_divider = (
-            '<div style="margin: 20px 0; text-align: center;">'
-            '<img class="waveform-clone" style="width: 100%; height: auto; border: 1px solid #378d6a;">'
-            '</div>'
-        )
-        
-        # JavaScript: Finds all clones and populates them with the source data
-        waveform_init_script = """
-        <script>
-        (function() {
-            var src = document.querySelector('.waveform-data-store').src;
-            var clones = document.querySelectorAll('.waveform-clone');
-            for (var i = 0; i < clones.length; i++) {
-                clones[i].src = src;
-            }
-        })();
-        </script>"""
-    else:
-        # Fallback: If generation fails, use the static logo as a divider (similar to eq_image_path)
-        eq_image_path = image_to_data_uri(config_mgr.get_logo_path('germfree_eq.png'))
-        waveform_store = f'<img src="{eq_image_path}" alt="AV Spex Logo" style="width: 10%; display: none;">'
-        waveform_divider = f'<div style="text-align: center;"><img src="{eq_image_path}" style="width: 10%;"></div>'
-        waveform_init_script = ""
-
-    # Build a "Jump to section" table of contents from the conditional flags
-    # computed above. Each entry is (anchor_id, label). Order matches the
-    # render order below, so sections are listed the way they appear.
-    _has_audio_results = bool(
-        audio_clipping_html or channel_imbalance_html
-        or identical_channels_html
-        or audible_timecode_html or audio_dropout_html
-        or tone_leak_html
-    )
-    toc_entries = []
-    if fixity_html:
-        toc_entries.append(('section-fixity', 'Fixity'))
-    if mediaconch_csv:
-        toc_entries.append(('section-mediaconch-csv', 'MediaConch CSV'))
-    if mediaconch_policy_content and mediaconch_policy_name:
-        toc_entries.append(('section-mediaconch-policy', 'MediaConch Policy'))
-    if mkvalidator_html:
-        toc_entries.append(('section-mkvalidator', 'mkvalidator'))
-    if frame_analysis_html:
-        # Link to the individual frame-analysis subsections rather than the
-        # section heading; only list the ones that were actually rendered
-        frame_subsections = [
-            ('section-border-detection', 'Border Detection'),
-            ('section-signalstats', 'Signalstats Analysis'),
-            ('section-brng-analysis', 'BRNG Violation Analysis'),
-        ]
-        rendered = [
-            (anchor, label) for anchor, label in frame_subsections
-            if f"id='{anchor}'" in frame_analysis_html
-        ]
-        if rendered:
-            toc_entries.extend(rendered)
-        else:
-            toc_entries.append(('section-frame-analysis', 'Frame Analysis Results'))
-    if bitplane_html:
-        toc_entries.append(('section-bitplane', 'Bitplane Check'))
-    if duplicate_frame_html:
-        toc_entries.append(('section-duplicate-frame', 'Duplicate Frame Detection'))
-    if no_qct_parse_files:
-        toc_entries.append(('section-qct-parse-notice', 'QCT-Parse Analysis'))
-    if colorbars_html:
-        toc_entries.append(('section-colorbars', 'Color Bars Detection'))
-    for region_name, _ in windowed_colorbars_html_list:
-        toc_entries.append((f'section-colorbars-{region_name}', 'Additional Color Bars'))
-    if bars_comparison_html or tone_detection_html:
-        toc_entries.append(('section-clams-detection', 'CLAMS Detection'))
-    if colorbars_eval_html:
-        toc_entries.append(('section-colorbars-eval', 'Colorbars Threshold Evaluation'))
-    if colorbars_timeline_html:
-        toc_entries.append(('section-timeline', 'Timeline of Signal Distribution'))
-    if clamped_levels_html:
-        toc_entries.append(('section-clamped-levels', 'Clamped Levels Detection'))
-    if chroma_phase_html:
-        toc_entries.append(('section-chroma-phase', 'Chroma Phase Detection'))
-    if _has_audio_results:
-        toc_entries.append(('section-audio-analysis', 'Audio Analysis Results'))
-    if dropped_sample_html:
-        toc_entries.append(('section-dropped-sample', 'Dropped Sample Detection'))
-    if difference_csv:
-        toc_entries.append(('section-difference-csv', 'Difference CSV'))
-    if profile_summary_html:
-        toc_entries.append(('section-profile-summary', 'QCT-Parse Profile Summary'))
-    if tags_summary_html:
-        toc_entries.append(('section-tags-summary', 'QCT-Parse Tag Check Summary'))
-    if content_summary_html_list:
-        toc_entries.append(('section-content-summary', 'QCT-Parse Content Detection'))
-    if exiftool_output_path:
-        toc_entries.append(('section-exiftool', 'ExifTool Output'))
-    if mediainfo_output_path:
-        toc_entries.append(('section-mediainfo', 'MediaInfo Output'))
-    if ffprobe_output_path:
-        toc_entries.append(('section-ffprobe', 'FFprobe Output'))
-
+def _build_toc_html(toc_entries):
+    """Render the "Jump to section" nav from (anchor, label) pairs."""
     if toc_entries:
         toc_links = ''.join(
             f'<li style="margin: 0;">'
@@ -6771,9 +6410,29 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         )
     else:
         toc_html = ''
+    return toc_html
 
-    # HTML template with JavaScript functions
-    html_template = f"""
+
+def _dangling_toc_anchors(sections):
+    """TOC anchors with no matching element id anywhere in the assembled body.
+
+    Building the nav from the section list guarantees the two agree on order
+    and on which sections appear. It cannot guarantee that an anchor *string*
+    matches the id actually written into that section's markup — a typo in
+    either half still produces a link that scrolls nowhere. This catches that.
+    """
+    body = ''.join(section.html for section in sections)
+    return [
+        anchor
+        for section in sections
+        for anchor, _label in section.toc
+        if f'id="{anchor}"' not in body and f"id='{anchor}'" not in body
+    ]
+
+
+def _report_head_html(video_id, logo_image_path, color_strip_store, waveform_store, toc_html):
+    """The document head: styles, scripts, masthead and the TOC nav."""
+    return f"""
     <!DOCTYPE html>
     <html lang="en">
     <head>
@@ -6929,217 +6588,611 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         {toc_html}
     """
 
+
+def generate_final_report(video_id, source_directory, report_directory, destination_directory,
+                         video_path=None, check_cancelled=None, signals=None):
+    """
+    Generate final HTML report if configured.
+    
+    Args:
+        video_id (str): Unique identifier for the video
+        source_directory (str): Source directory for the video
+        report_directory (str): Directory containing report files
+        destination_directory (str): Destination directory for output files
+        video_path (str, optional): Path to the video file for thumbnail generation
+        check_cancelled (callable, optional): Function to check if cancelled
+        signals (object, optional): Signals for GUI updates
+        
+    Returns:
+        str or None: Path to the generated HTML report, or None
+    """
+    
+    checks_config = config_mgr.get_config('checks', ChecksConfig)
+
+    if not checks_config.outputs.report:
+        return None
+
+    try:
+        html_report_path = os.path.join(source_directory, f'{video_id}_avspex_report.html')
+        
+        # Generate HTML report with video path (no frame_analysis parameter needed)
+        write_html_report(video_id, report_directory, destination_directory, html_report_path,
+                         video_path=video_path, check_cancelled=check_cancelled, signals=signals)
+        
+        logger.info(f"HTML report generated: {html_report_path}\n")
+        if signals:
+            signals.step_completed.emit("Generate Report")
+        return html_report_path
+
+    except Exception as e:
+        logger.critical(f"Error generating HTML report: {e}")
+        import traceback
+        logger.critical(f"Traceback: {traceback.format_exc()}")
+        return None
+
+
+def write_html_report(video_id, report_directory, destination_directory, html_report_path, video_path=None, check_cancelled=None, signals=None):
+
+    if signals:
+        signals.report_progress.emit(0)
+
+    artifacts = find_report_csvs(report_directory, destination_directory, video_id)
+
+    if check_cancelled():
+        return
+    
+    # Create thumbPath if it doesn't exist
+    thumbPath = os.path.join(report_directory, "ThumbExports")
+    if not os.path.exists(thumbPath):
+        os.makedirs(thumbPath)
+    
+    # Collect all thumbnail tasks across all failure types, then generate with progress
+    generated_thumbs = {}
+    thumbnail_tasks = []
+
+    if artifacts.profile_fails_csv and video_path:
+        profile_fails_csv_path = os.path.join(report_directory, artifacts.profile_fails_csv)
+        failureInfoSummary_profile = summarize_failures(profile_fails_csv_path)
+        for timestamp, info_list in failureInfoSummary_profile.items():
+            for info in info_list:
+                thumbnail_tasks.append((info['tag'], info['tagValue'], timestamp, 'threshold_profile'))
+
+    if artifacts.tag_fails_csv and video_path:
+        tag_fails_csv_path = os.path.join(report_directory, artifacts.tag_fails_csv)
+        failureInfoSummary_tags = summarize_failures(tag_fails_csv_path)
+        for timestamp, info_list in failureInfoSummary_tags.items():
+            for info in info_list:
+                thumbnail_tasks.append((info['tag'], info['tagValue'], timestamp, 'tag_check'))
+
+    # Color bars evaluation thumbnails illustrate the peaks of the failure
+    # timeline, so they are picked by failure-cluster density rather than by
+    # worst value (summarize_failures).
+    colorbars_peaks = []
+    eval_video_duration = None
+    eval_video_fps = None
+    if artifacts.colorbars_eval_fails_csv and video_path:
+        colorbars_eval_fails_csv_path = os.path.join(report_directory, artifacts.colorbars_eval_fails_csv)
+        eval_video_duration = _get_video_duration(video_path)
+        eval_video_fps = _get_video_frame_rate(video_path)
+        colorbars_peaks = select_failure_peaks(colorbars_eval_fails_csv_path, duration=eval_video_duration)
+        for peak in colorbars_peaks:
+            thumbnail_tasks.append((peak['tag'], peak['tagValue'], peak['timestamp'], 'color_bars_evaluation'))
+
+    total_thumbs = len(thumbnail_tasks)
+    for i, (tag, tagValue, timestamp, profile_name) in enumerate(thumbnail_tasks):
+        thumb_path = generate_thumbnail_for_failure(
+            video_path,
+            tag,
+            tagValue,
+            timestamp,
+            profile_name,
+            thumbPath
+        )
+        if thumb_path:
+            thumb_key = f"Failed frame \n\n{tag}:{tagValue}\n\n{timestamp}"
+            generated_thumbs[thumb_key] = (thumb_path, tag, timestamp)
+        if signals and total_thumbs > 0:
+            signals.report_progress.emit(1 + int(9 * (i + 1) / total_thumbs))
+
+    # Attach the generated thumbnail paths to their peaks for the eval-bars timeline
+    for peak in colorbars_peaks:
+        thumb_key = f"Failed frame \n\n{peak['tag']}:{peak['tagValue']}\n\n{peak['timestamp']}"
+        if thumb_key in generated_thumbs:
+            peak['thumb_path'] = generated_thumbs[thumb_key][0]
+
+    # Merge with existing thumbs (for things like color bars detection)
+    existing_thumbs = find_qct_thumbs(report_directory)
+    thumbs_dict = {**existing_thumbs, **generated_thumbs}
+
+    if signals:
+        signals.report_progress.emit(10)
+
+    # Sort thumbs_dict as before
+    sorted_thumbs_dict = {}
+    for key in sorted(thumbs_dict.keys(), key=lambda x: (parse_profile(thumbs_dict[x][1]), parse_timestamp(thumbs_dict[x][2]))):
+        sorted_thumbs_dict[key] = thumbs_dict[key]
+
+    if check_cancelled():
+        return
+    
+    # Modified to get MediaConch policy content
+    (exiftool_output_path, mediainfo_output_path, ffprobe_output_path,
+     mediaconch_csv, fixity_sidecar, fixity_summary_json,
+     mediaconch_policy_content,
+     mediaconch_policy_name) = find_qc_metadata(destination_directory)
+
     if check_cancelled():
         return
 
+    if signals:
+        signals.report_progress.emit(15)
+
+    # Find frame analysis outputs
+    frame_outputs = find_frame_analysis_outputs(
+        os.path.dirname(html_report_path),  # source_directory
+        destination_directory,
+        video_id
+    )
+    
+    # Generate frame analysis HTML section
+    frame_analysis_html = generate_frame_analysis_html(frame_outputs, video_id) if frame_outputs else ""
+
+    # Initialize and create html from 
+    mc_csv_html, mediaconch_csv_filename = prepare_file_section(mediaconch_csv, lambda path: csv_to_html_table(path, style_mismatched=False, mismatch_color="#ffbaba", match_color="#d2ffed", check_fail=True))
+    diff_csv_html, difference_csv_filename = prepare_file_section(artifacts.difference_csv, lambda path: csv_to_html_table(path, style_mismatched=True, mismatch_color="#ffbaba", match_color="#d2ffed", check_fail=False))
+    exif_file_content, exif_file_filename = prepare_file_section(exiftool_output_path)
+    mi_file_content, mi_file_filename = prepare_file_section(mediainfo_output_path)
+    ffprobe_file_content, ffprobe_file_filename = prepare_file_section(ffprobe_output_path)
+    fixity_file_content, fixity_file_filename = prepare_file_section(fixity_sidecar)
+    fixity_html = make_fixity_section_html(fixity_summary_json, fixity_file_content)
+
+    # Get qct-parse thumbs if they exists
+    thumbs_dict = find_qct_thumbs(report_directory)
+
+    if artifacts.profile_fails_csv:
+        profile_fails_csv_path = os.path.join(report_directory, artifacts.profile_fails_csv)
+        failureInfoSummary_profile = summarize_failures(profile_fails_csv_path)
+    else:
+        failureInfoSummary_profile = None
+
+    if artifacts.tag_fails_csv:
+        tag_fails_csv_path = os.path.join(report_directory, artifacts.tag_fails_csv)
+        failureInfoSummary_tags = summarize_failures(tag_fails_csv_path)
+    else:
+        failureInfoSummary_tags = None
+
+    if artifacts.colorbars_eval_fails_csv:
+        colorbars_eval_fails_csv_path = os.path.join(report_directory, artifacts.colorbars_eval_fails_csv)
+        failureInfoSummary_colorbars = summarize_failures(colorbars_eval_fails_csv_path)
+    else:
+        failureInfoSummary_colorbars = None
+
+    if check_cancelled():
+        return
+
+    # Detected bars runs (head + additional). These are the regions the bars
+    # evaluation skips, so the timeline shades them; the windowed graphs below
+    # reuse the same parse for their timecode labels.
+    qct_duration_runs = _parse_bars_durations_csv(artifacts.qctools_colorbars_duration_output)
+    bars_regions = [(bars_start, bars_end) for _, bars_start, bars_end in qct_duration_runs]
+
+    # Create graphs for all existing csv files (existing code...)
+    # The timeline renders as its own titled section below the evaluation pies,
+    # so it stays a separate variable rather than being folded into
+    # colorbars_eval_html.
+    colorbars_timeline_html = None
+    if artifacts.qctools_bars_eval_check_output and failureInfoSummary_colorbars:
+        # Pies summarize the per-tag failure share; the timeline below them
+        # carries the failure specifics (distribution + peak thumbnails)
+        colorbars_eval_html = make_profile_piecharts(artifacts.qctools_bars_eval_check_output, thumbs_dict, failureInfoSummary_colorbars, video_id, failure_csv_path=colorbars_eval_fails_csv_path, check_cancelled=check_cancelled, failure_details=False)
+        colorbars_timeline_html = make_eval_bars_timeline_html(
+            colorbars_eval_fails_csv_path, video_id, peaks=colorbars_peaks,
+            video_duration=eval_video_duration, frame_rate=eval_video_fps,
+            analysis_periods=get_frame_analysis_periods(frame_outputs),
+            black_segments=get_frame_analysis_black_segments(frame_outputs),
+            bars_regions=bars_regions)
+    elif artifacts.qctools_bars_eval_check_output and failureInfoSummary_colorbars is None:
+       color_bars_segment = f"""
+        <div style="display: flex; flex-direction: column; align-items: start; background-color: #f5e9e3; padding: 10px;"> 
+            <p><b>All QCTools values of the video file are within the median values of the color bars.</b></p>
+        </div>
+        """
+       colorbars_eval_html = f"""
+        <div style="display:inline-block; margin-right: 10px; padding-bottom: 20px;">  
+            {color_bars_segment}
+        </div>
+        """
+    else:
+        colorbars_eval_html = None
+
+    # How the color-bars evaluation graded content, which drives the section
+    # headers and whether an info box accompanies the graph:
+    #   - "detected" reference, bars found -> detected-vs-SMPTE graph only
+    #   - "detected" reference, no bars    -> SMPTE fallback, info box only
+    #   - "smpte" reference, bars found    -> graph + "SMPTE selected" info box
+    #   - "smpte" reference, no bars       -> "SMPTE selected" info box only
+    # smpte_reference: SMPTE values were the evaluation reference (drives the
+    # "Values relative to ... thresholds" header). colorbars_box_only: the
+    # colorbars_html is just an info box with no graph (drives the graph
+    # section header).
+    smpte_selected_box = """
+                <div style="background-color: #fff3cd; padding: 15px; border: 1px solid #856404; margin: 10px 0; border-radius: 5px;">
+                    <p style="margin: 0; color: #856404;">Evaluation was performed against standard SMPTE color bar values (selected reference).</p>
+                </div>
+                """
+    smpte_reference = False
+    colorbars_box_only = False
+    if artifacts.colorbars_values_output:
+        try:
+            with open(artifacts.colorbars_values_output, 'r') as f:
+                first_line = f.readline().strip()
+            if first_line == "SMPTE_FALLBACK":
+                smpte_reference = True
+                colorbars_box_only = True
+                colorbars_html = """
+                <div style="background-color: #fff3cd; padding: 15px; border: 1px solid #856404; margin: 10px 0; border-radius: 5px;">
+                    <p style="margin: 0; color: #856404;"><strong>No color bars detected.</strong> Evaluation was performed using standard SMPTE color bar values.</p>
+                </div>
+                """
+            elif first_line == "SMPTE_SELECTED":
+                smpte_reference = True
+                colorbars_box_only = True
+                colorbars_html = smpte_selected_box
+            else:
+                # Real detected-vs-SMPTE comparison CSV -> render the graph.
+                graph_html = make_color_bars_graphs(video_id, artifacts.qctools_colorbars_duration_output, artifacts.colorbars_values_output, thumbs_dict)
+                evaluate_reference = config_mgr.get_config('checks', ChecksConfig).tools.qct_parse.evaluateBarsReference
+                if evaluate_reference == 'smpte':
+                    # SMPTE was the evaluation reference but bars were detected:
+                    # show the informational graph with the "SMPTE selected" box
+                    # below it.
+                    smpte_reference = True
+                    colorbars_html = (graph_html or "") + smpte_selected_box
+                else:
+                    colorbars_html = graph_html
+        except Exception as e:
+            logger.error(f"Error reading colorbars values file: {e}")
+            colorbars_html = None
+    else:
+        colorbars_html = None
+
+    # Render bar graphs for windowed (mid-file) bars regions.
+    # Build a lookup of region label → duration string from the qct-parse
+    # bars durations CSV (parsed above) so each graph shows the correct timecodes.
+    windowed_duration_lookup = {}
+    for label, start_s, end_s in qct_duration_runs:
+        def _fmt(seconds):
+            h = int(seconds // 3600)
+            m = int((seconds % 3600) // 60)
+            s = seconds - (h * 3600) - (m * 60)
+            return f"{h:02d}:{m:02d}:{s:06.3f}"
+        windowed_duration_lookup[label] = f"{_fmt(start_s)} - {_fmt(end_s)}"
+
+    windowed_colorbars_html_list = []
+    for wv_path in sorted(artifacts.windowed_colorbars_values):
+        try:
+            region_name = os.path.basename(wv_path).replace("qct-parse_colorbars_values_", "").replace(".csv", "")
+            dur_str = windowed_duration_lookup.get(region_name)
+            idx_str = region_name.replace("additional-", "")
+            wv_html = make_color_bars_graphs(
+                video_id, artifacts.qctools_colorbars_duration_output, wv_path, thumbs_dict,
+                duration_override=dur_str,
+                bars_label=f'{video_id} Additional Bars',
+                thumb_profile_filter=f'additional_bars_{idx_str}',
+            )
+            if wv_html:
+                windowed_colorbars_html_list.append((region_name, wv_html))
+        except Exception as e:
+            logger.error(f"Error rendering windowed bars graph for {wv_path}: {e}")
+
+    if artifacts.qctools_profile_check_output and failureInfoSummary_profile:
+        profile_summary_html = make_profile_piecharts(artifacts.qctools_profile_check_output, thumbs_dict, failureInfoSummary_profile, video_id, failure_csv_path=profile_fails_csv_path, check_cancelled=check_cancelled)
+    else:
+        profile_summary_html = None
+
+    if artifacts.qctools_content_check_outputs:
+        content_summary_html_list = []
+        for output_csv in artifacts.qctools_content_check_outputs:
+            content_summary_html = make_content_summary_html(output_csv, thumbs_dict, paper_bgcolor='#f5e9e3')
+            content_summary_html_list.append(content_summary_html)
+    else:
+        content_summary_html_list = None
+
+    if artifacts.tags_check_output and failureInfoSummary_tags:
+        tags_summary_html = make_profile_piecharts(artifacts.tags_check_output, thumbs_dict, failureInfoSummary_tags, video_id, failure_csv_path=tag_fails_csv_path, check_cancelled=check_cancelled)
+    else:
+        tags_summary_html = None
+
+    # Side-by-side comparison of qct-parse and CLAMS bars detectors. None
+    # unless at least one of the two CSVs is present.
+    bars_comparison_html = make_bars_detection_comparison_html(
+        artifacts.qctools_colorbars_duration_output,
+        artifacts.clams_bars_durations_csv,
+    ) if artifacts.clams_bars_durations_csv else None
+
+    # CLAMS tone detection results.
+    tone_detection_html = make_tone_detection_html(artifacts.clams_tone_durations_csv)
+    mkvalidator_html = make_mkvalidator_html(artifacts.mkvalidator_summary_path, artifacts.mkvalidator_clusters_csv, video_path)
+
+    audio_clipping_html = make_audio_clipping_html(artifacts.audio_clipping_csv) if artifacts.audio_clipping_csv else None
+    channel_imbalance_html = make_channel_imbalance_html(artifacts.channel_imbalance_csv) if artifacts.channel_imbalance_csv else None
+    identical_channels_html = make_identical_channels_html(artifacts.identical_channels_csv) if artifacts.identical_channels_csv else None
+    audible_timecode_html = make_audible_timecode_html(artifacts.audible_timecode_csv) if artifacts.audible_timecode_csv else None
+    audio_dropout_html = make_audio_dropout_html(artifacts.audio_dropout_csv) if artifacts.audio_dropout_csv else None
+    clamped_levels_html = make_clamped_levels_html(artifacts.clamped_levels_csv, artifacts.clamped_traces_csv) if artifacts.clamped_levels_csv else None
+    chroma_phase_html = make_chroma_phase_html(artifacts.chroma_phase_summary_csv, artifacts.chroma_phase_events_csv) if artifacts.chroma_phase_summary_csv else None
+    tone_leak_html = make_tone_leak_html(artifacts.tone_leak_summary_csv, artifacts.tone_leak_events_csv) if artifacts.tone_leak_summary_csv else None
+    dropped_sample_html = generate_dropped_sample_html(frame_outputs) if frame_outputs else ""
+    duplicate_frame_html = generate_duplicate_frame_html(frame_outputs) if frame_outputs else ""
+    bitplane_html = generate_bitplane_html(frame_outputs) if frame_outputs else ""
+
+    existing_thumbs = find_qct_thumbs(report_directory)
+    no_qct_parse_files = (
+        not artifacts.profile_fails_csv and
+        not artifacts.tag_fails_csv and
+        not artifacts.colorbars_eval_fails_csv and
+        not artifacts.audio_clipping_csv and
+        not artifacts.channel_imbalance_csv and
+        not artifacts.identical_channels_csv and
+        not artifacts.audible_timecode_csv and
+        not artifacts.audio_dropout_csv and
+        not artifacts.clamped_levels_csv and
+        not artifacts.chroma_phase_summary_csv and
+        not artifacts.tone_leak_summary_csv and
+        not existing_thumbs
+    )
+
+    if check_cancelled():
+        return
+
+    # Embed logo as a data URI so the report renders self-contained.
+    logo_image_path = image_to_data_uri(config_mgr.get_logo_path('av_spex_the_logo.png'))
+    if signals:
+        signals.report_progress.emit(20)
+
+    # Generate a color strip from the video, fall back to the static eq image
+    color_strip_b64 = None
+    if video_path:
+        color_strip_b64 = generate_color_strip_base64(video_path, signals=signals, progress_start=22, progress_end=25)
+    if signals:
+        signals.report_progress.emit(25)
+ 
+    if color_strip_b64:
+        # Store the data URI once in a hidden element, reference it via JS
+        color_strip_src = f"data:image/jpeg;base64,{color_strip_b64}"
+        color_strip_store = (
+            f'<img id="color-strip-data" src="{color_strip_src}" '
+            f'alt="Color strip" class="color-strip-divider">'
+        )
+        # Subsequent uses clone the src from the stored element
+        color_strip_divider = (
+            '<img class="color-strip-divider color-strip-clone" alt="Color strip">'
+        )
+        color_strip_init_script = """
+        <script>
+        (function() {
+            var src = document.getElementById('color-strip-data').src;
+            var clones = document.getElementsByClassName('color-strip-clone');
+            for (var i = 0; i < clones.length; i++) { clones[i].src = src; }
+        })();
+        </script>"""
+    else:
+        # Fallback: use the static eq image as before
+        eq_image_path = image_to_data_uri(config_mgr.get_logo_path('germfree_eq.png'))
+        color_strip_src = eq_image_path
+        color_strip_store = (
+            f'<img src="{eq_image_path}" alt="AV Spex Graphic EQ Logo" '
+            f'style="width: 10%">'
+        )
+        color_strip_divider = color_strip_store
+        color_strip_init_script = ""
+
+    # Generate audio waveform
+    waveform_b64 = None
+    if video_path:
+        waveform_b64 = generate_audio_waveform_base64(video_path, signals=signals, progress_start=25, progress_end=95)
+
+    if waveform_b64:
+        # Note: Using class "waveform-data-store" to target via JS
+        waveform_store = (
+            f'<img class="waveform-data-store" src="data:image/jpeg;base64,{waveform_b64}" '
+            f'style="display: none;">'
+        )
+        
+        # Divider: The placeholder that will be cloned by the script
+        waveform_divider = (
+            '<div style="margin: 20px 0; text-align: center;">'
+            '<img class="waveform-clone" style="width: 100%; height: auto; border: 1px solid #378d6a;">'
+            '</div>'
+        )
+        
+        # JavaScript: Finds all clones and populates them with the source data
+        waveform_init_script = """
+        <script>
+        (function() {
+            var src = document.querySelector('.waveform-data-store').src;
+            var clones = document.querySelectorAll('.waveform-clone');
+            for (var i = 0; i < clones.length; i++) {
+                clones[i].src = src;
+            }
+        })();
+        </script>"""
+    else:
+        # Fallback: If generation fails, use the static logo as a divider (similar to eq_image_path)
+        eq_image_path = image_to_data_uri(config_mgr.get_logo_path('germfree_eq.png'))
+        waveform_store = f'<img src="{eq_image_path}" alt="AV Spex Logo" style="width: 10%; display: none;">'
+        waveform_divider = f'<div style="text-align: center;"><img src="{eq_image_path}" style="width: 10%;"></div>'
+        waveform_init_script = ""
+
+    # ------------------------------------------------------------------
+    # Section assembly
+    #
+    # Each block of the report owns both its markup and the TOC entries that
+    # point into it, and both outputs are derived from this one ordered list.
+    # That is the whole point of the structure: the "Jump to section" nav can
+    # no longer drift out of order or out of sync with the body, because it is
+    # not restated alongside the body — it is read off the same sequence.
+    #
+    # A block whose markup is empty contributes nothing to either output, so
+    # availability is expressed once, where the markup is built.
+    # ------------------------------------------------------------------
+    sections: List[ReportSection] = []
+
+    def add_section(html, *toc_entries):
+        """Append a rendered block plus any TOC entries pointing into it."""
+        if html:
+            sections.append(ReportSection(html=html, toc=tuple(toc_entries)))
+
     if fixity_html:
-        html_template += f"""
+        add_section(f"""
         <h3 id="section-fixity">Fixity</h3>
         {fixity_html}
-        """
+        """, ('section-fixity', 'Fixity'))
 
     if mediaconch_csv:
-        html_template += f"""
+        add_section(f"""
         <h3 id="section-mediaconch-csv">{mediaconch_csv_filename}</h3>
         {mc_csv_html}
-        """
+        """, ('section-mediaconch-csv', 'MediaConch CSV'))
 
-    # Add MediaConch policy section if available - NOW WITH COLLAPSIBLE FUNCTIONALITY
+    # MediaConch policy is collapsible
     if mediaconch_policy_content and mediaconch_policy_name:
-        html_template += f"""
+        add_section(f"""
         <h3 id="section-mediaconch-policy">MediaConch Policy File: {mediaconch_policy_name}</h3>
         <a id="link_mediaconch_policy" href="javascript:void(0);" onclick="toggleContent('mediaconch_policy', 'Show policy content ▼', 'Hide policy content ▲')" style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block;">Show policy content ▼</a>
         <div id="mediaconch_policy" class="xml-content" style="display: none;">{mediaconch_policy_content}</div>
-        """
+        """, ('section-mediaconch-policy', 'MediaConch Policy'))
 
     if mkvalidator_html:
-        html_template += f"""
+        add_section(f"""
         <h3 id="section-mkvalidator">mkvalidator</h3>
         {mkvalidator_html}
-        """
+        """, ('section-mkvalidator', 'mkvalidator'))
 
+    # Frame analysis brings its own headings, so it is passed through whole and
+    # its TOC entries are read back out of the markup — only the subsections
+    # that actually rendered are listed, falling back to the section heading.
     if frame_analysis_html:
-        html_template += frame_analysis_html
+        frame_subsections = [
+            ('section-border-detection', 'Border Detection'),
+            ('section-signalstats', 'Signalstats Analysis'),
+            ('section-brng-analysis', 'BRNG Violation Analysis'),
+        ]
+        rendered = [
+            (anchor, label) for anchor, label in frame_subsections
+            if f"id='{anchor}'" in frame_analysis_html
+        ]
+        add_section(frame_analysis_html,
+                    *(rendered or [('section-frame-analysis', 'Frame Analysis Results')]))
 
     # Bitplane check and duplicate frame detection render side-by-side so
     # each fills the vertical space of the taller section.
     if bitplane_html or duplicate_frame_html:
-        html_template += (
+        block = (
             '<div style="display: flex; flex-wrap: wrap; gap: 24px; '
             'align-items: flex-start; margin-top: 20px;">'
         )
+        block_toc = []
         if bitplane_html:
-            html_template += (
+            block += (
                 '<div id="section-bitplane" style="flex: 1 1 380px; min-width: 0;">'
                 f'{bitplane_html}</div>'
             )
+            block_toc.append(('section-bitplane', 'Bitplane Check'))
         if duplicate_frame_html:
-            html_template += (
+            block += (
                 '<div id="section-duplicate-frame" '
                 'style="flex: 2 1 600px; min-width: 0; overflow-x: auto;">'
                 f'{duplicate_frame_html}</div>'
             )
-        html_template += '</div>'
+            block_toc.append(('section-duplicate-frame', 'Duplicate Frame Detection'))
+        block += '</div>'
+        add_section(block, *block_toc)
 
+    # Divider closing out the frame-analysis group. Carries no TOC entry.
     if frame_analysis_html or bitplane_html or duplicate_frame_html:
-        html_template += color_strip_divider
+        add_section(color_strip_divider)
 
-    # Rest of the HTML template remains the same...
     if no_qct_parse_files:
-        html_template += """
+        add_section("""
         <h3 id="section-qct-parse-notice">QCT-Parse Analysis</h3>
         <div style="background-color: #fff3cd; padding: 15px; border: 1px solid #856404; margin: 10px 0; border-radius: 5px;">
             <p style="margin: 0; color: #856404;"><strong>Information:</strong> QCT-Parse analysis was not performed for this video. Quality control analysis sections are not available in this report.</p>
         </div>
-        """
+        """, ('section-qct-parse-notice', 'QCT-Parse Analysis'))
 
+    # Head bars graph plus one graph per additional (mid-file) bars region,
+    # laid out in a single wrapping flex row.
     if colorbars_html or windowed_colorbars_html_list:
-        html_template += '<div style="display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start;">'
+        block = '<div style="display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start;">'
+        block_toc = []
         if colorbars_html:
             if colorbars_box_only:
                 colorbars_header = "Color Bars Detection"
             else:
                 colorbars_header = f"SMPTE Colorbars vs {video_id} Colorbars"
-            html_template += f"""
+            block += f"""
             <div id="section-colorbars" style="flex: 1 1 720px; max-width: 100%; min-width: 0; overflow: hidden;">
                 <h3>{colorbars_header}</h3>
                 {colorbars_html}
             </div>"""
+            block_toc.append(('section-colorbars', 'Color Bars Detection'))
         for region_name, wv_html in windowed_colorbars_html_list:
-            html_template += f"""
+            block += f"""
             <div id="section-colorbars-{region_name}" style="flex: 1 1 720px; max-width: 100%; min-width: 0; overflow: hidden;">
                 <h3>SMPTE Colorbars vs Additional {video_id} Colorbars</h3>
                 {wv_html}
             </div>"""
-        html_template += '</div>'
+            block_toc.append((f'section-colorbars-{region_name}', 'Additional Color Bars'))
+        block += '</div>'
+        add_section(block, *block_toc)
 
     if bars_comparison_html or tone_detection_html:
-        html_template += '<h3 id="section-clams-detection">CLAMS Detection</h3>'
-        html_template += """
-        <a id="link_clams_methodology" href="javascript:void(0);"
-           onclick="toggleContent('clams_methodology', 'What is CLAMS Detection? ▼', 'What is CLAMS Detection? ▲')"
-           style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
-           What is CLAMS Detection? ▼</a>
-        <div id="clams_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px;
-             margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
-            <p style="margin: 0 0 10px 0;">
-                <strong>CLAMS</strong> (Computational Linguistics Applications for Multimedia Services) is an
-                open-source project led by Brandeis University that builds reusable tools for analyzing
-                audiovisual collections. AV Spex adapts two CLAMS apps —
-                <a href="https://github.com/clamsproject/app-barsdetection" style="color: #378d6a;">app-barsdetection</a>
-                and <a href="https://github.com/clamsproject/app-tonedetection" style="color: #378d6a;">app-tonedetection</a> —
-                porting just their detection cores into the AV Spex pipeline. Both upstream apps are
-                distributed under the Apache License 2.0.
-            </p>
-            <p style="margin: 0 0 6px 0; font-weight: bold;">How bars detection works:</p>
-            <p style="margin: 0 0 10px 0;">
-                Frames are sampled (every 30th frame by default) and converted to grayscale. Each sample
-                is compared to a bundled SMPTE color bars reference image using
-                <strong>structural similarity (SSIM)</strong>. A frame is considered to match when its
-                SSIM score exceeds the primary threshold (<code style="background:#eee; padding:1px 4px; border-radius:2px;">0.7</code>),
-                and a run of consecutive matching samples becomes a detected bars span once it
-                exceeds the minimum frame count.
-            </p>
-            <p style="margin: 0 0 6px 0; font-weight: bold;">How tone detection works:</p>
-            <p style="margin: 0 0 10px 0;">
-                The audio track is decoded to 16 kHz mono via ffmpeg and split into consecutive 250 ms
-                chunks. Adjacent chunks are compared using <strong>numpy cross-correlation</strong>;
-                when their similarity stays at or above the tolerance
-                (<code style="background:#eee; padding:1px 4px; border-radius:2px;">1.0</code> by default),
-                the run is extended. Runs that survive a minimum-duration filter
-                (<code style="background:#eee; padding:1px 4px; border-radius:2px;">2000 ms</code> by default)
-                are reported as detected tones.
-            </p>
-            <p style="margin: 0 0 6px 0; font-weight: bold;">Two-pass cross-validation:</p>
-            <p style="margin: 0 0 6px 0;">
-                Color bars and reference tone are typically authored together at the head of a tape, so
-                the two detectors should largely agree. AV Spex runs them in two passes:
-            </p>
-            <ol style="margin: 4px 0 10px 20px; padding: 0;">
-                <li style="margin-bottom: 4px;"><strong>Primary pass</strong> — each detector scans the
-                    file independently with its default thresholds.</li>
-                <li style="margin-bottom: 4px;"><strong>Head re-check</strong> — if the primary bars pass
-                    found nothing near the head of the file, the recorded SSIM scores over the first two
-                    minutes are re-evaluated at the relaxed threshold
-                    (<code style="background:#eee; padding:1px 4px; border-radius:2px;">0.6</code>).
-                    This catches real but degraded head bars that score just under the primary
-                    threshold.</li>
-                <li style="margin-bottom: 4px;"><strong>Second pass</strong> — when one detector finds a
-                    span the other missed, a targeted windowed scan is run on the other detector with
-                    <em>relaxed</em> thresholds (bars: SSIM ≥
-                    <code style="background:#eee; padding:1px 4px; border-radius:2px;">0.6</code>, sample
-                    ratio <code style="background:#eee; padding:1px 4px; border-radius:2px;">5</code>;
-                    tone: tolerance
-                    <code style="background:#eee; padding:1px 4px; border-radius:2px;">0.7</code>,
-                    min duration
-                    <code style="background:#eee; padding:1px 4px; border-radius:2px;">500 ms</code>).
-                    A ±5 s slack is added around the trigger window because bars and tone don't always
-                    start and stop in lockstep.</li>
-            </ol>
-            <p style="margin: 0 0 10px 0;">
-                Re-scan rows are highlighted in the result tables below. The head-bars end time used
-                downstream (the BRNG-skip window, access-file trim) is a <strong>cross-validated
-                consensus</strong> of qct-parse and CLAMS: when the two detectors disagree, the disputed
-                span is checked against the recorded SSIM scores — a span whose scores never approach
-                the bars threshold is rejected, and a head claim from one detector that the other
-                decisively contradicts is treated as unconfirmed rather than trusted.
-            </p>
-            <p style="margin: 0 0 6px 0; font-weight: bold;">Fragment merging:</p>
-            <p style="margin: 0 0 10px 0;">
-                A continuous tone or bars span can dip below threshold for a brief chunk and be reported
-                as several adjacent fragments. After detection, AV Spex coalesces fragments separated by
-                less than the configured <code style="background:#eee; padding:1px 4px; border-radius:2px;">merge_gap_seconds</code>
-                (defaults: 1 s for bars, 5 s for tone) back into a single span so the report reflects
-                the underlying continuous signal.
-            </p>
-            <p style="margin: 0; color: #777;">
-                Both detectors write a per-pass durations CSV alongside the report; the bars detector
-                additionally writes a per-sampled-frame SSIM scores CSV
-                (<code style="background:#eee; padding:1px 4px; border-radius:2px;">pass, frame,
-                timestamp, ssim_score, exceeds_threshold</code>). Those recorded scores are also what
-                the head re-check and the consensus arbitration read.
-            </p>
-        </div>
-        """
+        block = '<h3 id="section-clams-detection">CLAMS Detection</h3>'
+        block += CLAMS_METHODOLOGY_HTML
         if bars_comparison_html:
-            html_template += f"""
+            block += f"""
             <h4 style="font-size: 16px; margin-top: 16px; color: #4d2b12;">Bars Detection (qct-parse vs CLAMS SSIM)</h4>
             {bars_comparison_html}
             """
         if tone_detection_html:
-            html_template += f"""
+            block += f"""
             <h4 style="font-size: 16px; margin-top: 16px; color: #4d2b12;">Tone Detection</h4>
             {tone_detection_html}
             """
+        add_section(block, ('section-clams-detection', 'CLAMS Detection'))
 
     if colorbars_eval_html:
         if smpte_reference:
             eval_header = "Values relative to SMPTE colorbar's thresholds"
         else:
             eval_header = "Values relative to colorbar's thresholds"
-        html_template += f"""
+        add_section(f"""
         <h3 id="section-colorbars-eval">{eval_header}</h3>
         {colorbars_eval_html}
-        """
+        """, ('section-colorbars-eval', 'Colorbars Threshold Evaluation'))
 
     if colorbars_timeline_html:
-        html_template += f"""
+        add_section(f"""
         <h3 id="section-timeline">Timeline of Signal Distribution</h3>
         {colorbars_timeline_html}
-        """
+        """, ('section-timeline', 'Timeline of Signal Distribution'))
 
     if clamped_levels_html:
-        html_template += f"""
+        add_section(f"""
         <h3 id="section-clamped-levels">Clamped Levels Detection</h3>
         {clamped_levels_html}
-        """
+        """, ('section-clamped-levels', 'Clamped Levels Detection'))
 
     if chroma_phase_html:
-        html_template += f"""
+        add_section(f"""
         <h3 id="section-chroma-phase">Chroma Phase Detection</h3>
         {chroma_phase_html}
-        """
+        """, ('section-chroma-phase', 'Chroma Phase Detection'))
 
+    # Audio results render as one banner-led group: the per-channel
+    # comparisons two-up, then timecode/dropout two-up, then tone leak full
+    # width, bracketed by waveform dividers. One TOC entry covers the group.
     has_audio_results = bool(
         audio_clipping_html or channel_imbalance_html
         or identical_channels_html
@@ -7148,140 +7201,158 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     )
 
     if has_audio_results:
-        html_template += (
+        block = (
             '<h2 id="section-audio-analysis" style="color: #0a5f1c; '
             'text-decoration: underline; margin-top: 30px;">'
             'Audio Analysis Results</h2>'
         )
-        html_template += waveform_divider
+        block += waveform_divider
 
-        # Clipping + Channel Imbalance + Identical Channels — the per-channel
-        # comparisons, wrapping two-up
         if audio_clipping_html or channel_imbalance_html or identical_channels_html:
-            html_template += (
+            block += (
                 '<div style="display: flex; flex-wrap: wrap; gap: 24px; '
                 'align-items: flex-start; margin: 16px 0;">'
             )
             if audio_clipping_html:
-                html_template += f"""
+                block += f"""
                 <div style="flex: 1 1 420px; min-width: 0;">
                     <h3>Audio Clipping Detection</h3>
                     {audio_clipping_html}
                 </div>
                 """
             if channel_imbalance_html:
-                html_template += f"""
+                block += f"""
                 <div style="flex: 1 1 420px; min-width: 0;">
                     <h3>Channel Imbalance Analysis</h3>
                     {channel_imbalance_html}
                 </div>
                 """
             if identical_channels_html:
-                html_template += f"""
+                block += f"""
                 <div id="section-identical-channels" style="flex: 1 1 420px; min-width: 0;">
                     <h3>Identical Channels</h3>
                     {identical_channels_html}
                 </div>
                 """
-            html_template += '</div>'
+            block += '</div>'
 
-        # Audible Timecode + Audio Dropout side-by-side
         if audible_timecode_html or audio_dropout_html:
-            html_template += (
+            block += (
                 '<div style="display: flex; flex-wrap: wrap; gap: 24px; '
                 'align-items: flex-start; margin: 16px 0;">'
             )
             if audible_timecode_html:
-                html_template += f"""
+                block += f"""
                 <div style="flex: 1 1 420px; min-width: 0;">
                     <h3>Audible Timecode Detection</h3>
                     {audible_timecode_html}
                 </div>
                 """
             if audio_dropout_html:
-                html_template += f"""
+                block += f"""
                 <div style="flex: 1 1 420px; min-width: 0;">
                     <h3>Audio Dropout Detection</h3>
                     {audio_dropout_html}
                 </div>
                 """
-            html_template += '</div>'
+            block += '</div>'
 
         # Tone Leak Detection (full width - the per-channel table is wide)
         if tone_leak_html:
-            html_template += f"""
+            block += f"""
             <div id="section-tone-leak" style="margin: 16px 0;">
                 <h3>Tone Leak Detection</h3>
                 {tone_leak_html}
             </div>
             """
 
-        html_template += waveform_divider
+        block += waveform_divider
+        add_section(block, ('section-audio-analysis', 'Audio Analysis Results'))
 
     if dropped_sample_html:
-        html_template += f'<div id="section-dropped-sample">{dropped_sample_html}</div>'
+        add_section(f'<div id="section-dropped-sample">{dropped_sample_html}</div>',
+                    ('section-dropped-sample', 'Dropped Sample Detection'))
 
-    if difference_csv:
-        html_template += f"""
+    if artifacts.difference_csv:
+        add_section(f"""
         <h3 id="section-difference-csv">{difference_csv_filename}</h3>
         {diff_csv_html}
-        """
+        """, ('section-difference-csv', 'Difference CSV'))
 
     if profile_summary_html:
-        html_template += f"""
+        add_section(f"""
         <h3 id="section-profile-summary">qct-parse Profile Summary</h3>
         <div style="white-space: nowrap;">
             {profile_summary_html}
         </div>
-        """
+        """, ('section-profile-summary', 'QCT-Parse Profile Summary'))
 
     if tags_summary_html:
-        html_template += f"""
+        add_section(f"""
         <h3 id="section-tags-summary">qct-parse Tag Check Summary</h3>
         <div style="white-space: nowrap;">
             {tags_summary_html}
         </div>
-        """
+        """, ('section-tags-summary', 'QCT-Parse Tag Check Summary'))
 
     if content_summary_html_list:
+        block = ''
         for idx, content_summary_html in enumerate(content_summary_html_list):
-            # Only first content-detection block gets the anchor id so TOC
+            # Only the first content-detection block gets the anchor id, so TOC
             # links resolve even when multiple blocks render.
             heading_id = ' id="section-content-summary"' if idx == 0 else ''
-            html_template += f"""
+            block += f"""
             <h3{heading_id}>qct-parse Content Detection</h3>
             <div style="white-space: nowrap;">
                 {content_summary_html}
             </div>
             """
+        add_section(block, ('section-content-summary', 'QCT-Parse Content Detection'))
 
-    # Modified sections with collapsible functionality
+    # Raw tool output, each collapsible
     if exiftool_output_path:
-        html_template += f"""
+        add_section(f"""
         <h3 id="section-exiftool">{exif_file_filename}</h3>
         <a id="link_exiftool" href="javascript:void(0);" onclick="toggleContent('exiftool', 'Show content ▼', 'Hide content ▲')" style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block;">Show content ▼</a>
         <div id="exiftool" class="metadata-content" style="display: none;">{exif_file_content}</div>
-        """
+        """, ('section-exiftool', 'ExifTool Output'))
 
     if mediainfo_output_path:
-        html_template += f"""
+        add_section(f"""
         <h3 id="section-mediainfo">{mi_file_filename}</h3>
         <a id="link_mediainfo" href="javascript:void(0);" onclick="toggleContent('mediainfo', 'Show content ▼', 'Hide content ▲')" style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block;">Show content ▼</a>
         <div id="mediainfo" class="metadata-content" style="display: none;">{mi_file_content}</div>
-        """
+        """, ('section-mediainfo', 'MediaInfo Output'))
 
     if ffprobe_output_path:
-        html_template += f"""
+        add_section(f"""
         <h3 id="section-ffprobe">{ffprobe_file_filename}</h3>
         <a id="link_ffprobe" href="javascript:void(0);" onclick="toggleContent('ffprobe', 'Show content ▼', 'Hide content ▲')" style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block;">Show content ▼</a>
         <div id="ffprobe" class="metadata-content" style="display: none;">{ffprobe_file_content}</div>
-        """
+        """, ('section-ffprobe', 'FFprobe Output'))
 
     if check_cancelled():
         return
 
+    # ------------------------------------------------------------------
+    # Emit: TOC and body both come from `sections`, in the same order.
+    # ------------------------------------------------------------------
+    dangling = _dangling_toc_anchors(sections)
+    if dangling:
+        logger.warning(
+            f"Report TOC links point at section ids that were never rendered: {', '.join(dangling)}"
+        )
+
+    toc_html = _build_toc_html([entry for section in sections for entry in section.toc])
+
+    html_template = _report_head_html(
+        video_id, logo_image_path, color_strip_store, waveform_store, toc_html)
+
+    for section in sections:
+        html_template += section.html
+
     html_template += color_strip_init_script
-    html_template += waveform_init_script   
+    html_template += waveform_init_script
     html_template += """
     </body>
     </html>

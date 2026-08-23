@@ -1,5 +1,5 @@
 from dataclasses import asdict, dataclass
-from typing import List, Dict, Union, Optional
+from typing import Callable, List, Dict, Union, Optional
 
 import json
 import os
@@ -200,17 +200,11 @@ def get_active_profile(domain: str) -> Optional[str]:
 
 def get_domain_profiles(domain: str) -> Dict:
     """Return the {name: profile} dict for a spex profile domain."""
-    if domain == 'exiftool':
-        return dict(config_mgr.get_config('exiftool', ExiftoolConfig).exiftool_profiles or {})
-    if domain == 'mediainfo':
-        return dict(config_mgr.get_config('mediainfo', MediainfoConfig).mediainfo_profiles or {})
-    if domain == 'ffprobe':
-        return dict(config_mgr.get_config('ffprobe', FfprobeConfig).ffprobe_profiles or {})
-    if domain == 'filename':
-        return dict(config_mgr.get_config('filename', FilenameConfig).filename_profiles or {})
-    if domain == 'signalflow':
-        return dict(config_mgr.get_config('signalflow', SignalflowConfig).signalflow_profiles or {})
-    raise ValueError(f"Unknown profile domain: {domain}")
+    spec = PROFILE_DOMAIN_REGISTRY.get(domain)
+    if spec is None:
+        raise ValueError(f"Unknown profile domain: {domain}")
+    config = config_mgr.get_config(spec.config_key, spec.config_class)
+    return dict(getattr(config, spec.profiles_attr, None) or {})
 
 
 def _as_plain_dict(obj) -> dict:
@@ -288,12 +282,108 @@ def _signalflow_matches(spex_config, profile) -> bool:
     return True
 
 
-_DOMAIN_MATCHERS = {
-    'exiftool': _exiftool_matches,
-    'mediainfo': _mediainfo_matches,
-    'ffprobe': _ffprobe_matches,
-    'filename': _filename_matches,
-    'signalflow': _signalflow_matches,
+@dataclass(frozen=True)
+class ProfileDomain:
+    """Everything that varies between the spex profile domains.
+
+    All five domains store named profiles in their own config file and are
+    compared against a section of the spex config. Three of them — exiftool,
+    mediainfo and ffprobe — are structurally identical beyond these fields, so
+    they share the generic CRUD implementation further down instead of each
+    carrying a private copy of the same five operations.
+
+    Filename and signalflow are registered here for profile lookup and
+    active-state reporting only. Their save/delete/apply paths are genuinely
+    different shapes (signalflow has a lossy-tolerant loader and applies to
+    ENCODER_SETTINGS; filename replaces fn_sections wholesale), so forcing them
+    through the generic CRUD would mean modelling the exceptions rather than
+    the rule. They leave spex_section and to_spex_values unset.
+    """
+    name: str
+    label: str
+    config_key: str
+    config_class: type
+    profiles_attr: str
+    matches: Callable
+    # Set only for the domains served by the generic CRUD functions below.
+    spex_section: Optional[str] = None
+    to_spex_values: Optional[Callable] = None
+
+    @property
+    def supports_crud(self) -> bool:
+        """True if this domain is served by the generic CRUD functions."""
+        return self.spex_section is not None and self.to_spex_values is not None
+
+
+def _exiftool_spex_values(profile_dict: dict) -> dict:
+    """ExifTool profiles are flat — the profile *is* the expected-values section."""
+    return profile_dict
+
+
+def _mediainfo_spex_values(profile_dict: dict) -> dict:
+    """Profiles name sections general/video/audio; spex uses expected_* keys."""
+    return {
+        'expected_general': profile_dict.get('general', {}),
+        'expected_video': profile_dict.get('video', {}),
+        'expected_audio': profile_dict.get('audio', {}),
+    }
+
+
+def _ffprobe_spex_values(profile_dict: dict) -> dict:
+    """FFprobe profile section names already match spex's ffmpeg_values keys."""
+    return {
+        key: profile_dict.get(key, {})
+        for key in ('video_stream', 'audio_stream', 'format')
+    }
+
+
+PROFILE_DOMAIN_REGISTRY: Dict[str, ProfileDomain] = {
+    'exiftool': ProfileDomain(
+        name='exiftool',
+        label='ExifTool',
+        config_key='exiftool',
+        config_class=ExiftoolConfig,
+        profiles_attr='exiftool_profiles',
+        matches=_exiftool_matches,
+        spex_section='exiftool_values',
+        to_spex_values=_exiftool_spex_values,
+    ),
+    'mediainfo': ProfileDomain(
+        name='mediainfo',
+        label='MediaInfo',
+        config_key='mediainfo',
+        config_class=MediainfoConfig,
+        profiles_attr='mediainfo_profiles',
+        matches=_mediainfo_matches,
+        spex_section='mediainfo_values',
+        to_spex_values=_mediainfo_spex_values,
+    ),
+    'ffprobe': ProfileDomain(
+        name='ffprobe',
+        label='FFprobe',
+        config_key='ffprobe',
+        config_class=FfprobeConfig,
+        profiles_attr='ffprobe_profiles',
+        matches=_ffprobe_matches,
+        spex_section='ffmpeg_values',
+        to_spex_values=_ffprobe_spex_values,
+    ),
+    'filename': ProfileDomain(
+        name='filename',
+        label='Filename',
+        config_key='filename',
+        config_class=FilenameConfig,
+        profiles_attr='filename_profiles',
+        matches=_filename_matches,
+    ),
+    'signalflow': ProfileDomain(
+        name='signalflow',
+        label='Signal flow',
+        config_key='signalflow',
+        config_class=SignalflowConfig,
+        profiles_attr='signalflow_profiles',
+        matches=_signalflow_matches,
+    ),
 }
 
 
@@ -312,7 +402,7 @@ def get_active_profile_state(domain: str) -> ActiveProfileState:
         return ActiveProfileState(name=name, exists=False, modified=False)
     spex_config = config_mgr.get_config('spex', SpexConfig)
     try:
-        matches = _DOMAIN_MATCHERS[domain](spex_config, profiles[name])
+        matches = PROFILE_DOMAIN_REGISTRY[domain].matches(spex_config, profiles[name])
     except Exception as e:
         logger.warning(f"Could not compare {domain} values against profile '{name}': {e}")
         matches = True
@@ -572,64 +662,8 @@ def apply_profile(selected_profile):
     enforce_extension_compatibility()
 
 
-def apply_exiftool_profile(profile_data, profile_name: Optional[str] = None):
-    """
-    Apply an exiftool profile to the current spex configuration.
-
-    Completely replaces the existing exiftool configuration with the selected profile,
-    ensuring all fields are properly saved and persisted.
-
-    Args:
-        profile_data: Either an ExiftoolProfile dataclass instance or a dictionary
-                     containing exiftool field values
-        profile_name: When given, recorded as the domain's active profile
-    """
-    from dataclasses import asdict
-    
-    # Debug information about the provided profile
-    logger.debug(f"==== APPLYING EXIFTOOL PROFILE ====")
-
-    # Ensure spex config is loaded into cache
-    config_mgr.get_config('spex', SpexConfig)
-    
-    # Convert profile data to dictionary if it's a dataclass
-    if hasattr(profile_data, '__dataclass_fields__'):
-        # It's a dataclass, convert to dict
-        profile_dict = asdict(profile_data)
-        logger.debug(f"Converting ExiftoolProfile dataclass to dict")
-    else:
-        # Already a dict
-        profile_dict = profile_data
-        logger.debug(f"Using profile data as dict directly")
-    
-    # Log the fields being applied
-    logger.debug(f"Profile has {len(profile_dict)} fields")
-    for field, value in profile_dict.items():
-        if isinstance(value, list):
-            logger.debug(f"  {field}: {value} (list with {len(value)} items)")
-        else:
-            logger.debug(f"  {field}: {value}")
-    
-    # Replace the entire exiftool_values section
-    config_mgr.replace_config_section('spex', 'exiftool_values', profile_dict)
-    
-    # Force a refresh to ensure changes are persisted
-    config_mgr.refresh_configs()
-    
-    # Verify changes persisted
-    final_config = config_mgr.get_config('spex', SpexConfig)
-    logger.debug(f"Final verification after refresh: Exiftool values updated")
-    
-    # Verify specific fields
-    if hasattr(final_config.exiftool_values, 'FileType'):
-        logger.debug(f"Verified FileType: {final_config.exiftool_values.FileType}")
-    if hasattr(final_config.exiftool_values, 'ImageWidth'):
-        logger.debug(f"Verified ImageWidth: {final_config.exiftool_values.ImageWidth}")
-
-    if profile_name:
-        set_active_profile('exiftool', profile_name)
-
-    return True
+# apply_exiftool_profile now lives with the other per-domain wrappers,
+# below the generic CRUD implementation they all share.
 
 
 def update_tool_setting(tool_names: List[str], value: bool):
@@ -867,628 +901,277 @@ def get_all_profiles() -> Dict[str, Union[dict, ChecksProfile]]:
     return all_profiles
 
 
-def get_exiftool_profile(profile_name: str):
-    """
-    Get an exiftool profile by name from the configuration.
-    
-    Args:
-        profile_name (str): The name of the profile to retrieve
-        
-    Returns:
-        ExiftoolProfile or None: The requested profile or None if not found
-    """
-    from AV_Spex.utils.config_setup import ExiftoolConfig
-    
+# ---------------------------------------------------------------------------
+# Generic profile CRUD
+#
+# One implementation of get / list / save / delete / apply, parameterised by
+# the ProfileDomain descriptor. The per-domain public names below are thin
+# wrappers so every existing CLI, GUI and import caller is unaffected; adding a
+# fourth expected-value domain now means registering a descriptor rather than
+# writing five more functions.
+# ---------------------------------------------------------------------------
+
+
+def _crud_domain(domain_name: str) -> ProfileDomain:
+    """Return the descriptor for a domain served by the generic CRUD."""
+    domain = PROFILE_DOMAIN_REGISTRY.get(domain_name)
+    if domain is None or not domain.supports_crud:
+        raise ValueError(f"No generic profile CRUD registered for domain: {domain_name}")
+    return domain
+
+
+def _profiles_of(domain: ProfileDomain, domain_config) -> dict:
+    """The {name: profile} dict held by a domain's config, never None."""
+    return getattr(domain_config, domain.profiles_attr, None) or {}
+
+
+def _profile_as_dict(profile):
+    """Profiles round-trip through JSON, so they are stored as plain dicts."""
+    if hasattr(profile, '__dataclass_fields__'):
+        return asdict(profile)
+    return profile
+
+
+def get_profile(domain_name: str, profile_name: str):
+    """Get a named profile from a domain's config, or None if absent."""
     try:
-        config_mgr = ConfigManager()
-        exiftool_config = config_mgr.get_config('exiftool', ExiftoolConfig)
-        
-        if profile_name in exiftool_config.exiftool_profiles:
-            return exiftool_config.exiftool_profiles[profile_name]
+        domain = _crud_domain(domain_name)
+        domain_config = config_mgr.get_config(domain.config_key, domain.config_class)
+        return _profiles_of(domain, domain_config).get(profile_name)
     except Exception as e:
-        logger.warning(f"Could not retrieve exiftool profile '{profile_name}': {str(e)}")
-    
+        logger.warning(f"Could not retrieve {domain_name} profile '{profile_name}': {str(e)}")
     return None
+
+
+def get_available_profiles(domain_name: str) -> List[str]:
+    """List the profile names available for a domain."""
+    try:
+        domain = _crud_domain(domain_name)
+        domain_config = config_mgr.get_config(domain.config_key, domain.config_class)
+        return list(_profiles_of(domain, domain_config).keys())
+    except Exception as e:
+        logger.warning(f"Could not retrieve {domain_name} profiles: {str(e)}")
+    return []
+
+
+def save_profile(domain_name: str, profile_name: str, profile_data) -> bool:
+    """Save a named profile into a domain's config.
+
+    Built-in profiles are refused here rather than in the GUI, so the CLI and
+    config-import paths are covered by the same guard.
+    """
+    try:
+        domain = _crud_domain(domain_name)
+    except ValueError as e:
+        logger.error(str(e))
+        return False
+
+    logger.debug(f"=== SAVING {domain.label.upper()} PROFILE: {profile_name} ===")
+
+    if is_protected_profile(domain.name, profile_name):
+        logger.warning(f"'{profile_name}' is a built-in profile and cannot be overwritten")
+        return False
+
+    try:
+        try:
+            domain_config = config_mgr.get_config(domain.config_key, domain.config_class)
+        except Exception:
+            # No config file yet. Create one and place it in the cache, so the
+            # replace_config_section below has something to operate on.
+            domain_config = domain.config_class()
+            config_mgr._configs[domain.config_key] = domain_config
+            logger.debug(f"Creating new {domain.name} config")
+
+        updated_profiles = {
+            name: _profile_as_dict(existing)
+            for name, existing in _profiles_of(domain, domain_config).items()
+        }
+        updated_profiles[profile_name] = _profile_as_dict(profile_data)
+
+        # replace_config_section, not update_config: a deep merge would leave
+        # deleted or renamed profiles behind in the saved dict.
+        config_mgr.replace_config_section(
+            domain.config_key, domain.profiles_attr, updated_profiles
+        )
+        logger.info(f"Successfully saved {domain.name} profile: {profile_name}")
+
+        verification_config = config_mgr.get_config(domain.config_key, domain.config_class)
+        if profile_name in _profiles_of(domain, verification_config):
+            logger.debug(f"Verification: profile '{profile_name}' confirmed saved")
+            return True
+
+        logger.error(f"Verification failed: profile '{profile_name}' not found after save")
+        return False
+
+    except Exception as e:
+        logger.error(f"Error saving {domain.name} profile '{profile_name}': {str(e)}")
+        return False
+
+
+def delete_profile(domain_name: str, profile_name: str) -> bool:
+    """Delete a named profile from a domain's config."""
+    try:
+        domain = _crud_domain(domain_name)
+    except ValueError as e:
+        logger.error(str(e))
+        return False
+
+    if is_protected_profile(domain.name, profile_name):
+        logger.warning(f"'{profile_name}' is a built-in profile and cannot be deleted")
+        return False
+
+    try:
+        domain_config = config_mgr.get_config(domain.config_key, domain.config_class)
+        profiles = _profiles_of(domain, domain_config)
+
+        if profile_name not in profiles:
+            logger.warning(f"Profile '{profile_name}' not found, cannot delete")
+            return False
+
+        updated_profiles = {
+            name: _profile_as_dict(profile)
+            for name, profile in profiles.items()
+            if name != profile_name
+        }
+
+        config_mgr.replace_config_section(
+            domain.config_key, domain.profiles_attr, updated_profiles
+        )
+        logger.info(f"Deleted {domain.name} profile: {profile_name}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error deleting {domain.name} profile '{profile_name}': {str(e)}")
+        return False
+
+
+def apply_profile_values(domain_name: str, profile_data, profile_name: Optional[str] = None) -> bool:
+    """Apply a profile's values to its section of the spex config.
+
+    The whole section is replaced rather than merged, so a sparser profile
+    cannot inherit leftover fields from the profile applied before it.
+
+    Args:
+        domain_name: registered domain key ('exiftool', 'mediainfo', 'ffprobe')
+        profile_data: the domain's profile dataclass, or an equivalent dict
+        profile_name: when given, recorded as the domain's active profile
+    """
+    domain = _crud_domain(domain_name)
+    logger.debug(f"==== APPLYING {domain.label.upper()} PROFILE ====")
+
+    # Ensure the spex config is in the cache before replacing a section of it.
+    config_mgr.get_config('spex', SpexConfig)
+
+    profile_dict = _profile_as_dict(profile_data)
+    spex_values = domain.to_spex_values(profile_dict)
+    logger.debug(f"Applying {len(spex_values)} section(s) to spex.{domain.spex_section}")
+
+    config_mgr.replace_config_section('spex', domain.spex_section, spex_values)
+
+    # Force a refresh so the change is persisted and visible to later readers.
+    config_mgr.refresh_configs()
+
+    if profile_name:
+        set_active_profile(domain.name, profile_name)
+
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Per-domain wrappers
+#
+# Kept as named functions rather than generated bindings so that call sites,
+# grep and IDE navigation all still work, and so each domain has somewhere to
+# document its own quirks.
+# ---------------------------------------------------------------------------
+
+
+def apply_exiftool_profile(profile_data, profile_name: Optional[str] = None) -> bool:
+    """Apply an ExifTool profile to spex.exiftool_values."""
+    return apply_profile_values('exiftool', profile_data, profile_name)
+
+
+def get_exiftool_profile(profile_name: str):
+    """Get an ExifTool profile by name, or None if not found."""
+    return get_profile('exiftool', profile_name)
 
 
 def get_available_exiftool_profiles() -> List[str]:
-    """
-    Get a list of all available exiftool profile names.
-    
-    Returns:
-        List[str]: List of profile names
-    """
-    from AV_Spex.utils.config_setup import ExiftoolConfig
-    
-    try:
-        config_mgr = ConfigManager()
-        exiftool_config = config_mgr.get_config('exiftool', ExiftoolConfig)
-        
-        if hasattr(exiftool_config, 'exiftool_profiles'):
-            return list(exiftool_config.exiftool_profiles.keys())
-    except Exception as e:
-        logger.warning(f"Could not retrieve exiftool profiles: {str(e)}")
-    
-    return []
+    """List available ExifTool profile names."""
+    return get_available_profiles('exiftool')
 
 
-def save_exiftool_profile(profile_name: str, profile_data):
-    """
-    Save an exiftool profile to the configuration.
-    
-    Args:
-        profile_name (str): Name for the profile
-        profile_data: ExiftoolProfile dataclass or dict with profile data
-        
-    Returns:
-        bool: True if successful, False otherwise
-    """
-    from AV_Spex.utils.config_setup import ExiftoolConfig, ExiftoolProfile
-    from dataclasses import asdict
-    
-    logger.debug(f"=== SAVING EXIFTOOL PROFILE ===")
-    logger.debug(f"Profile name: {profile_name}")
-
-    if is_protected_profile('exiftool', profile_name):
-        logger.warning(f"'{profile_name}' is a built-in profile and cannot be overwritten")
-        return False
-
-    try:
-        # Get current exiftool config or create new one
-        try:
-            exiftool_config = config_mgr.get_config('exiftool', ExiftoolConfig)
-            logger.debug(f"Current profiles before save: {list(exiftool_config.exiftool_profiles.keys())}")
-        except:
-            # Config doesn't exist yet, create it
-            exiftool_config = ExiftoolConfig()
-            logger.debug("Creating new exiftool config")
-        
-        # Ensure exiftool_profiles dict exists
-        if not hasattr(exiftool_config, 'exiftool_profiles'):
-            exiftool_config.exiftool_profiles = {}
-        
-        # Create updated profiles dict
-        updated_profiles = {}
-        
-        # Add existing profiles
-        for name, existing_profile in exiftool_config.exiftool_profiles.items():
-            if hasattr(existing_profile, '__dataclass_fields__'):
-                updated_profiles[name] = asdict(existing_profile)
-            else:
-                updated_profiles[name] = existing_profile
-        
-        # Add the new profile
-        if hasattr(profile_data, '__dataclass_fields__'):
-            updated_profiles[profile_name] = asdict(profile_data)
-        else:
-            updated_profiles[profile_name] = profile_data
-        
-        logger.debug(f"Updated profiles dict will have: {list(updated_profiles.keys())}")
-        
-        # Use replace_config_section to replace the entire exiftool_profiles dict
-        config_mgr.replace_config_section('exiftool', 'exiftool_profiles', updated_profiles)
-        
-        logger.info(f"Successfully saved exiftool profile: {profile_name}")
-        
-        # Verify the save worked
-        verification_config = config_mgr.get_config('exiftool', ExiftoolConfig)
-        if profile_name in verification_config.exiftool_profiles:
-            logger.debug(f"Verification: Profile '{profile_name}' confirmed saved")
-            return True
-        else:
-            logger.error(f"Verification failed: Profile '{profile_name}' not found after save")
-            return False
-        
-    except Exception as e:
-        logger.error(f"Error saving exiftool profile '{profile_name}': {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return False
+def save_exiftool_profile(profile_name: str, profile_data) -> bool:
+    """Save an ExifTool profile."""
+    return save_profile('exiftool', profile_name, profile_data)
 
 
 def delete_exiftool_profile(profile_name: str) -> bool:
+    """Delete an ExifTool profile."""
+    return delete_profile('exiftool', profile_name)
+
+
+def apply_mediainfo_profile(profile_data, profile_name: Optional[str] = None) -> bool:
+    """Apply a MediaInfo profile to spex.mediainfo_values.
+
+    ConfigManager compatibility note: SpexConfig.mediainfo_values is typed as
+    Dict[str, Union[...]], and ConfigManager._handle_dict does not auto-
+    deserialize Union values — so the section is written as plain dicts.
     """
-    Delete an exiftool profile from the configuration.
-    
-    Args:
-        profile_name (str): Name of the profile to delete
-        
-    Returns:
-        bool: True if successful, False otherwise
-    """
-    from AV_Spex.utils.config_setup import ExiftoolConfig
-    from dataclasses import asdict
-
-    if is_protected_profile('exiftool', profile_name):
-        logger.warning(f"'{profile_name}' is a built-in profile and cannot be deleted")
-        return False
-
-    try:
-        exiftool_config = config_mgr.get_config('exiftool', ExiftoolConfig)
-
-        if profile_name not in exiftool_config.exiftool_profiles:
-            logger.warning(f"Profile '{profile_name}' not found, cannot delete")
-            return False
-        
-        # Create updated profiles dict without the deleted profile
-        updated_profiles = {}
-        for k, v in exiftool_config.exiftool_profiles.items():
-            if k != profile_name:
-                if hasattr(v, '__dataclass_fields__'):
-                    updated_profiles[k] = asdict(v)
-                else:
-                    updated_profiles[k] = v
-        
-        # Use replace_config_section to replace the entire exiftool_profiles dict
-        config_mgr.replace_config_section('exiftool', 'exiftool_profiles', updated_profiles)
-        
-        logger.info(f"Deleted exiftool profile: {profile_name}")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error deleting exiftool profile '{profile_name}': {str(e)}")
-        return False
-    
-def apply_mediainfo_profile(profile_data, profile_name: Optional[str] = None):
-    """
-    Apply a MediaInfo profile to the current spex configuration.
-    
-    Replaces the existing mediainfo_values section in spex config.
-    
-    IMPORTANT - ConfigManager compatibility note:
-        SpexConfig.mediainfo_values is typed as Dict[str, Union[...]].
-        ConfigManager._handle_dict does NOT auto-deserialize Union values,
-        so mediainfo_values entries are plain dicts (not dataclass instances).
-        Therefore, this function must write plain dicts via asdict().
-    
-    Args:
-        profile_data: MediainfoProfile dataclass instance or dict with
-                     nested 'general', 'video', 'audio' sections
-        profile_name: When given, recorded as the domain's active profile
-    """
-    from dataclasses import asdict
-    
-    logger.debug(f"==== APPLYING MEDIAINFO PROFILE ====")
-
-    # Ensure spex config is loaded into cache
-    config_mgr.get_config('spex', SpexConfig)
-    
-    # Convert profile data to dictionary if it's a dataclass
-    if hasattr(profile_data, '__dataclass_fields__'):
-        profile_dict = asdict(profile_data)
-        logger.debug("Converting MediainfoProfile dataclass to dict")
-    else:
-        profile_dict = profile_data
-        logger.debug("Using profile data as dict directly")
-    
-    # Build the mediainfo_values structure matching SpexConfig format.
-    # The spex config uses keys 'expected_general', 'expected_video',
-    # 'expected_audio' — the profile uses 'general', 'video', 'audio'.
-    mediainfo_values = {
-        'expected_general': profile_dict.get('general', {}),
-        'expected_video': profile_dict.get('video', {}),
-        'expected_audio': profile_dict.get('audio', {})
-    }
-    
-    logger.debug(f"General fields: {len(mediainfo_values['expected_general'])}")
-    logger.debug(f"Video fields: {len(mediainfo_values['expected_video'])}")
-    logger.debug(f"Audio fields: {len(mediainfo_values['expected_audio'])}")
-    
-    # Replace the entire mediainfo_values section
-    config_mgr.replace_config_section('spex', 'mediainfo_values', mediainfo_values)
-    
-    # Force a refresh to ensure changes are persisted
-    config_mgr.refresh_configs()
-    
-    # Verify changes persisted
-    final_config = config_mgr.get_config('spex', SpexConfig)
-    logger.debug("Final verification after refresh: MediaInfo values updated")
-    
-    # Verify we can read the sections back
-    mi_values = final_config.mediainfo_values
-    if isinstance(mi_values, dict) and 'expected_general' in mi_values:
-        logger.debug(f"Verified expected_general has {len(mi_values['expected_general'])} fields")
-
-    if profile_name:
-        set_active_profile('mediainfo', profile_name)
-
-    return True
+    return apply_profile_values('mediainfo', profile_data, profile_name)
 
 
 def get_mediainfo_profile(profile_name: str):
-    """
-    Get a MediaInfo profile by name from the configuration.
-    
-    Args:
-        profile_name (str): The name of the profile to retrieve
-        
-    Returns:
-        MediainfoProfile or None: The requested profile or None if not found
-    """
-    from AV_Spex.utils.config_setup import MediainfoConfig
-    
-    try:
-        config_mgr_instance = ConfigManager()
-        mediainfo_config = config_mgr_instance.get_config('mediainfo', MediainfoConfig)
-        
-        if profile_name in mediainfo_config.mediainfo_profiles:
-            return mediainfo_config.mediainfo_profiles[profile_name]
-    except Exception as e:
-        logger.warning(f"Could not retrieve mediainfo profile '{profile_name}': {str(e)}")
-    
-    return None
+    """Get a MediaInfo profile by name, or None if not found."""
+    return get_profile('mediainfo', profile_name)
 
 
 def get_available_mediainfo_profiles() -> List[str]:
-    """
-    Get a list of all available MediaInfo profile names.
-    
-    Returns:
-        List[str]: List of profile names
-    """
-    from AV_Spex.utils.config_setup import MediainfoConfig
-    
-    try:
-        config_mgr_instance = ConfigManager()
-        mediainfo_config = config_mgr_instance.get_config('mediainfo', MediainfoConfig)
-        
-        if hasattr(mediainfo_config, 'mediainfo_profiles'):
-            return list(mediainfo_config.mediainfo_profiles.keys())
-    except Exception as e:
-        logger.warning(f"Could not retrieve mediainfo profiles: {str(e)}")
-    
-    return []
+    """List available MediaInfo profile names."""
+    return get_available_profiles('mediainfo')
 
 
 def save_mediainfo_profile(profile_name: str, profile_data) -> bool:
-    """
-    Save a MediaInfo profile to the configuration.
-    
-    Follows the same pattern as save_exiftool_profile():
-    - Get or create MediainfoConfig
-    - Build updated profiles dict (existing + new)
-    - Replace entire mediainfo_profiles section via ConfigManager
-    - Verify save
-    
-    Args:
-        profile_name (str): Name for the profile
-        profile_data: MediainfoProfile dataclass or dict with profile data
-        
-    Returns:
-        bool: True if successful, False otherwise
-    """
-    from AV_Spex.utils.config_setup import MediainfoConfig, MediainfoProfile
-    from dataclasses import asdict
-    
-    logger.debug(f"=== SAVING MEDIAINFO PROFILE ===")
-    logger.debug(f"Profile name: {profile_name}")
-
-    if is_protected_profile('mediainfo', profile_name):
-        logger.warning(f"'{profile_name}' is a built-in profile and cannot be overwritten")
-        return False
-
-    try:
-        # Get current mediainfo config or create new one
-        try:
-            mediainfo_config = config_mgr.get_config('mediainfo', MediainfoConfig)
-            logger.debug(f"Current profiles before save: {list(mediainfo_config.mediainfo_profiles.keys())}")
-        except:
-            # Config doesn't exist yet, create it
-            mediainfo_config = MediainfoConfig()
-            # Place in cache so replace_config_section can operate on it
-            config_mgr._configs['mediainfo'] = mediainfo_config
-            logger.debug("Creating new mediainfo config")
-        
-        # Ensure mediainfo_profiles dict exists
-        if not hasattr(mediainfo_config, 'mediainfo_profiles'):
-            mediainfo_config.mediainfo_profiles = {}
-        
-        # Create updated profiles dict
-        updated_profiles = {}
-        
-        # Add existing profiles
-        for name, existing_profile in mediainfo_config.mediainfo_profiles.items():
-            if hasattr(existing_profile, '__dataclass_fields__'):
-                updated_profiles[name] = asdict(existing_profile)
-            else:
-                updated_profiles[name] = existing_profile
-        
-        # Add the new profile
-        if hasattr(profile_data, '__dataclass_fields__'):
-            updated_profiles[profile_name] = asdict(profile_data)
-        else:
-            updated_profiles[profile_name] = profile_data
-        
-        logger.debug(f"Updated profiles dict will have: {list(updated_profiles.keys())}")
-        
-        # Use replace_config_section to replace the entire mediainfo_profiles dict
-        config_mgr.replace_config_section('mediainfo', 'mediainfo_profiles', updated_profiles)
-        
-        logger.info(f"Successfully saved mediainfo profile: {profile_name}")
-        
-        # Verify the save worked
-        verification_config = config_mgr.get_config('mediainfo', MediainfoConfig)
-        if profile_name in verification_config.mediainfo_profiles:
-            logger.debug(f"Verification: Profile '{profile_name}' confirmed saved")
-            return True
-        else:
-            logger.error(f"Verification failed: Profile '{profile_name}' not found after save")
-            return False
-        
-    except Exception as e:
-        logger.error(f"Error saving mediainfo profile '{profile_name}': {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return False
+    """Save a MediaInfo profile."""
+    return save_profile('mediainfo', profile_name, profile_data)
 
 
 def delete_mediainfo_profile(profile_name: str) -> bool:
+    """Delete a MediaInfo profile."""
+    return delete_profile('mediainfo', profile_name)
+
+
+def apply_ffprobe_profile(profile_data, profile_name: Optional[str] = None) -> bool:
+    """Apply an FFprobe profile to spex.ffmpeg_values.
+
+    ConfigManager compatibility note: SpexConfig.ffmpeg_values is typed as
+    Dict[str, Union[...]], and ConfigManager._handle_dict does not auto-
+    deserialize Union values — so the section is written as plain dicts.
+
+    The 'tags' key inside the sections is owned by the signal-flow system, not
+    by FFprobe profiles; see _ffprobe_matches, which skips it when comparing.
     """
-    Delete a MediaInfo profile from the configuration.
-    
-    Args:
-        profile_name (str): Name of the profile to delete
-        
-    Returns:
-        bool: True if successful, False otherwise
-    """
-    from AV_Spex.utils.config_setup import MediainfoConfig
-    from dataclasses import asdict
-
-    if is_protected_profile('mediainfo', profile_name):
-        logger.warning(f"'{profile_name}' is a built-in profile and cannot be deleted")
-        return False
-
-    try:
-        mediainfo_config = config_mgr.get_config('mediainfo', MediainfoConfig)
-
-        if profile_name not in mediainfo_config.mediainfo_profiles:
-            logger.warning(f"Profile '{profile_name}' not found, cannot delete")
-            return False
-        
-        # Create updated profiles dict without the deleted profile
-        updated_profiles = {}
-        for k, v in mediainfo_config.mediainfo_profiles.items():
-            if k != profile_name:
-                if hasattr(v, '__dataclass_fields__'):
-                    updated_profiles[k] = asdict(v)
-                else:
-                    updated_profiles[k] = v
-        
-        # Use replace_config_section to replace the entire mediainfo_profiles dict
-        config_mgr.replace_config_section('mediainfo', 'mediainfo_profiles', updated_profiles)
-        
-        logger.info(f"Deleted mediainfo profile: {profile_name}")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error deleting mediainfo profile '{profile_name}': {str(e)}")
-        return False
-
-
-def apply_ffprobe_profile(profile_data, profile_name: Optional[str] = None):
-    """
-    Apply an FFprobe profile to the current spex configuration.
-    
-    Replaces the existing ffmpeg_values section in spex config.
-    
-    IMPORTANT - ConfigManager compatibility note:
-        SpexConfig.ffmpeg_values is typed as Dict[str, Union[...]].
-        ConfigManager._handle_dict does NOT auto-deserialize Union values,
-        so ffmpeg_values entries are plain dicts (not dataclass instances).
-        Therefore, this function must write plain dicts via asdict().
-    
-    Args:
-        profile_data: FfprobeProfile dataclass instance or dict with
-                     nested 'video_stream', 'audio_stream', 'format' sections
-        profile_name: When given, recorded as the domain's active profile
-    """
-    from dataclasses import asdict
-    
-    logger.debug(f"==== APPLYING FFPROBE PROFILE ====")
-
-    # Ensure spex config is loaded into cache
-    config_mgr.get_config('spex', SpexConfig)
-    
-    # Convert profile data to dictionary if it's a dataclass
-    if hasattr(profile_data, '__dataclass_fields__'):
-        profile_dict = asdict(profile_data)
-        logger.debug("Converting FfprobeProfile dataclass to dict")
-    else:
-        profile_dict = profile_data
-        logger.debug("Using profile data as dict directly")
-    
-    # Build the ffmpeg_values structure matching SpexConfig format.
-    ffmpeg_values = {
-        'video_stream': profile_dict.get('video_stream', {}),
-        'audio_stream': profile_dict.get('audio_stream', {}),
-        'format': profile_dict.get('format', {})
-    }
-    
-    logger.debug(f"Video stream fields: {len(ffmpeg_values['video_stream'])}")
-    logger.debug(f"Audio stream fields: {len(ffmpeg_values['audio_stream'])}")
-    logger.debug(f"Format fields: {len(ffmpeg_values['format'])}")
-    
-    # Replace the entire ffmpeg_values section
-    config_mgr.replace_config_section('spex', 'ffmpeg_values', ffmpeg_values)
-    
-    # Force a refresh to ensure changes are persisted
-    config_mgr.refresh_configs()
-    
-    # Verify changes persisted
-    final_config = config_mgr.get_config('spex', SpexConfig)
-    logger.debug("Final verification after refresh: FFprobe values updated")
-    
-    # Verify we can read the sections back
-    ff_values = final_config.ffmpeg_values
-    if isinstance(ff_values, dict) and 'video_stream' in ff_values:
-        logger.debug(f"Verified video_stream has {len(ff_values['video_stream'])} fields")
-
-    if profile_name:
-        set_active_profile('ffprobe', profile_name)
-
-    return True
+    return apply_profile_values('ffprobe', profile_data, profile_name)
 
 
 def get_ffprobe_profile(profile_name: str):
-    """
-    Get an FFprobe profile by name from the configuration.
-    
-    Args:
-        profile_name (str): The name of the profile to retrieve
-        
-    Returns:
-        FfprobeProfile or None: The requested profile or None if not found
-    """
-    try:
-        config_mgr_instance = ConfigManager()
-        ffprobe_config = config_mgr_instance.get_config('ffprobe', FfprobeConfig)
-        
-        if profile_name in ffprobe_config.ffprobe_profiles:
-            return ffprobe_config.ffprobe_profiles[profile_name]
-    except Exception as e:
-        logger.warning(f"Could not retrieve ffprobe profile '{profile_name}': {str(e)}")
-    
-    return None
+    """Get an FFprobe profile by name, or None if not found."""
+    return get_profile('ffprobe', profile_name)
 
 
 def get_available_ffprobe_profiles() -> List[str]:
-    """
-    Get a list of all available FFprobe profile names.
-    
-    Returns:
-        List[str]: List of profile names
-    """
-    try:
-        config_mgr_instance = ConfigManager()
-        ffprobe_config = config_mgr_instance.get_config('ffprobe', FfprobeConfig)
-        
-        if hasattr(ffprobe_config, 'ffprobe_profiles'):
-            return list(ffprobe_config.ffprobe_profiles.keys())
-    except Exception as e:
-        logger.warning(f"Could not retrieve ffprobe profiles: {str(e)}")
-    
-    return []
+    """List available FFprobe profile names."""
+    return get_available_profiles('ffprobe')
 
 
 def save_ffprobe_profile(profile_name: str, profile_data) -> bool:
-    """
-    Save an FFprobe profile to the configuration.
-    
-    Follows the same pattern as save_mediainfo_profile().
-    
-    Args:
-        profile_name (str): Name for the profile
-        profile_data: FfprobeProfile dataclass or dict with profile data
-        
-    Returns:
-        bool: True if successful, False otherwise
-    """
-    from dataclasses import asdict
-    
-    logger.debug(f"=== SAVING FFPROBE PROFILE ===")
-    logger.debug(f"Profile name: {profile_name}")
-
-    if is_protected_profile('ffprobe', profile_name):
-        logger.warning(f"'{profile_name}' is a built-in profile and cannot be overwritten")
-        return False
-
-    try:
-        # Get current ffprobe config or create new one
-        try:
-            ffprobe_config = config_mgr.get_config('ffprobe', FfprobeConfig)
-            logger.debug(f"Current profiles before save: {list(ffprobe_config.ffprobe_profiles.keys())}")
-        except:
-            # Config doesn't exist yet, create it
-            ffprobe_config = FfprobeConfig()
-            # Place in cache so replace_config_section can operate on it
-            config_mgr._configs['ffprobe'] = ffprobe_config
-            logger.debug("Creating new ffprobe config")
-        
-        # Ensure ffprobe_profiles dict exists
-        if not hasattr(ffprobe_config, 'ffprobe_profiles'):
-            ffprobe_config.ffprobe_profiles = {}
-        
-        # Create updated profiles dict
-        updated_profiles = {}
-        
-        # Add existing profiles
-        for name, existing_profile in ffprobe_config.ffprobe_profiles.items():
-            if hasattr(existing_profile, '__dataclass_fields__'):
-                updated_profiles[name] = asdict(existing_profile)
-            else:
-                updated_profiles[name] = existing_profile
-        
-        # Add the new profile
-        if hasattr(profile_data, '__dataclass_fields__'):
-            updated_profiles[profile_name] = asdict(profile_data)
-        else:
-            updated_profiles[profile_name] = profile_data
-        
-        logger.debug(f"Updated profiles dict will have: {list(updated_profiles.keys())}")
-        
-        # Use replace_config_section to replace the entire ffprobe_profiles dict
-        config_mgr.replace_config_section('ffprobe', 'ffprobe_profiles', updated_profiles)
-        
-        logger.info(f"Successfully saved ffprobe profile: {profile_name}")
-        
-        # Verify the save worked
-        verification_config = config_mgr.get_config('ffprobe', FfprobeConfig)
-        if profile_name in verification_config.ffprobe_profiles:
-            logger.debug(f"Verification: Profile '{profile_name}' confirmed saved")
-            return True
-        else:
-            logger.error(f"Verification failed: Profile '{profile_name}' not found after save")
-            return False
-        
-    except Exception as e:
-        logger.error(f"Error saving ffprobe profile '{profile_name}': {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return False
+    """Save an FFprobe profile."""
+    return save_profile('ffprobe', profile_name, profile_data)
 
 
 def delete_ffprobe_profile(profile_name: str) -> bool:
-    """
-    Delete an FFprobe profile from the configuration.
-    
-    Args:
-        profile_name (str): Name of the profile to delete
-        
-    Returns:
-        bool: True if successful, False otherwise
-    """
-    from dataclasses import asdict
-
-    if is_protected_profile('ffprobe', profile_name):
-        logger.warning(f"'{profile_name}' is a built-in profile and cannot be deleted")
-        return False
-
-    try:
-        ffprobe_config = config_mgr.get_config('ffprobe', FfprobeConfig)
-
-        if profile_name not in ffprobe_config.ffprobe_profiles:
-            logger.warning(f"Profile '{profile_name}' not found, cannot delete")
-            return False
-        
-        # Create updated profiles dict without the deleted profile
-        updated_profiles = {}
-        for k, v in ffprobe_config.ffprobe_profiles.items():
-            if k != profile_name:
-                if hasattr(v, '__dataclass_fields__'):
-                    updated_profiles[k] = asdict(v)
-                else:
-                    updated_profiles[k] = v
-        
-        # Use replace_config_section to replace the entire ffprobe_profiles dict
-        config_mgr.replace_config_section('ffprobe', 'ffprobe_profiles', updated_profiles)
-        
-        logger.info(f"Deleted ffprobe profile: {profile_name}")
-        return True
-
-    except Exception as e:
-        logger.error(f"Error deleting ffprobe profile '{profile_name}': {str(e)}")
-        return False
+    """Delete an FFprobe profile."""
+    return delete_profile('ffprobe', profile_name)
 
 
 def save_filename_profile(profile_name: str, profile_data) -> bool:
