@@ -35,6 +35,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from AV_Spex.utils import generate_report as gr
+from AV_Spex.utils import ffprobe_probe
 
 
 # ===========================================================================
@@ -762,31 +763,42 @@ def test_get_video_duration_subprocess_error_returns_none(monkeypatch):
     assert gr._get_video_duration("/v.mkv") is None
 
 
+def _audio_json(*channel_counts):
+    import json
+    return json.dumps({"streams": [{"index": i + 1, "channels": c}
+                                   for i, c in enumerate(channel_counts)]})
+
+
+def _fake_audio_probe(monkeypatch, *channel_counts):
+    """Probing moved to utils.ffprobe_probe, so that is what these patch."""
+    fake = MagicMock(returncode=0, stdout=_audio_json(*channel_counts), stderr="")
+    monkeypatch.setattr(ffprobe_probe.subprocess, "run", lambda *a, **kw: fake)
+
+
 def test_get_audio_channel_count_returns_int(monkeypatch):
-    fake = MagicMock(returncode=0, stdout="2\n")
-    monkeypatch.setattr(gr.subprocess, "run", lambda *a, **kw: fake)
+    _fake_audio_probe(monkeypatch, 2)
     assert gr._get_audio_channel_count("/v.mkv") == 2
 
 
 def test_get_audio_channel_count_failure_returns_none(monkeypatch):
-    monkeypatch.setattr(gr.subprocess, "run", MagicMock(side_effect=subprocess.CalledProcessError(1, "ffprobe")))
+    monkeypatch.setattr(ffprobe_probe.subprocess, "run",
+                        MagicMock(side_effect=OSError("no ffprobe")))
     assert gr._get_audio_channel_count("/v.mkv") is None
 
 
 def test_get_audio_stream_channels_single_stereo(monkeypatch):
-    fake = MagicMock(returncode=0, stdout="2\n")
-    monkeypatch.setattr(gr.subprocess, "run", lambda *a, **kw: fake)
+    _fake_audio_probe(monkeypatch, 2)
     assert gr._get_audio_stream_channels("/v.mkv") == [2]
 
 
 def test_get_audio_stream_channels_two_mono_streams(monkeypatch):
-    fake = MagicMock(returncode=0, stdout="1\n1\n")
-    monkeypatch.setattr(gr.subprocess, "run", lambda *a, **kw: fake)
+    _fake_audio_probe(monkeypatch, 1, 1)
     assert gr._get_audio_stream_channels("/v.mxf") == [1, 1]
 
 
 def test_get_audio_stream_channels_failure_returns_none(monkeypatch):
-    monkeypatch.setattr(gr.subprocess, "run", MagicMock(side_effect=subprocess.CalledProcessError(1, "ffprobe")))
+    monkeypatch.setattr(ffprobe_probe.subprocess, "run",
+                        MagicMock(side_effect=OSError("no ffprobe")))
     assert gr._get_audio_stream_channels("/v.mkv") is None
 
 

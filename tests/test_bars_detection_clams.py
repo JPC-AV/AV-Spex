@@ -19,6 +19,7 @@ import numpy as np
 import pytest
 
 from AV_Spex.checks import bars_detection_clams as bd
+from AV_Spex.utils import ffprobe_probe
 
 
 # ---------------------------------------------------------------------------
@@ -86,12 +87,11 @@ def test_resolve_reference_path_missing_file_raises(monkeypatch):
 def _ffprobe_response(streams):
     """Wrap a `streams=[{...}]` dict as a JSON-encoded subprocess result."""
     import json
-    proc = MagicMock(stdout=json.dumps({"streams": streams}), stderr="")
-    return proc
+    return MagicMock(returncode=0, stdout=json.dumps({"streams": streams}), stderr="")
 
 
 def test_get_video_fps_fraction_r_frame_rate(monkeypatch):
-    monkeypatch.setattr(bd.subprocess, "run", lambda *a, **kw: _ffprobe_response([
+    monkeypatch.setattr(ffprobe_probe.subprocess, "run", lambda *a, **kw: _ffprobe_response([
         {"r_frame_rate": "30000/1001", "avg_frame_rate": "30000/1001"}
     ]))
     fps = bd.get_video_fps("/v.mkv")
@@ -100,7 +100,7 @@ def test_get_video_fps_fraction_r_frame_rate(monkeypatch):
 
 def test_get_video_fps_integer_string(monkeypatch):
     """Plain numeric string also accepted as fps value."""
-    monkeypatch.setattr(bd.subprocess, "run", lambda *a, **kw: _ffprobe_response([
+    monkeypatch.setattr(ffprobe_probe.subprocess, "run", lambda *a, **kw: _ffprobe_response([
         # No slash — function treats this as a plain float
         {"r_frame_rate": "25", "avg_frame_rate": ""}
     ]))
@@ -110,7 +110,7 @@ def test_get_video_fps_integer_string(monkeypatch):
 
 def test_get_video_fps_avg_frame_rate_fallback(monkeypatch):
     """If r_frame_rate is empty/invalid, avg_frame_rate is consulted."""
-    monkeypatch.setattr(bd.subprocess, "run", lambda *a, **kw: _ffprobe_response([
+    monkeypatch.setattr(ffprobe_probe.subprocess, "run", lambda *a, **kw: _ffprobe_response([
         {"r_frame_rate": "", "avg_frame_rate": "60/1"}
     ]))
     fps = bd.get_video_fps("/v.mkv")
@@ -118,20 +118,20 @@ def test_get_video_fps_avg_frame_rate_fallback(monkeypatch):
 
 
 def test_get_video_fps_zero_denominator_returns_none(monkeypatch):
-    monkeypatch.setattr(bd.subprocess, "run", lambda *a, **kw: _ffprobe_response([
+    monkeypatch.setattr(ffprobe_probe.subprocess, "run", lambda *a, **kw: _ffprobe_response([
         {"r_frame_rate": "30/0", "avg_frame_rate": "0/0"}
     ]))
     assert bd.get_video_fps("/v.mkv") is None
 
 
 def test_get_video_fps_malformed_json_returns_none(monkeypatch):
-    proc = MagicMock(stdout="not json", stderr="")
-    monkeypatch.setattr(bd.subprocess, "run", lambda *a, **kw: proc)
+    proc = MagicMock(returncode=0, stdout="not json", stderr="")
+    monkeypatch.setattr(ffprobe_probe.subprocess, "run", lambda *a, **kw: proc)
     assert bd.get_video_fps("/v.mkv") is None
 
 
 def test_get_video_fps_no_streams_returns_none(monkeypatch):
-    monkeypatch.setattr(bd.subprocess, "run", lambda *a, **kw: _ffprobe_response([]))
+    monkeypatch.setattr(ffprobe_probe.subprocess, "run", lambda *a, **kw: _ffprobe_response([]))
     assert bd.get_video_fps("/v.mkv") is None
 
 

@@ -29,6 +29,7 @@ from AV_Spex.checks.audio_stream_stats import (
     _filter_line,
 )
 from AV_Spex.checks.qct_parse import analyzeAudio, _detect_audio_pkt
+from AV_Spex.utils import ffprobe_probe
 
 
 # ---- _filter_line ---------------------------------------------------------
@@ -100,20 +101,30 @@ def _mock_run(stdout, returncode=0):
     return result
 
 
+def _streams_json(*pairs):
+    import json
+    return json.dumps({"streams": [{"index": i, "channels": c} for i, c in pairs]})
+
+
+# Probing moved to utils.ffprobe_probe, so that is what these patch.
+
 def test_probe_audio_streams_parses_index_and_channels():
-    with patch.object(ass.subprocess, 'run', return_value=_mock_run("1,1\n2,1\n")):
+    with patch.object(ffprobe_probe.subprocess, 'run',
+                      return_value=_mock_run(_streams_json((1, 1), (2, 1)))):
         assert probe_audio_streams("f.mkv") == [(1, 1), (2, 1)]
 
 
 def test_probe_audio_streams_stereo_single_stream():
-    with patch.object(ass.subprocess, 'run', return_value=_mock_run("1,2\n")):
+    with patch.object(ffprobe_probe.subprocess, 'run',
+                      return_value=_mock_run(_streams_json((1, 2)))):
         assert probe_audio_streams("f.mkv") == [(1, 2)]
 
 
 def test_probe_audio_streams_failure_returns_empty():
-    with patch.object(ass.subprocess, 'run', return_value=_mock_run("", returncode=1)):
+    with patch.object(ffprobe_probe.subprocess, 'run',
+                      return_value=_mock_run("", returncode=1)):
         assert probe_audio_streams("f.mkv") == []
-    with patch.object(ass.subprocess, 'run', side_effect=OSError("no ffprobe")):
+    with patch.object(ffprobe_probe.subprocess, 'run', side_effect=OSError("no ffprobe")):
         assert probe_audio_streams("f.mkv") == []
 
 

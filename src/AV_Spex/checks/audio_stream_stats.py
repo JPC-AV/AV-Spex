@@ -22,6 +22,7 @@ import os
 import subprocess
 
 from AV_Spex.utils.log_setup import logger
+from AV_Spex.utils import ffprobe_probe
 
 AUDIO_STATS_SUFFIX = ".audio_stats.xml.gz"
 
@@ -79,29 +80,15 @@ def _escape_movie_path(path):
     return path.replace("\\", "\\\\").replace("'", r"\'").replace(":", r"\:")
 
 
+
 def probe_audio_streams(video_path):
-    """Return [(absolute_stream_index, channel_count), ...] for every audio
-    stream, in stream order. Empty list if it can't be determined."""
-    command = [
-        'ffprobe',
-        '-v', 'error',
-        '-select_streams', 'a',
-        '-show_entries', 'stream=index,channels',
-        '-of', 'csv=p=0',
-        video_path,
-    ]
-    try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=10)
-        if result.returncode != 0:
-            return []
-        streams = []
-        for line in result.stdout.splitlines():
-            parts = [p for p in line.strip().split(',') if p]
-            if len(parts) >= 2:
-                streams.append((int(parts[0]), int(parts[1])))
-        return streams
-    except (ValueError, OSError, subprocess.SubprocessError):
-        return []
+    """[(absolute_stream_index, channel_count), ...] in stream order.
+
+    Empty list if it can't be determined, matching the callers that treat
+    "no audio streams" and "probe failed" the same way here.
+    """
+    streams = ffprobe_probe.audio_streams(video_path)
+    return [(s.index, s.channels) for s in (streams or [])]
 
 
 def build_lavfi_graph(video_path, stream_indexes):
