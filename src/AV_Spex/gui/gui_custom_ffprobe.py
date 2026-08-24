@@ -16,10 +16,12 @@ from AV_Spex.utils.config_setup import (
     FFmpegAudioStream, FFmpegFormat
 )
 from AV_Spex.gui.gui_theme_manager import ThemeManager, ThemeableMixin
+from AV_Spex.gui import gui_custom_profile_common as profile_common
 from AV_Spex.utils import ffprobe_import
 
 
-class CustomFfprobeDialog(QDialog, ThemeableMixin):
+class CustomFfprobeDialog(QDialog, ThemeableMixin,
+                          profile_common.SectionedProfileImportMixin):
     """
     Dialog for creating and editing custom FFprobe profiles.
     
@@ -94,34 +96,9 @@ class CustomFfprobeDialog(QDialog, ThemeableMixin):
         ],
     }
     
-    # Cached path to the dropdown arrow SVG
-    _arrow_svg_path = None
-    
     @classmethod
     def _get_arrow_svg_path(cls):
-        """
-        Return the file path to a blue chevron SVG for QComboBox arrows.
-        
-        The SVG is written to a temp file on first call and the path is
-        cached as a class variable so subsequent calls reuse the same file.
-        """
-        if cls._arrow_svg_path and os.path.exists(cls._arrow_svg_path):
-            return cls._arrow_svg_path
-        svg = (
-            '<svg xmlns="http://www.w3.org/2000/svg" '
-            'width="12" height="12" viewBox="0 0 12 12">'
-            '<path d="M2.5 4 L6 7.5 L9.5 4" stroke="#ffffff" '
-            'stroke-width="1.75" fill="none" '
-            'stroke-linecap="round" stroke-linejoin="round"/>'
-            '</svg>'
-        )
-        f = tempfile.NamedTemporaryFile(
-            suffix='.svg', delete=False, mode='w', prefix='avspex_arrow_'
-        )
-        f.write(svg)
-        f.close()
-        cls._arrow_svg_path = f.name
-        return cls._arrow_svg_path
+        return profile_common.dropdown_arrow_svg_path()
     
     def __init__(self, parent=None, edit_mode=False, profile_name=None):
         super().__init__(parent)
@@ -281,68 +258,13 @@ class CustomFfprobeDialog(QDialog, ThemeableMixin):
     # ── Tab creation ───────────────────────────────────────────────────
     
     def _get_field_colors(self):
-        """Return a dict of palette colors used for field widget styling."""
-        palette = QApplication.palette()
-        return {
-            'bg':        palette.color(QPalette.ColorRole.Base).name(),
-            'text':      palette.color(QPalette.ColorRole.Text).name(),
-            'border':    palette.color(QPalette.ColorRole.Mid).name(),
-            'highlight': palette.color(QPalette.ColorRole.Highlight).name(),
-            'hi_text':   palette.color(QPalette.ColorRole.HighlightedText).name(),
-        }
+        return profile_common.field_colors()
 
     def _field_lineedit_style(self, colors=None):
-        """Stylesheet for standalone QLineEdit field inputs."""
-        c = colors or self._get_field_colors()
-        return (
-            f"QLineEdit {{"
-            f" background-color: {c['bg']};"
-            f" color: {c['text']};"
-            f" border: 1px solid {c['border']};"
-            f" border-radius: 3px;"
-            f" padding: 2px 4px;"
-            f"}}"
-        )
+        return profile_common.field_lineedit_style(colors)
 
     def _field_combobox_style(self, colors=None):
-        """
-        Stylesheet for editable QComboBox field inputs.
-        
-        Mirrors CustomMediainfoDialog._field_combobox_style().
-        """
-        c = colors or self._get_field_colors()
-        arrow_path = self._get_arrow_svg_path()
-        return (
-            f"QComboBox {{"
-            f" background-color: {c['bg']};"
-            f" color: {c['text']};"
-            f" border: 1px solid {c['border']};"
-            f" border-radius: 3px;"
-            f" padding: 2px 4px;"
-            f"}}"
-            f"QComboBox:hover {{"
-            f" border: 1px solid {c['highlight']};"
-            f"}}"
-            f"QComboBox::drop-down {{"
-            f" subcontrol-origin: padding;"
-            f" subcontrol-position: right;"
-            f" width: 18px;"
-            f" border-left: 1px solid {c['border']};"
-            f" border-top-right-radius: 3px;"
-            f" border-bottom-right-radius: 3px;"
-            f"}}"
-            f"QComboBox::down-arrow {{"
-            f" image: url({arrow_path});"
-            f" width: 12px;"
-            f" height: 12px;"
-            f"}}"
-            f"QComboBox QAbstractItemView {{"
-            f" background-color: {c['bg']};"
-            f" color: {c['text']};"
-            f" selection-background-color: {c['highlight']};"
-            f" selection-color: {c['hi_text']};"
-            f"}}"
-        )
+        return profile_common.field_combobox_style(colors)
 
     def _create_input_widget(self, field_name, value="", section_name=None):
         """
@@ -486,168 +408,29 @@ class CustomFfprobeDialog(QDialog, ThemeableMixin):
     
     # ── Import / Compare ───────────────────────────────────────────────
     
-    def import_from_file(self):
-        """Import FFprobe data from a JSON output file (.txt or .json)"""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select FFprobe Output File",
-            "",
-            "FFprobe Output Files (*.txt *.json);;Text Files (*.txt);;JSON Files (*.json);;All Files (*.*)"
-        )
-        
-        if file_path:
-            try:
-                profile = ffprobe_import.import_ffprobe_file_to_profile(file_path)
-                
-                if profile:
-                    self.load_profile_data(profile)
-                    
-                    import os
-                    base_name = os.path.splitext(os.path.basename(file_path))[0]
-                    if not self.edit_mode:
-                        self.profile_name_input.setText(f"Imported from {base_name}")
-                    
-                    QMessageBox.information(
-                        self, "Import Successful",
-                        f"Successfully imported FFprobe data from:\n{file_path}"
-                    )
-                else:
-                    QMessageBox.warning(
-                        self, "Import Failed",
-                        f"Could not import FFprobe data from:\n{file_path}\n\n"
-                        "Please check the file contains valid FFprobe JSON output\n"
-                        "(e.g., from: ffprobe -print_format json)."
-                    )
-                    
-            except Exception as e:
-                QMessageBox.critical(
-                    self, "Import Error",
-                    f"Error importing file:\n{str(e)}"
-                )
-    
-    def compare_with_file(self):
-        """Compare current profile with an FFprobe output file"""
-        profile = self.get_ffprobe_profile()
-        if not profile:
-            return
-            
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select FFprobe Output File to Compare",
-            "",
-            "FFprobe Output Files (*.txt *.json);;Text Files (*.txt);;JSON Files (*.json);;All Files (*.*)"
-        )
-        
-        if file_path:
-            try:
-                validation = ffprobe_import.validate_file_against_profile(file_path, profile)
-                self.show_comparison_results(file_path, validation)
-            except Exception as e:
-                QMessageBox.critical(
-                    self, "Comparison Error",
-                    f"Error comparing file:\n{str(e)}"
-                )
-    
-    def show_comparison_results(self, file_path, validation):
-        """Show comparison results in a dialog with per-section breakdown"""
-        result_dialog = QDialog(self)
-        result_dialog.setWindowTitle("Comparison Results")
-        result_dialog.setModal(True)
-        result_dialog.setMinimumSize(650, 550)
-        
-        layout = QVBoxLayout()
-        
-        # Summary
-        import os
-        summary_label = QLabel(
-            f"<b>File:</b> {os.path.basename(file_path)}<br>"
-            f"<b>Status:</b> {'✅ VALID' if validation.get('valid') else '❌ INVALID'}<br>"
-            f"<b>Matching Fields:</b> "
-            f"{validation.get('matching_fields', 0)}/{validation.get('total_fields', 0)}"
-        )
-        summary_label.setWordWrap(True)
-        layout.addWidget(summary_label)
-        
-        # Detailed results in text area
-        details_text = QTextEdit()
-        details_text.setReadOnly(True)
-        
-        details = []
-        
-        if 'error' in validation:
-            details.append(f"Error: {validation['error']}")
-        elif 'sections' in validation:
-            section_labels = {
-                'video_stream': 'VIDEO STREAM',
-                'audio_stream': 'AUDIO STREAM',
-                'format': 'FORMAT'
-            }
-            
-            for section_key, section_label in section_labels.items():
-                section = validation['sections'].get(section_key, {})
-                matches = section.get('matches', {})
-                mismatches = section.get('mismatches', {})
-                missing = section.get('missing', {})
-                
-                if matches or mismatches or missing:
-                    details.append(f"═══ {section_label} ═══")
-                    details.append("")
-                
-                if matches:
-                    details.append("  ✅ MATCHING FIELDS:")
-                    for field, values in matches.items():
-                        details.append(f"    {field}: {values['actual']}")
-                    details.append("")
-                
-                if mismatches:
-                    details.append("  ❌ MISMATCHED FIELDS:")
-                    for field, values in mismatches.items():
-                        details.append(f"    {field}:")
-                        details.append(f"      Expected: {values['expected']}")
-                        details.append(f"      Actual: {values['actual']}")
-                    details.append("")
-                
-                if missing:
-                    details.append("  ⚠️ MISSING FIELDS:")
-                    for field, values in missing.items():
-                        details.append(f"    {field}: Expected {values['expected']}")
-                    details.append("")
-        
-        details_text.setPlainText("\n".join(details))
-        layout.addWidget(details_text)
-        
-        # Import button if there are differences
-        has_differences = False
-        if 'sections' in validation:
-            for section in validation['sections'].values():
-                if section.get('mismatches') or section.get('missing'):
-                    has_differences = True
-                    break
-        
-        if has_differences:
-            import_btn = QPushButton("Import These Values")
-            import_btn.clicked.connect(
-                lambda: self.import_from_validation(file_path, result_dialog)
-            )
-            layout.addWidget(import_btn)
-        
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(result_dialog.accept)
-        layout.addWidget(close_btn)
-        
-        result_dialog.setLayout(layout)
-        result_dialog.exec()
-    
-    def import_from_validation(self, file_path, dialog):
-        """Import values from a file after comparison"""
-        try:
-            profile = ffprobe_import.import_ffprobe_file_to_profile(file_path)
-            if profile:
-                self.load_profile_data(profile)
-                dialog.accept()
-                QMessageBox.information(self, "Import Successful", "Values imported from file")
-        except Exception as e:
-            QMessageBox.critical(self, "Import Error", f"Error importing: {str(e)}")
+    # -- SectionedProfileImportMixin configuration --------------------------
+
+    IMPORT_LABEL = "FFprobe"
+    IMPORT_CAPTION = "Select FFprobe Output File"
+    COMPARE_CAPTION = "Select FFprobe Output File to Compare"
+    IMPORT_FILTER = ("FFprobe Output Files (*.txt *.json);;Text Files (*.txt);;"
+                     "JSON Files (*.json);;All Files (*.*)")
+    IMPORT_HINT = ("Please check the file contains valid FFprobe JSON output\n"
+                   "(e.g., from: ffprobe -print_format json).")
+    SECTION_LABELS = {
+        'video_stream': 'VIDEO STREAM',
+        'audio_stream': 'AUDIO STREAM',
+        'format': 'FORMAT',
+    }
+
+    def import_profile_from_path(self, file_path):
+        return ffprobe_import.import_ffprobe_file_to_profile(file_path)
+
+    def validate_path_against_profile(self, file_path, profile):
+        return ffprobe_import.validate_file_against_profile(file_path, profile)
+
+    def build_profile_from_form(self):
+        return self.get_ffprobe_profile()
     
     # ── Load / collect data ────────────────────────────────────────────
     

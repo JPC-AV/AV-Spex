@@ -24,6 +24,7 @@ misleading (see CLAUDE.md on disabled-state styling).
 """
 
 import dataclasses
+import json
 import typing
 
 import pytest
@@ -575,6 +576,137 @@ def test_import_populates_fields_and_suggests_a_name(exiftool_dialog, exiftool_j
     assert get_field(exiftool_dialog, "FileType") == ["MKV"]
     assert get_field(exiftool_dialog, "ImageWidth") == ["720"]
     assert exiftool_json.stem in exiftool_dialog.profile_name_input.text()
+
+
+@pytest.fixture
+def mediainfo_json(tmp_path):
+    path = tmp_path / "JPC_AV_00001_mediainfo_output.json"
+    path.write_text(json.dumps({"media": {"track": [
+        {"@type": "General", "FileExtension": "mkv", "Format": "Matroska",
+         "OverallBitRate_Mode": "VBR"},
+        {"@type": "Video", "Format": "FFV1", "Width": "720", "Height": "486"},
+        {"@type": "Audio", "Format": "FLAC", "Channels": "2"},
+    ]}}))
+    return path
+
+
+@pytest.fixture
+def ffprobe_json(tmp_path):
+    path = tmp_path / "JPC_AV_00001_ffprobe_output.json"
+    path.write_text(json.dumps({
+        "streams": [
+            {"codec_type": "video", "codec_name": "ffv1", "width": 720, "height": 486},
+            {"codec_type": "audio", "codec_name": "flac", "channels": 2},
+        ],
+        "format": {"format_name": "matroska,webm", "format_long_name": "Matroska / WebM"},
+    }))
+    return path
+
+
+def _pick_file(monkeypatch, path):
+    """Make the shared file picker return one path without showing a dialog."""
+    monkeypatch.setattr(
+        "AV_Spex.gui.gui_custom_profile_common.QFileDialog.getOpenFileName",
+        staticmethod(lambda *a, **k: (str(path), "")),
+    )
+
+
+def test_mediainfo_import_populates_every_section(mediainfo_dialog, mediainfo_json, monkeypatch):
+    _pick_file(monkeypatch, mediainfo_json)
+    mediainfo_dialog.import_from_file()
+
+    assert get_field(mediainfo_dialog, "Format", section="general") == ["Matroska"]
+    assert get_field(mediainfo_dialog, "Format", section="video") == ["FFV1"]
+    assert get_field(mediainfo_dialog, "Width", section="video") == ["720"]
+    assert get_field(mediainfo_dialog, "Format", section="audio") == ["FLAC"]
+    assert mediainfo_json.stem in mediainfo_dialog.profile_name_input.text()
+
+
+def test_ffprobe_import_populates_every_section(ffprobe_dialog, ffprobe_json, monkeypatch):
+    _pick_file(monkeypatch, ffprobe_json)
+    ffprobe_dialog.import_from_file()
+
+    assert get_field(ffprobe_dialog, "codec_name", section="video") == ["ffv1"]
+    assert get_field(ffprobe_dialog, "width", section="video") == ["720"]
+    assert get_field(ffprobe_dialog, "codec_name", section="audio") == ["flac"]
+    assert get_field(ffprobe_dialog, "format_name", section="format") != []
+
+
+def test_import_in_edit_mode_keeps_the_profile_name(qapp, silent_dialogs, mediainfo_json, monkeypatch):
+    """Importing into an existing profile must not rename it."""
+    dialog = CustomMediainfoDialog(edit_mode=True, profile_name="Locked Name")
+    try:
+        _pick_file(monkeypatch, mediainfo_json)
+        dialog.import_from_file()
+        assert dialog.profile_name_input.text() == "Locked Name"
+    finally:
+        dialog.close()
+
+
+def test_failed_import_warns_with_the_tool_specific_hint(mediainfo_dialog, tmp_path,
+                                                         silent_dialogs, monkeypatch):
+    junk = tmp_path / "not_mediainfo.json"
+    junk.write_text("{}")
+    _pick_file(monkeypatch, junk)
+    mediainfo_dialog.import_from_file()
+
+    warnings = [text for kind, _, text in silent_dialogs if kind == "warning"]
+    assert warnings and "MediaInfo" in warnings[-1]
+
+
+@pytest.mark.parametrize("fixture_name,json_fixture,setup", [
+    ("mediainfo_dialog", "mediainfo_json", _valid_mediainfo),
+    ("ffprobe_dialog", "ffprobe_json", _valid_ffprobe),
+])
+def test_compare_shows_a_per_section_breakdown(request, monkeypatch, silent_dialogs,
+                                               fixture_name, json_fixture, setup):
+    """The comparison dialog groups results under each section's label."""
+    dialog = request.getfixturevalue(fixture_name)
+    path = request.getfixturevalue(json_fixture)
+    setup(dialog)
+    _pick_file(monkeypatch, path)
+
+    shown = {}
+    original = dialog.show_comparison_results
+
+    def _capture(file_path, validation):
+        shown['validation'] = validation
+        shown['lines'] = dialog._comparison_detail_lines(validation)
+
+    monkeypatch.setattr(dialog, "show_comparison_results", _capture)
+    dialog.compare_with_file()
+
+    assert 'sections' in shown['validation']
+    rendered = "\n".join(shown['lines'])
+    for label in dialog.SECTION_LABELS.values():
+        assert label in rendered, f"missing section heading {label}"
+
+
+def test_compare_does_nothing_when_the_form_is_invalid(mediainfo_dialog, silent_dialogs,
+                                                       mediainfo_json, monkeypatch):
+    """An invalid form can't be compared, so no file picker should open."""
+    mediainfo_dialog.profile_name_input.setText("")
+    opened = []
+    monkeypatch.setattr(
+        "AV_Spex.gui.gui_custom_profile_common.QFileDialog.getOpenFileName",
+        staticmethod(lambda *a, **k: (opened.append(1), ("", ""))[1]),
+    )
+    mediainfo_dialog.compare_with_file()
+    assert opened == []
+
+
+def test_detail_lines_report_a_parse_error(mediainfo_dialog):
+    lines = mediainfo_dialog._comparison_detail_lines({'error': 'Failed to parse /x.json'})
+    assert lines == ['Error: Failed to parse /x.json']
+
+
+def test_differences_detected_only_when_present(mediainfo_dialog):
+    clean = {'sections': {'general': {'matches': {'a': 1}, 'mismatches': {}, 'missing': {}}}}
+    dirty = {'sections': {'general': {'matches': {}, 'mismatches': {'a': 1}, 'missing': {}}}}
+    absent = {'sections': {'general': {'matches': {}, 'mismatches': {}, 'missing': {'a': 1}}}}
+    assert mediainfo_dialog._validation_has_differences(clean) is False
+    assert mediainfo_dialog._validation_has_differences(dirty) is True
+    assert mediainfo_dialog._validation_has_differences(absent) is True
 
 
 def test_cancelling_the_file_picker_changes_nothing(exiftool_dialog, monkeypatch):
