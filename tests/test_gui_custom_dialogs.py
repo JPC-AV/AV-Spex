@@ -25,6 +25,7 @@ misleading (see CLAUDE.md on disabled-state styling).
 
 import dataclasses
 import json
+import re
 import typing
 
 import pytest
@@ -47,18 +48,18 @@ from AV_Spex.utils.config_setup import (
 # Helpers — the only place that knows the dialogs' internal widget layout
 # ---------------------------------------------------------------------------
 
+def _section_key(dialog, section=None):
+    """Resolve a test's section name to the dialog's section key."""
+    return section if section is not None else dialog.SECTIONS[0].key
+
+
 def _inputs_for(dialog, section=None):
     """Return the {field_name: [widget, ...]} map for a dialog section."""
-    if isinstance(dialog, CustomExiftoolDialog):
-        assert section is None, "the ExifTool profile is flat, not sectioned"
-        return dialog.field_inputs
-    return getattr(dialog, f"{section}_inputs")
+    return dialog.section_inputs[_section_key(dialog, section)]
 
 
 def _containers_for(dialog, section=None):
-    if isinstance(dialog, CustomExiftoolDialog):
-        return dialog.field_containers
-    return getattr(dialog, f"{section}_containers")
+    return dialog.section_containers[_section_key(dialog, section)]
 
 
 def _widget_text(widget):
@@ -75,16 +76,12 @@ def _set_widget_text(widget, value):
 def set_field(dialog, field_name, *values, section=None):
     """Set a field to one or more values, growing/shrinking rows as needed."""
     inputs = _inputs_for(dialog, section)
-    containers = _containers_for(dialog, section)
     widgets = inputs[field_name]
 
     while len(widgets) > len(values):
         widgets.pop().deleteLater()
     while len(widgets) < len(values):
-        if isinstance(dialog, CustomExiftoolDialog):
-            dialog.add_textbox_row(field_name, "", containers[field_name])
-        else:
-            dialog.add_textbox_row(field_name, inputs, containers, "")
+        dialog.add_textbox_row(field_name, _section_key(dialog, section))
 
     for widget, value in zip(inputs[field_name], values):
         _set_widget_text(widget, value)
@@ -157,7 +154,7 @@ def _valid_mediainfo(dialog):
 
 def _valid_ffprobe(dialog):
     dialog.profile_name_input.setText("Test Profile")
-    set_field(dialog, "codec_name", "ffv1", section="video")
+    set_field(dialog, "codec_name", "ffv1", section="video_stream")
     set_field(dialog, "format_name", "matroska webm", section="format")
 
 
@@ -209,8 +206,8 @@ def test_mediainfo_sections_are_subsets_of_their_dataclasses(mediainfo_dialog):
 
 
 def test_ffprobe_sections_are_subsets_of_their_dataclasses(ffprobe_dialog):
-    for section, cls in (("video", FFmpegVideoStream),
-                         ("audio", FFmpegAudioStream),
+    for section, cls in (("video_stream", FFmpegVideoStream),
+                         ("audio_stream", FFmpegAudioStream),
                          ("format", FFmpegFormat)):
         offered = field_names(ffprobe_dialog, section)
         assert offered <= set(cls.__dataclass_fields__), f"{section} offers unknown fields"
@@ -219,7 +216,7 @@ def test_ffprobe_sections_are_subsets_of_their_dataclasses(ffprobe_dialog):
 
 @pytest.mark.parametrize("fixture_name,section", [
     ("mediainfo_dialog", "video"),
-    ("ffprobe_dialog", "video"),
+    ("ffprobe_dialog", "video_stream"),
 ])
 def test_dropdown_fields_get_an_editable_combobox(request, fixture_name, section):
     """Known-value fields offer a dropdown but must still accept free text."""
@@ -318,7 +315,7 @@ def test_mediainfo_required_fields_are_enforced(mediainfo_dialog, silent_dialogs
 
 
 @pytest.mark.parametrize("section,field_name", [
-    ("video", "codec_name"),
+    ("video_stream", "codec_name"),
     ("format", "format_name"),
 ])
 def test_ffprobe_required_fields_are_enforced(ffprobe_dialog, silent_dialogs, section, field_name):
@@ -347,7 +344,7 @@ def test_mediainfo_empty_audio_format_is_an_empty_list(mediainfo_dialog):
 @pytest.mark.parametrize("field_name", ["codec_name", "codec_long_name"])
 def test_ffprobe_audio_list_fields_are_always_lists(ffprobe_dialog, field_name):
     _valid_ffprobe(ffprobe_dialog)
-    set_field(ffprobe_dialog, field_name, "flac", section="audio")
+    set_field(ffprobe_dialog, field_name, "flac", section="audio_stream")
     profile = ffprobe_dialog.get_ffprobe_profile()
     assert getattr(profile.audio_stream, field_name) == ["flac"]
 
@@ -471,8 +468,7 @@ def test_load_existing_profile_sets_name_and_values(exiftool_dialog):
 
 def test_adding_a_row_grows_the_field(exiftool_dialog):
     before = len(_inputs_for(exiftool_dialog)["CodecID"])
-    exiftool_dialog.add_textbox_row("CodecID", "extra",
-                                    _containers_for(exiftool_dialog)["CodecID"])
+    exiftool_dialog.add_textbox_row("CodecID", value="extra")
     assert len(_inputs_for(exiftool_dialog)["CodecID"]) == before + 1
 
 
@@ -567,10 +563,7 @@ def exiftool_json(tmp_path):
 
 
 def test_import_populates_fields_and_suggests_a_name(exiftool_dialog, exiftool_json, monkeypatch):
-    monkeypatch.setattr(
-        "AV_Spex.gui.gui_custom_exiftool.QFileDialog.getOpenFileName",
-        staticmethod(lambda *a, **k: (str(exiftool_json), "")),
-    )
+    _pick_file(monkeypatch, exiftool_json)
     exiftool_dialog.import_from_file()
 
     assert get_field(exiftool_dialog, "FileType") == ["MKV"]
@@ -626,9 +619,9 @@ def test_ffprobe_import_populates_every_section(ffprobe_dialog, ffprobe_json, mo
     _pick_file(monkeypatch, ffprobe_json)
     ffprobe_dialog.import_from_file()
 
-    assert get_field(ffprobe_dialog, "codec_name", section="video") == ["ffv1"]
-    assert get_field(ffprobe_dialog, "width", section="video") == ["720"]
-    assert get_field(ffprobe_dialog, "codec_name", section="audio") == ["flac"]
+    assert get_field(ffprobe_dialog, "codec_name", section="video_stream") == ["ffv1"]
+    assert get_field(ffprobe_dialog, "width", section="video_stream") == ["720"]
+    assert get_field(ffprobe_dialog, "codec_name", section="audio_stream") == ["flac"]
     assert get_field(ffprobe_dialog, "format_name", section="format") != []
 
 
@@ -711,9 +704,79 @@ def test_differences_detected_only_when_present(mediainfo_dialog):
 
 def test_cancelling_the_file_picker_changes_nothing(exiftool_dialog, monkeypatch):
     monkeypatch.setattr(
-        "AV_Spex.gui.gui_custom_exiftool.QFileDialog.getOpenFileName",
+        "AV_Spex.gui.gui_custom_profile_common.QFileDialog.getOpenFileName",
         staticmethod(lambda *a, **k: ("", "")),
     )
     exiftool_dialog.profile_name_input.setText("Untouched")
     exiftool_dialog.import_from_file()
     assert exiftool_dialog.profile_name_input.text() == "Untouched"
+
+
+# ===========================================================================
+# Theme regressions
+#
+# Both of these were found by hand-testing under cocoa and predate the dialog
+# refactor. They are pinned here because the offscreen platform renders them
+# invisibly — only the underlying state is observable in a test.
+# ===========================================================================
+
+def test_dropdown_arrow_contrasts_with_the_field_background(qapp):
+    """Styling a combo box replaces Qt's native arrow, so the replacement has
+    to carry its own color. A fixed white chevron vanished in light mode."""
+    from PyQt6.QtGui import QPalette, QColor
+    from AV_Spex.gui import gui_custom_profile_common as pc
+
+    original = qapp.palette()
+    try:
+        for base, text in (("#ffffff", "#000000"), ("#1e1e1e", "#f0f0f0")):
+            palette = QPalette()
+            palette.setColor(QPalette.ColorRole.Base, QColor(base))
+            palette.setColor(QPalette.ColorRole.Text, QColor(text))
+            qapp.setPalette(palette)
+
+            style = pc.field_combobox_style()
+            arrow_path = re.search(r'image: url\(([^)]+)\)', style).group(1)
+            stroke = re.search(r'stroke="([^"]+)"', open(arrow_path).read()).group(1)
+
+            assert stroke.lower() == text.lower(), "arrow should follow the text color"
+            assert stroke.lower() != base.lower(), f"arrow invisible on {base}"
+    finally:
+        qapp.setPalette(original)
+
+
+def test_theme_switch_leaves_no_stray_top_level_banner(qapp, silent_dialogs):
+    """Switching theme rebuilt the main window logo by orphaning the old label.
+
+    setParent(None) turns a QLabel into a top-level window, and deleteLater()
+    is deferred — while a modal dialog runs its own event loop the deletion is
+    postponed, so the orphan showed up as a floating duplicate banner.
+    """
+    from PyQt6.QtWidgets import QLabel
+    from AV_Spex.gui.gui_main import MainWindow
+    from AV_Spex.gui.gui_theme_manager import ThemeManager
+
+    def stray_banners():
+        return [w for w in qapp.topLevelWidgets()
+                if isinstance(w, QLabel)
+                and w.pixmap() is not None and not w.pixmap().isNull()]
+
+    main_window = MainWindow()
+    theme_manager = ThemeManager.instance()
+    try:
+        assert stray_banners() == []
+
+        theme_manager.themeChanged.emit(qapp.palette())
+        qapp.processEvents()
+        assert stray_banners() == [], "theme switch orphaned the logo"
+
+        dialog = CustomMediainfoDialog(main_window)
+        dialog.show()
+        qapp.processEvents()
+        try:
+            theme_manager.themeChanged.emit(qapp.palette())
+            qapp.processEvents()
+            assert stray_banners() == [], "theme switch with a dialog open orphaned the logo"
+        finally:
+            dialog.close()
+    finally:
+        main_window.close()

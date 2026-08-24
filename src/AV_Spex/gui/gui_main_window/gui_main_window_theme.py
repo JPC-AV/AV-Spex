@@ -58,10 +58,14 @@ class MainWindowTheme:
         """Find and remove any existing logo"""
         # First try to remove our tracked logo widget if it exists
         if self.logo_widget is not None:
-            # Remove tracked widget
-            if self.logo_widget.parent():
-                self.logo_widget.setParent(None)
-                self.logo_widget.deleteLater()
+            # Hide first, and do NOT call setParent(None): that would make the
+            # label a top-level window, and deleteLater() is deferred — while a
+            # modal dialog runs its own event loop the deletion can be postponed
+            # indefinitely, leaving a stray banner window floating over the app
+            # until the dialog closes. Keeping the parent means the worst case
+            # is an invisible child that gets collected later.
+            self.logo_widget.hide()
+            self.logo_widget.deleteLater()
             self.logo_widget = None
             
         # Scan through main layout items to find any other logo layouts
@@ -173,9 +177,13 @@ class MainWindowTheme:
                     while item.layout().count():
                         child = item.layout().takeAt(0)
                         if child.widget():
+                            # Hide as well as delete: the deletion is deferred and
+                            # may not run until a modal dialog's event loop exits.
+                            child.widget().hide()
                             child.widget().deleteLater()
                 # If the item has a widget, delete it
                 if item.widget():
+                    item.widget().hide()
                     item.widget().deleteLater()
                 # Delete the item itself
                 del item
