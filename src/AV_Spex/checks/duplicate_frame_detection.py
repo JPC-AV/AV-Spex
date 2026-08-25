@@ -63,6 +63,9 @@ class DuplicateFrameResult:
     vdif_threshold: float
     min_run_length: int
     runs: List[DuplicateFrameRun] = None
+    # False when OpenCV could not open the video, so candidates were reported
+    # without the MSE check that rejects flat-field false positives.
+    verification_available: bool = True
 
 
 def detect_duplicate_frames(
@@ -199,6 +202,7 @@ def detect_duplicate_frames(
             cv_verified=cv_verified,
         ))
 
+    cap_was_open = cap is not None
     if cap is not None:
         cap.release()
 
@@ -269,6 +273,7 @@ def detect_duplicate_frames(
             r.end_timecode = _tc_format_timecode(
                 r.end_time, fps, tc_start_frames, tc_drop_frame)
 
+    verification_available = cap_was_open
     total_dupes = sum(r.duplicate_count for r in final_runs)
     total_loss = sum(r.estimated_loss_seconds for r in final_runs)
 
@@ -286,6 +291,16 @@ def detect_duplicate_frames(
             f"{len(final_runs)} freeze run(s) detected, "
             f"{total_dupes} duplicate frame(s) total, "
             f"~{total_loss:.3f}s estimated loss"
+        )
+
+    # Without OpenCV the MSE check never ran, and that check is what rejects
+    # the deck's flat-field signal-loss frames — on calibration tapes every
+    # unverified candidate turned out to be a false positive. Say so rather
+    # than presenting these like verified findings.
+    if not verification_available:
+        message += (
+            " — UNVERIFIED: OpenCV could not open the video, so candidates were "
+            "not confirmed and may be false positives"
         )
 
     logger.info(f"Duplicate frame detection result: {status} — {message}\n")
@@ -313,4 +328,5 @@ def detect_duplicate_frames(
         vdif_threshold=thresholds['vdif'],
         min_run_length=min_run_length,
         runs=final_runs,
+        verification_available=verification_available,
     )
