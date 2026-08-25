@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from AV_Spex.utils.config_setup import ChecksConfig
 from AV_Spex.utils.config_manager import ConfigManager
 from AV_Spex.utils.log_setup import logger, report_ffmpeg_stderr
+from AV_Spex.utils import ffprobe_probe
 
 config_mgr = ConfigManager()
 
@@ -552,53 +553,16 @@ def read_xml_file(xml_file_path):
             return f"[Error reading XML file: {e}]"
 
 
+
 def _get_video_duration(video_path):
-    """
-    Probe the video duration in seconds using ffprobe.
-    
-    Returns:
-        float or None: Duration in seconds, or None on failure.
-    """
-    cmd = [
-        "ffprobe",
-        "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        video_path,
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        return float(result.stdout.strip())
-    except Exception as e:
-        logger.warning(f"Could not probe video duration: {e}")
-        return None
+    """Video duration in seconds, or None. See utils.ffprobe_probe."""
+    return ffprobe_probe.duration(video_path)
+
 
 
 def _get_video_frame_rate(video_path):
-    """
-    Probe the video frame rate in frames per second using ffprobe.
-
-    Returns:
-        float or None: Frame rate in fps, or None on failure.
-    """
-    cmd = [
-        "ffprobe",
-        "-v", "error",
-        "-select_streams", "v:0",
-        "-show_entries", "stream=r_frame_rate",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        video_path,
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        rate = result.stdout.strip().splitlines()[0]
-        if '/' in rate:
-            num, den = rate.split('/')
-            return float(num) / float(den)
-        return float(rate)
-    except Exception as e:
-        logger.warning(f"Could not probe video frame rate: {e}")
-        return None
+    """Frame rate in fps, or None. See utils.ffprobe_probe."""
+    return ffprobe_probe.frame_rate(video_path)
 
 
 def _extract_frame_at(video_path, timestamp, output_path, height):
@@ -712,54 +676,21 @@ def generate_color_strip_base64(video_path, num_frames=40, strip_height=120, max
         return None
 
 
-def _get_audio_channel_count(video_path):
-    """Get the number of audio channels in the first audio stream using ffprobe.
 
-    Returns:
-        int or None: Number of channels, or None if unavailable.
-    """
-    cmd = [
-        "ffprobe",
-        "-v", "error",
-        "-select_streams", "a:0",
-        "-show_entries", "stream=channels",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        video_path,
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        return int(result.stdout.strip())
-    except Exception as e:
-        logger.warning(f"Could not probe audio channel count: {e}")
-        return None
+def _get_audio_channel_count(video_path):
+    """Channel count of the first audio stream, or None."""
+    return ffprobe_probe.first_audio_channel_count(video_path)
+
 
 
 def _get_audio_stream_channels(video_path):
-    """Get the channel count of every audio stream, in order, using ffprobe.
+    """Channel count of every audio stream in order, or None if unavailable
+    or the file has no audio.
 
-    Returns a list with one entry per audio stream, e.g. ``[2]`` for a single
-    stereo stream (typical MKV) or ``[1, 1]`` for two separate mono streams
-    (typical broadcast MXF, where each track is its own mono PCM stream).
-
-    Returns:
-        list[int] or None: Per-stream channel counts, or None if unavailable
-        or there are no audio streams.
+    ``[2]`` for a single stereo stream (typical MKV), ``[1, 1]`` for two
+    separate mono streams (typical broadcast MXF).
     """
-    cmd = [
-        "ffprobe",
-        "-v", "error",
-        "-select_streams", "a",
-        "-show_entries", "stream=channels",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        video_path,
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        counts = [int(x) for x in result.stdout.split() if x.strip()]
-        return counts or None
-    except Exception as e:
-        logger.warning(f"Could not probe audio channel count: {e}")
-        return None
+    return ffprobe_probe.audio_stream_channels(video_path) or None
 
 
 # Colors assigned per channel for waveform visualization

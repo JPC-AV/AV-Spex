@@ -27,12 +27,15 @@ import csv
 import datetime as dt
 import gzip
 import io
+import json
+import subprocess
 import os
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from AV_Spex.checks import qct_parse as qp
+from AV_Spex.utils import ffprobe_probe
 
 
 # ===========================================================================
@@ -756,28 +759,37 @@ def test_get_video_duration_unparseable_stdout_returns_none(monkeypatch):
 
 # ---- _get_audio_stream_count ---------------------------------------------
 
+def _audio_streams_json(count):
+    """ffprobe JSON for `count` discrete audio streams."""
+    return json.dumps({"streams": [{"index": i + 1, "channels": 1} for i in range(count)]})
+
+
+def _fake_ffprobe(monkeypatch, stdout):
+    """Probing moved to utils.ffprobe_probe, so that is what these patch."""
+    monkeypatch.setattr(ffprobe_probe.subprocess, "run",
+                        lambda *a, **kw: MagicMock(returncode=0, stdout=stdout, stderr=""))
+
+
 def test_get_audio_stream_count_single_stream(monkeypatch):
     # One audio stream (typical MKV: a single multi-channel stream).
-    fake_proc = MagicMock(returncode=0, stdout="1\n", stderr="")
-    monkeypatch.setattr(qp.subprocess, "run", lambda *a, **kw: fake_proc)
+    _fake_ffprobe(monkeypatch, _audio_streams_json(1))
     assert qp._get_audio_stream_count("/v.mkv") == 1
 
 
 def test_get_audio_stream_count_multiple_mono_streams(monkeypatch):
     # Four discrete mono streams (typical broadcast MXF).
-    fake_proc = MagicMock(returncode=0, stdout="1\n2\n3\n4\n", stderr="")
-    monkeypatch.setattr(qp.subprocess, "run", lambda *a, **kw: fake_proc)
+    _fake_ffprobe(monkeypatch, _audio_streams_json(4))
     assert qp._get_audio_stream_count("/v.mxf") == 4
 
 
 def test_get_audio_stream_count_no_audio_returns_zero(monkeypatch):
-    fake_proc = MagicMock(returncode=0, stdout="\n", stderr="")
-    monkeypatch.setattr(qp.subprocess, "run", lambda *a, **kw: fake_proc)
+    _fake_ffprobe(monkeypatch, _audio_streams_json(0))
     assert qp._get_audio_stream_count("/v.mkv") == 0
 
 
 def test_get_audio_stream_count_subprocess_error_returns_none(monkeypatch):
-    monkeypatch.setattr(qp.subprocess, "run", MagicMock(side_effect=qp.subprocess.SubprocessError("boom")))
+    monkeypatch.setattr(ffprobe_probe.subprocess, "run",
+                        MagicMock(side_effect=subprocess.SubprocessError("boom")))
     assert qp._get_audio_stream_count("/v.mxf") is None
 
 

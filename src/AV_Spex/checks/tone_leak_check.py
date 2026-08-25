@@ -41,6 +41,7 @@ import subprocess
 import numpy as np
 
 from AV_Spex.utils.log_setup import logger
+from AV_Spex.utils import ffprobe_probe
 
 # Analysis window length. 8 s gives 0.125 Hz FFT bins — narrow enough that
 # the rock-stable leak tone (measured 1000.0 Hz +/- ~0.02 Hz) always lands
@@ -76,29 +77,10 @@ _FLOOR_EXCLUDE_BINS = 8
 _PEAK_BINS = 2  # harmonic peak searched within +/- this many bins
 
 
+
 def _probe_audio_streams(video_path):
-    """Return a list of channel counts, one per audio stream, or None on error."""
-    cmd = [
-        "ffprobe", "-v", "error", "-select_streams", "a",
-        "-show_entries", "stream=channels", "-of", "json", video_path,
-    ]
-    try:
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except (FileNotFoundError, subprocess.SubprocessError) as exc:
-        logger.warning(f"Tone-leak detection: ffprobe invocation failed: {exc}")
-        return None
-    if proc.returncode != 0:
-        logger.warning(
-            f"Tone-leak detection: ffprobe returned {proc.returncode}: "
-            f"{proc.stderr.decode('utf-8', 'replace').strip()}"
-        )
-        return None
-    try:
-        streams = json.loads(proc.stdout.decode('utf-8'))["streams"]
-    except (ValueError, KeyError) as exc:
-        logger.warning(f"Tone-leak detection: could not parse ffprobe output: {exc}")
-        return None
-    return [s.get("channels", 0) for s in streams]
+    """Channel counts, one per audio stream, or None on error."""
+    return ffprobe_probe.audio_stream_channels(video_path)
 
 
 def _window_metrics(seg, sr=TONE_LEAK_ANALYSIS_SR, window=None):

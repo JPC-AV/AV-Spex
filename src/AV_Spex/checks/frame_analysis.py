@@ -29,6 +29,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
 from AV_Spex.utils.log_setup import logger, report_ffmpeg_stderr
+from AV_Spex.utils import ffprobe_probe
 from AV_Spex.utils.config_manager import ConfigManager
 from AV_Spex.utils.config_setup import ChecksConfig
 from AV_Spex.checks.qct_parse import (
@@ -4216,20 +4217,8 @@ class EnhancedFrameAnalysis:
             return True
         
     def _get_video_duration(self) -> Optional[float]:
-        """Get video duration in seconds using ffprobe"""
-        try:
-            cmd = [
-                'ffprobe', '-v', 'quiet',
-                '-show_entries', 'format=duration',
-                '-of', 'csv=p=0',
-                str(self.video_path)
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode == 0 and result.stdout.strip():
-                return float(result.stdout.strip())
-        except Exception as e:
-            logger.warning(f"Could not get video duration: {e}")
-        return None
+        """Video duration in seconds, or None. See utils.ffprobe_probe."""
+        return ffprobe_probe.duration(str(self.video_path))
 
     def _detect_dropped_samples(self, color_bars_end_time: float = None) -> Optional[DroppedSampleResult]:
         """

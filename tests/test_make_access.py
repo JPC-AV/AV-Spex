@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from AV_Spex.checks import make_access as ma
+from AV_Spex.utils import ffprobe_probe
 
 
 # ---------------------------------------------------------------------------
@@ -59,15 +60,19 @@ def _vf_filters_from(cmd):
 # get_duration / get_video_dimensions
 # ---------------------------------------------------------------------------
 
+def _fake_ffprobe(monkeypatch, stdout):
+    """Probing moved to utils.ffprobe_probe, which captures text not bytes."""
+    monkeypatch.setattr(ffprobe_probe.subprocess, "run",
+                        lambda *a, **kw: MagicMock(returncode=0, stdout=stdout, stderr=""))
+
+
 def test_get_duration_strips_whitespace(monkeypatch):
-    fake_result = MagicMock(stdout=b"  60.123\n")
-    monkeypatch.setattr(ma.subprocess, "run", lambda *a, **kw: fake_result)
+    _fake_ffprobe(monkeypatch, "  60.123\n")
     assert ma.get_duration("/v.mkv") == "60.123"
 
 
 def test_get_video_dimensions_parses_wxh(monkeypatch):
-    fake_result = MagicMock(stdout=b"720x486\n")
-    monkeypatch.setattr(ma.subprocess, "run", lambda *a, **kw: fake_result)
+    _fake_ffprobe(monkeypatch, "720,486\n")
     assert ma.get_video_dimensions("/v.mkv") == (720, 486)
 
 

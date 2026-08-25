@@ -2,6 +2,7 @@ import subprocess
 import os
 import sys
 from AV_Spex.utils.log_setup import logger, report_ffmpeg_stderr
+from AV_Spex.utils import ffprobe_probe
 from AV_Spex.utils.config_setup import ChecksConfig
 from AV_Spex.utils.config_manager import ConfigManager
 from AV_Spex.utils.dir_setup import is_hidden_file
@@ -115,72 +116,32 @@ def determine_excluded_audio_channels(audio_findings):
     return sorted(flagged), reasons
 
 
+
 def get_duration(video_path):
-    """Return the file duration in seconds as a string, or None if unavailable.
+    """File duration in seconds as a string, or None if unavailable.
 
-    Tries the container (format) duration first, then falls back to the first
-    video stream's duration — some MKVs report 'N/A' for format=duration.
-    Returns None when neither is available so callers can skip progress math.
+    Kept as a string because the caller passes it straight into ffmpeg progress
+    math; see utils.ffprobe_probe.duration for the numeric form.
     """
-    def _probe(entries, stream_args=()):
-        command = [
-            'ffprobe', '-v', 'error', *stream_args,
-            '-show_entries', entries, '-of', 'csv=p=0', video_path,
-        ]
-        result = subprocess.run(command, stdout=subprocess.PIPE)
-        return result.stdout.decode().strip()
+    seconds = ffprobe_probe.duration(video_path)
+    return None if seconds is None else str(seconds)
 
-    for duration in (
-        _probe('format=duration'),
-        _probe('stream=duration', ('-select_streams', 'v:0')),
-    ):
-        if duration and duration != 'N/A':
-            return duration
-    return None
 
 
 def get_video_dimensions(video_path):
-    """Return (width, height) of the first video stream, or (None, None) on failure."""
-    command = [
-        'ffprobe',
-        '-v', 'error',
-        '-select_streams', 'v:0',
-        '-show_entries', 'stream=width,height',
-        '-of', 'csv=p=0:s=x',
-        video_path
-    ]
-    try:
-        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        out = result.stdout.decode().strip()
-        if not out or 'x' not in out:
-            return None, None
-        w_str, h_str = out.split('x', 1)
-        return int(w_str), int(h_str)
-    except (ValueError, subprocess.SubprocessError):
-        return None, None
+    """(width, height) of the first video stream, or (None, None) on failure."""
+    dimensions = ffprobe_probe.video_dimensions(video_path)
+    return dimensions if dimensions is not None else (None, None)
+
 
 
 def get_audio_stream_channels(video_path):
-    """Return the channel count of every audio stream, in order.
+    """Channel count of every audio stream, in order; empty list if unknown.
 
-    e.g. ``[2]`` for a single stereo stream (typical MKV) or ``[1, 1]`` for two
-    separate mono streams (typical broadcast MXF, where each track is its own
-    mono PCM stream). Returns an empty list if it can't be determined.
+    ``[2]`` for a single stereo stream (typical MKV), ``[1, 1]`` for two
+    separate mono streams (typical broadcast MXF).
     """
-    command = [
-        'ffprobe',
-        '-v', 'error',
-        '-select_streams', 'a',
-        '-show_entries', 'stream=channels',
-        '-of', 'default=noprint_wrappers=1:nokey=1',
-        video_path,
-    ]
-    try:
-        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        out = result.stdout.decode().strip()
-        return [int(x) for x in out.split() if x.strip()]
-    except (ValueError, OSError, subprocess.SubprocessError):
-        return []
+    return ffprobe_probe.audio_stream_channels(video_path) or []
 
 
 def make_access_file(video_path, output_path, check_cancelled=None, signals=None, start_time=None, crop_area=None, crop_to_480=True, excluded_audio_channels=None):
