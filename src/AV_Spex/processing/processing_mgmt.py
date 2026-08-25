@@ -691,6 +691,113 @@ def _clams_region_is_bars(video_path, report_directory, video_id, start_seconds,
     return bool(hits)
 
 
+def merge_head_bars_consensus(
+    qctparse_head_start,
+    qctparse_head_end,
+    qctparse_all_regions,
+    clams_head_start,
+    clams_head_end_raw,
+    clams_regions,
+    clams_ran,
+    region_is_bars,
+):
+    """Cross-validate the qct-parse and CLAMS head-bars claims.
+
+    Luma-stat thresholds cannot tell colour bars from a saturated slate, so
+    where the two detectors disagree the SSIM evidence over the disputed span
+    decides. Extracted from process_qctools_output so the calibration is
+    testable without running the detectors.
+
+    Args:
+        qctparse_head_start/end: qct-parse's head-bars claim, or None.
+        qctparse_all_regions: (label, start, end) for every qct-parse region.
+        clams_head_start: CLAMS' first bars start, or None.
+        clams_head_end_raw: CLAMS' matching end, or None.
+        clams_regions: (start, end, kind) spans from CLAMS.
+        clams_ran: whether the CLAMS detector ran at all.
+        region_is_bars: (start, end) -> True / False / None, the SSIM arbiter.
+
+    Returns:
+        (merged_end, head_demoted, all_bars_regions)
+        merged_end is the consensus head-bars end time, or None when there is
+        no confirmed head claim. head_demoted is True when qct-parse claimed
+        head bars that CLAMS decisively contradicted.
+    """
+    head_demoted = False
+
+    # A CLAMS span only counts as *head* bars if it starts near the top of file.
+    clams_head_end = None
+    if clams_head_start is not None and clams_head_start < HEAD_BARS_START_THRESHOLD:
+        clams_head_end = clams_head_end_raw
+
+    merged_end = None
+    if qctparse_head_end is not None and clams_head_end is not None:
+        if abs(qctparse_head_end - clams_head_end) <= HEAD_END_AGREEMENT_SLACK:
+            merged_end = max(qctparse_head_end, clams_head_end)
+        else:
+            # The detectors disagree on where the head bars end; let the SSIM
+            # evidence over the disputed span decide.
+            span_lo, span_hi = sorted((qctparse_head_end, clams_head_end))
+            verdict = region_is_bars(span_lo, span_hi)
+            if verdict is False:
+                merged_end = span_lo
+                logger.warning(
+                    f"Head bars end disagreement (qct-parse={qctparse_head_end}, "
+                    f"CLAMS={clams_head_end}): span {span_lo:.1f}s-{span_hi:.1f}s is "
+                    f"not bars per CLAMS SSIM - using {span_lo:.1f}s"
+                )
+            else:
+                merged_end = span_hi
+    elif qctparse_head_end is not None:
+        # Only qct-parse has a head claim. If CLAMS ran and scanned that region
+        # without seeing bars, demote the claim rather than letting it drive
+        # access-file trimming and analysis skips.
+        verdict = None
+        if clams_ran and qctparse_head_start is not None:
+            verdict = region_is_bars(qctparse_head_start, qctparse_head_end)
+        if verdict is False:
+            head_demoted = True
+            logger.warning(
+                f"qct-parse head bars claim ({qctparse_head_start:.1f}s-"
+                f"{qctparse_head_end:.1f}s) is not corroborated by CLAMS SSIM - "
+                f"treating as unconfirmed; not setting a head-bars end time"
+            )
+        else:
+            merged_end = qctparse_head_end
+    elif clams_head_end is not None:
+        merged_end = clams_head_end
+
+    # Every detected bars span, for downstream exclusion (BRNG, signalstats,
+    # duplicate-frame detection). A demoted head claim is dropped - the
+    # consensus decided it isn't bars. Extra coverage is safe here: wrongly
+    # skipping a second of content costs little, while analysing bars as
+    # content skews the results. Chroma-phase detection and access-file
+    # trimming intentionally keep using only the head end time.
+    exclusion_spans = []
+    for label, span_start, span_end in qctparse_all_regions or []:
+        if span_start is None or span_end is None:
+            continue
+        if head_demoted and label in ("head", "head-relaxed"):
+            continue
+        exclusion_spans.append((span_start, span_end))
+    for span_start, span_end, kind in clams_regions or []:
+        if kind == "bars":
+            exclusion_spans.append((span_start, span_end))
+
+    all_bars_regions = None
+    if exclusion_spans:
+        exclusion_spans.sort()
+        merged_spans = [exclusion_spans[0]]
+        for span_start, span_end in exclusion_spans[1:]:
+            if span_start <= merged_spans[-1][1] + 1.0:
+                merged_spans[-1] = (merged_spans[-1][0], max(merged_spans[-1][1], span_end))
+            else:
+                merged_spans.append((span_start, span_end))
+        all_bars_regions = merged_spans
+
+    return merged_end, head_demoted, all_bars_regions
+
+
 def process_qctools_output(video_path, source_directory, destination_directory, video_id, report_directory=None, check_cancelled=None, signals=None):
     """
     Process QCTools output, including running QCTools and optional parsing.
@@ -1083,89 +1190,29 @@ def process_qctools_output(video_path, source_directory, destination_directory, 
 
     # ---- Merge: cross-validated head-bars consensus ----
     clams_ran = bool(clams_cfg and getattr(clams_cfg, 'run_tool', False))
-    head_demoted = False
-    clams_head_end = None
-    if results.get('clams_bars_start_time') is not None:
-        if results['clams_bars_start_time'] < HEAD_BARS_START_THRESHOLD:
-            clams_head_end = results['clams_bars_end_time']
 
-    merged_end = None
-    if qctparse_head_end is not None and clams_head_end is not None:
-        if abs(qctparse_head_end - clams_head_end) <= HEAD_END_AGREEMENT_SLACK:
-            merged_end = max(qctparse_head_end, clams_head_end)
-        else:
-            # The detectors disagree on where the head bars end. Luma-stat
-            # thresholds can't tell bars from a saturated slate, so let the
-            # SSIM evidence over the disputed span decide.
-            span_lo, span_hi = sorted((qctparse_head_end, clams_head_end))
-            verdict = _clams_region_is_bars(
-                video_path, report_directory, video_id, span_lo, span_hi,
-                check_cancelled=check_cancelled,
-            )
-            if verdict is False:
-                merged_end = span_lo
-                logger.warning(
-                    f"Head bars end disagreement (qct-parse={qctparse_head_end}, "
-                    f"CLAMS={clams_head_end}): span {span_lo:.1f}s–{span_hi:.1f}s is "
-                    f"not bars per CLAMS SSIM — using {span_lo:.1f}s"
-                )
-            else:
-                merged_end = span_hi
-    elif qctparse_head_end is not None:
-        # Only qct-parse has a head claim. If CLAMS ran and scanned that
-        # region without seeing bars, demote the claim rather than letting
-        # it drive access-file trimming and analysis skips.
-        verdict = None
-        if clams_ran and qctparse_head_start is not None:
-            verdict = _clams_region_is_bars(
-                video_path, report_directory, video_id,
-                qctparse_head_start, qctparse_head_end,
-                check_cancelled=check_cancelled,
-            )
-        if verdict is False:
-            head_demoted = True
-            logger.warning(
-                f"qct-parse head bars claim ({qctparse_head_start:.1f}s–"
-                f"{qctparse_head_end:.1f}s) is not corroborated by CLAMS SSIM — "
-                f"treating as unconfirmed; not setting a head-bars end time"
-            )
-        else:
-            merged_end = qctparse_head_end
-    elif clams_head_end is not None:
-        merged_end = clams_head_end
+    merged_end, head_demoted, all_bars_regions = merge_head_bars_consensus(
+        qctparse_head_start=qctparse_head_start,
+        qctparse_head_end=qctparse_head_end,
+        qctparse_all_regions=qctparse_all_regions,
+        clams_head_start=results.get('clams_bars_start_time'),
+        clams_head_end_raw=results.get('clams_bars_end_time'),
+        clams_regions=clams_regions,
+        clams_ran=clams_ran,
+        region_is_bars=lambda lo, hi: _clams_region_is_bars(
+            video_path, report_directory, video_id, lo, hi,
+            check_cancelled=check_cancelled,
+        ),
+    )
 
     results['color_bars_end_time'] = merged_end
     if merged_end is not None:
         logger.info(
             f"Merged head bars end time: {merged_end:.1f}s "
-            f"(qct-parse={qctparse_head_end}, CLAMS={clams_head_end})\n"
+            f"(qct-parse={qctparse_head_end}, CLAMS={results.get('clams_bars_end_time')})\n"
         )
-
-    # All detected bars spans from both detectors, for downstream exclusion
-    # (BRNG, signalstats, duplicate-frame detection). A demoted head claim is
-    # dropped — the consensus decided it isn't bars. Extra coverage is safe
-    # here: wrongly skipping a second of content costs little, while analyzing
-    # bars as content skews the results. Chroma-phase detection and
-    # access-file trimming intentionally keep using only the head end time.
-    exclusion_spans = []
-    for label, span_start, span_end in qctparse_all_regions:
-        if span_start is None or span_end is None:
-            continue
-        if head_demoted and label in ("head", "head-relaxed"):
-            continue
-        exclusion_spans.append((span_start, span_end))
-    for span_start, span_end, kind in clams_regions:
-        if kind == "bars":
-            exclusion_spans.append((span_start, span_end))
-    if exclusion_spans:
-        exclusion_spans.sort()
-        merged_spans = [exclusion_spans[0]]
-        for span_start, span_end in exclusion_spans[1:]:
-            if span_start <= merged_spans[-1][1] + 1.0:
-                merged_spans[-1] = (merged_spans[-1][0], max(merged_spans[-1][1], span_end))
-            else:
-                merged_spans.append((span_start, span_end))
-        results['all_bars_regions'] = merged_spans
+    if all_bars_regions:
+        results['all_bars_regions'] = all_bars_regions
 
     return results
 
