@@ -97,3 +97,38 @@ def test_status_escalates_with_findings(tmp_path):
     flagged = _run(tmp_path, _candidate(10.0, 10.1))
     assert clean.status == 'clean'
     assert flagged.status in ('warning', 'critical')
+
+
+# ---------------------------------------------------------------------------
+# OpenCV verification availability
+#
+# The MSE check is what rejects the deck's flat-field signal-loss frames. On the
+# calibration tapes every candidate that OpenCV rejected was a false positive,
+# so candidates reported without it are not findings.
+# ---------------------------------------------------------------------------
+
+def test_unopenable_video_marks_the_result_unverified(tmp_path):
+    result = _run(tmp_path, _candidate(10.0, 10.1))
+    assert result.verification_available is False
+
+
+def test_unverified_result_says_so_in_the_message(tmp_path):
+    result = _run(tmp_path, _candidate(10.0, 10.1))
+    assert 'UNVERIFIED' in result.message
+    assert 'false positives' in result.message
+
+
+def test_clean_result_is_also_marked_unverified(tmp_path):
+    """No candidates plus no verification is still not a confirmed pass."""
+    result = _run(tmp_path)
+    assert result.status == 'clean'
+    assert result.verification_available is False
+
+
+def test_verification_flag_defaults_to_true():
+    """A result built normally is treated as verified."""
+    assert dfd.DuplicateFrameResult(
+        status='clean', message='', total_runs=0, total_duplicate_frames=0,
+        estimated_loss_seconds=0.0, bit_depth_10=True, ydif_threshold=1.0,
+        udif_threshold=1.0, vdif_threshold=1.0, min_run_length=2,
+    ).verification_available is True

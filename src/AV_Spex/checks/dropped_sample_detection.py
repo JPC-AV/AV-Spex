@@ -29,7 +29,9 @@ from AV_Spex.utils import ffprobe_probe
 @dataclass
 class DroppedSampleResult:
     """Results from dropped sample detection analysis"""
-    status: str  # 'clean', 'warning', 'critical'
+    # 'clean' / 'warning' / 'critical', or 'unknown' when neither signal could
+    # be measured — a failed detector must not read as a clean file.
+    status: str
     message: str
     spike_count: int
     duration_diff_ms: float
@@ -40,6 +42,10 @@ class DroppedSampleResult:
     sample_rate: int = 0  # audio sample rate in Hz
     spectrogram_path: Optional[str] = None
     spike_timestamps: List[float] = None
+    # Which of the two signals were actually measurable. Both False means the
+    # verdict is 'unknown'; one False means it rests on a single signal.
+    spectrogram_measured: bool = True
+    durations_measured: bool = True
 
 
 def detect_dropped_samples(video_path, video_id, output_dir,
@@ -74,8 +80,10 @@ def detect_dropped_samples(video_path, video_id, output_dir,
 
     # Step 3: Compare audio/video durations
     audio_duration, video_duration, sample_rate = _get_av_durations(video_path, video_id, output_dir)
+    spectrogram_measured = spectrogram_path is not None
+    durations_measured = audio_duration is not None and video_duration is not None
     duration_diff_ms = 0.0
-    if audio_duration is not None and video_duration is not None:
+    if durations_measured:
         duration_diff_ms = abs(audio_duration - video_duration) * 1000.0
         if duration_diff_ms > 0:
             logger.warning(f"Audio/video duration mismatch: {duration_diff_ms:.3f}ms")
@@ -106,7 +114,37 @@ def detect_dropped_samples(video_path, video_id, output_dir,
                 logger.info(f"  Duration difference is smaller than detected spikes — "
                             f"some spikes may be content transients rather than drops")
 
-    # Step 5: Compute combined score and status
+    # Step 5: Compute combined score and status.
+    #
+    # Both signals failing is NOT a clean result: a zero spike count and a zero
+    # duration difference are what a healthy file looks like, so reporting
+    # 'clean' here would be indistinguishable from a real pass. Say 'unknown'
+    # instead, and name what could not be measured.
+    if not spectrogram_measured and not durations_measured:
+        combined_score = 0.0
+        status = 'unknown'
+        message = (
+            "Could not measure dropped samples: spectrogram generation and the "
+            "audio/video duration comparison both failed. This is not a clean "
+            "result — the check did not run."
+        )
+        logger.warning(f"\nDropped sample detection result: {status} — {message}\n")
+        return DroppedSampleResult(
+            status=status,
+            message=message,
+            spike_count=0,
+            duration_diff_ms=0.0,
+            audio_duration=audio_duration or 0.0,
+            video_duration=video_duration or 0.0,
+            combined_score=combined_score,
+            estimated_loss_ms=0.0,
+            sample_rate=sample_rate,
+            spectrogram_path=None,
+            spike_timestamps=[],
+            spectrogram_measured=False,
+            durations_measured=False,
+        )
+
     combined_score, status = _compute_dropped_sample_score(spike_count, duration_diff_ms)
 
     # Build message
@@ -122,6 +160,13 @@ def detect_dropped_samples(video_path, video_id, output_dir,
     else:
         message = "; ".join(parts)
 
+    # One signal missing still yields a usable verdict, but say so rather than
+    # implying both lines of evidence agreed.
+    if not spectrogram_measured:
+        message += " (spectrogram unavailable — based on the duration comparison alone)"
+    elif not durations_measured:
+        message += " (duration comparison unavailable — based on the spectrogram alone)"
+
     logger.info(f"\nDropped sample detection result: {status} — {message}\n")
 
     return DroppedSampleResult(
@@ -135,7 +180,9 @@ def detect_dropped_samples(video_path, video_id, output_dir,
         estimated_loss_ms=estimated_loss_ms,
         sample_rate=sample_rate,
         spectrogram_path=str(spectrogram_path) if spectrogram_path else None,
-        spike_timestamps=spike_timestamps
+        spike_timestamps=spike_timestamps,
+        spectrogram_measured=spectrogram_measured,
+        durations_measured=durations_measured,
     )
 
 

@@ -5696,8 +5696,13 @@ def generate_dropped_sample_html(frame_outputs):
         status_color = '#cc6600'
         status_icon = '&#x26A0;'
     elif status == 'clean':
-        status_color = '#0a5f1c'
+        status_color = 'var(--report-success)'
         status_icon = '&#x2705;'
+    elif status == 'unknown':
+        # The check could not run. Deliberately not green: an operator must be
+        # able to tell "no dropped samples" from "we could not tell".
+        status_color = '#cc6600'
+        status_icon = '&#x26A0;'
     else:
         status_color = '#666666'
         status_icon = '&#x2753;'
@@ -5854,11 +5859,18 @@ def generate_duplicate_frame_html(frame_outputs):
         status_color = '#cc6600'
         status_icon = '&#x26A0;'
     elif status == 'clean':
-        status_color = '#0a5f1c'
+        status_color = 'var(--report-success)'
         status_icon = '&#x2705;'
     else:
         status_color = '#666666'
         status_icon = '&#x2753;'
+
+    # Without OpenCV the MSE check never ran, and that is what rejects the
+    # deck's flat-field signal-loss frames — so these are candidates, not
+    # findings. Downgrade the presentation to match.
+    if not duplicate_data.get('verification_available', True):
+        status_color = '#cc6600'
+        status_icon = '&#x26A0;'
 
     bit_depth_label = "10-bit" if bit_depth_10 else "8-bit"
 
