@@ -16,7 +16,7 @@ import shlex
 import re
 import csv
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple, Any
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from dataclasses import dataclass, asdict
 from collections import defaultdict
 import xml.etree.ElementTree as ET
@@ -46,6 +46,33 @@ from AV_Spex.checks.qct_parse import (
 )
 
 # Data classes for structured results
+@dataclass(frozen=True)
+class AnalysisStep:
+    """One frame-analysis step that stands on its own.
+
+    Used for the steps that just read the video and return a result — bitplane,
+    dropped sample, duplicate frame. They take no part in the border/BRNG
+    refinement loop, so they can be described as data and driven by a common
+    loop that owns cancellation, the progress reset and the completion signal,
+    instead of each open-coding all three.
+
+    key:            where the value lands in the results dict
+    label:          completion-signal label, prefixed "Frame Analysis - "
+    enabled:        whether the config turned this step on
+    run:            returns the value to store, or None to store nothing
+    reset_progress: zero the progress bar before running
+    start_message:  logged when the step begins
+    skip_message:   logged when the step is disabled
+    """
+    key: str
+    label: str
+    enabled: bool
+    run: Callable[[], Any]
+    reset_progress: bool = True
+    start_message: Optional[str] = None
+    skip_message: Optional[str] = None
+
+
 @dataclass
 class FrameViolation:
     """Represents a frame with BRNG violations"""
@@ -4414,6 +4441,35 @@ class EnhancedFrameAnalysis:
             'bit_order_check': bit_order_check
         }
 
+    def _run_analysis_steps(self, steps, results, signals) -> bool:
+        """Run independent steps in order; False if cancelled part-way.
+
+        Cancellation is checked once per step here rather than being repeated
+        at each call site.
+        """
+        for step in steps:
+            if self.check_cancelled():
+                return False
+
+            if not step.enabled:
+                if step.skip_message:
+                    logger.warning(step.skip_message)
+                continue
+
+            if step.start_message:
+                logger.info(step.start_message)
+            if step.reset_progress and self.signals and hasattr(self.signals, 'frame_analysis_progress'):
+                self.signals.frame_analysis_progress.emit(0)
+
+            value = step.run()
+            if value is not None:
+                results[step.key] = value
+
+            if signals and hasattr(signals, 'step_completed'):
+                signals.step_completed.emit(f'Frame Analysis - {step.label}')
+
+        return True
+
     def analyze(self,
         method: str = 'sophisticated',
         duration_limit: int = 300,
@@ -4485,13 +4541,16 @@ class EnhancedFrameAnalysis:
         }
 
         # Step 0: Bitplane check — verify 9th and 10th bits are not empty
-        if self.check_cancelled():
+        if not self._run_analysis_steps([
+            AnalysisStep(
+                key='bitplane_check',
+                label='Bitplane Check',
+                enabled=bitplane_check_enabled,
+                run=self._check_bitplane_noise,
+                reset_progress=False,
+            ),
+        ], results, signals):
             return results
-        if bitplane_check_enabled:
-            bitplane_results = self._check_bitplane_noise()
-            results['bitplane_check'] = bitplane_results
-            if signals and hasattr(signals, 'step_completed'):
-                signals.step_completed.emit('Frame Analysis - Bitplane Check')
 
         # Step 1: Detect color bars (always run if skip_color_bars is True, as it's a prerequisite)
         if skip_color_bars:
@@ -5045,46 +5104,40 @@ class EnhancedFrameAnalysis:
                 
                 logger.debug(f"{'='*60}\n")
         
-        # Step 7: Dropped sample detection (conditional)
+        # Steps 7 and 8: the audio- and frame-local detectors. Neither feeds
+        # the refinement loop above, so both are described as data here.
         dropped_sample_enabled = self._is_step_enabled(frame_config.enable_dropped_sample_detection)
-        if self.check_cancelled():
-            return results
-        if dropped_sample_enabled:
-            logger.info("Starting dropped sample detection...")
-            if self.signals and hasattr(self.signals, 'frame_analysis_progress'):
-                self.signals.frame_analysis_progress.emit(0)
 
-            dropped_sample_result = self._detect_dropped_samples(
-                color_bars_end_time=color_bars_end_time
-            )
-            if dropped_sample_result:
-                results['dropped_sample_detection'] = asdict(dropped_sample_result)
+        def _run_dropped_samples():
+            result = self._detect_dropped_samples(color_bars_end_time=color_bars_end_time)
+            return asdict(result) if result else None
 
-            if signals and frame_config.enable_dropped_sample_detection:
-                signals.step_completed.emit("Frame Analysis - Dropped Sample Detection")
-        else:
-            logger.warning("Skipping dropped sample detection (disabled in config)\n")
-
-        # Step 8: Duplicate frame detection (conditional)
-        if self.check_cancelled():
-            return results
-        if duplicate_frame_enabled:
-            if self.signals and hasattr(self.signals, 'frame_analysis_progress'):
-                self.signals.frame_analysis_progress.emit(0)
-
-            min_run_length = getattr(frame_config, 'duplicate_min_run_length', 2)
-            duplicate_frame_result = self._detect_duplicate_frames(
+        def _run_duplicate_frames():
+            result = self._detect_duplicate_frames(
                 color_bars_end_time=color_bars_end_time,
                 black_segments=avoid_segments,
-                min_run_length=min_run_length,
+                min_run_length=getattr(frame_config, 'duplicate_min_run_length', 2),
             )
-            if duplicate_frame_result:
-                results['duplicate_frame_detection'] = asdict(duplicate_frame_result)
+            return asdict(result) if result else None
 
-            if signals:
-                signals.step_completed.emit("Frame Analysis - Duplicate Frame Detection")
-        else:
-            logger.warning("Skipping duplicate frame detection (disabled in config)\n")
+        if not self._run_analysis_steps([
+            AnalysisStep(
+                key='dropped_sample_detection',
+                label='Dropped Sample Detection',
+                enabled=dropped_sample_enabled,
+                run=_run_dropped_samples,
+                start_message="Starting dropped sample detection...",
+                skip_message="Skipping dropped sample detection (disabled in config)\n",
+            ),
+            AnalysisStep(
+                key='duplicate_frame_detection',
+                label='Duplicate Frame Detection',
+                enabled=duplicate_frame_enabled,
+                run=_run_duplicate_frames,
+                skip_message="Skipping duplicate frame detection (disabled in config)\n",
+            ),
+        ], results, signals):
+            return results
 
         # Step 9: Generate comprehensive summary
         if self.check_cancelled():
