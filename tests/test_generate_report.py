@@ -27,6 +27,7 @@ Coverage:
 
 import csv
 import dataclasses
+import re
 import os
 import subprocess
 from base64 import b64decode
@@ -723,6 +724,67 @@ def test_dangling_toc_anchor_resolves_against_any_section(tmp_path):
         gr.ReportSection('<h3 id="section-b">B</h3>'),
     ]
     assert gr._dangling_toc_anchors(sections) == []
+
+
+# ===========================================================================
+# Section 5c — report palette tokens
+# ===========================================================================
+
+def test_head_defines_the_palette_in_one_place():
+    head = gr._report_head_html("V1", "", "", "", "")
+    root = re.search(r':root \{(.*?)\}', head, re.S)
+    assert root, "no :root palette block in the report head"
+    tokens = dict(re.findall(r'--(report-[\w-]+):\s*(#[0-9a-fA-F]{6});', root.group(1)))
+    assert len(tokens) >= 10, f"expected the full palette, got {sorted(tokens)}"
+    # The colours that carried the report's identity before tokenisation.
+    assert tokens['report-ink'] == '#4d2b12'
+    assert tokens['report-paper'] == '#f5e9e3'
+    assert tokens['report-accent'] == '#378d6a'
+
+
+def test_head_markup_uses_the_tokens():
+    head = gr._report_head_html("V1", "", "", "", "")
+    assert 'var(--report-' in head
+
+
+def test_every_palette_token_used_anywhere_is_defined():
+    """An undefined CSS variable is dropped silently, so a typo would only
+    show up as a colour quietly going missing.
+
+    Scans the whole module rather than one rendered fragment: most var()
+    references live in individual section renderers, not the head.
+    """
+    import inspect
+    source = inspect.getsource(gr)
+    head = gr._report_head_html("V1", "", "", "", "")
+    root = re.search(r':root \{(.*?)\}', head, re.S).group(1)
+    defined = set(re.findall(r'--(report-[\w-]+)\s*:', root))
+    used = set(re.findall(r'var\(--(report-[\w-]+)\)', source))
+    assert used, "expected the module to reference palette tokens"
+    assert used <= defined, f"undefined palette tokens: {sorted(used - defined)}"
+
+
+def test_undefined_token_is_detected():
+    html = """<style>:root { --report-ink: #4d2b12; }</style>
+              <div style="color: var(--report-inkk)">x</div>"""
+    assert gr._undefined_style_tokens(html) == ['report-inkk']
+
+
+def test_defined_token_is_not_flagged():
+    html = """<style>:root { --report-ink: #4d2b12; }</style>
+              <div style="color: var(--report-ink)">x</div>"""
+    assert gr._undefined_style_tokens(html) == []
+
+
+def test_changing_one_token_changes_every_site():
+    """The point of the palette: a colour is edited in one place."""
+    head = gr._report_head_html("V1", "", "", "", "")
+    ink_refs = head.count('var(--report-ink)')
+    assert ink_refs > 1, "expected the ink token to be reused"
+    recoloured = head.replace('--report-ink: #4d2b12;', '--report-ink: #000000;')
+    assert '--report-ink: #000000;' in recoloured
+    # every reference still resolves to the single definition
+    assert recoloured.count('var(--report-ink)') == ink_refs
 
 
 # ===========================================================================
