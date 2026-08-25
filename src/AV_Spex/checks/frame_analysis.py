@@ -4477,7 +4477,8 @@ class EnhancedFrameAnalysis:
         max_refinement_iterations: int = 3,
         color_bars_end_time: float = None,
         bars_regions: Optional[List[Tuple[float, float]]] = None,
-        signals=None) -> Dict:
+        signals=None,
+        frame_config: 'FrameAnalysisConfig' = None) -> Dict:
         """
         Run complete enhanced frame analysis with optional iterative refinement.
 
@@ -4509,7 +4510,12 @@ class EnhancedFrameAnalysis:
         # Clear the sticky last-resort marker so it reflects this file only
         self.signalstats_analyzer.last_resort_period_note = None
 
-        frame_config = self.checks_config.outputs.frame_analysis
+        # Use the caller's config when given. Reading self.checks_config
+        # unconditionally would ignore an explicitly passed FrameAnalysisConfig
+        # — the enable_* flags would come from whatever was last saved in the
+        # GUI while method/duration_limit came from the argument.
+        if frame_config is None:
+            frame_config = self.checks_config.outputs.frame_analysis
         
         # Check which steps are enabled (handle both bool and str types)
         bitplane_check_enabled = self._is_step_enabled(frame_config.enable_bitplane_check)
@@ -5776,7 +5782,8 @@ def analyze_frame_quality(video_path: str,
         max_refinement_iterations=max_refinements,
         color_bars_end_time=color_bars_end_time,
         bars_regions=bars_regions,
-        signals=signals
+        signals=signals,
+        frame_config=frame_config,
     )
     
     return results

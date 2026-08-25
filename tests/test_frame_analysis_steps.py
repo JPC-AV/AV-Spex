@@ -117,3 +117,89 @@ def test_start_message_is_logged(caplog):
         _driver()._run_analysis_steps(
             [_step(start_message="Starting dropped sample detection...")], {}, None)
     assert "Starting dropped sample detection" in caplog.text
+
+
+# ===========================================================================
+# analyze() must honour the FrameAnalysisConfig it is given
+#
+# It previously read self.checks_config unconditionally, so an explicitly
+# passed config controlled method/duration_limit but NOT the enable_* flags —
+# those silently came from whatever was last saved in the GUI.
+# ===========================================================================
+
+def _analyzer(saved_config):
+    """An EnhancedFrameAnalysis wired with a known 'saved' config."""
+    from unittest.mock import MagicMock
+    from pathlib import Path
+    obj = object.__new__(EnhancedFrameAnalysis)
+    obj.video_path = Path('/v.mkv')
+    obj.video_id = 'V1'
+    obj.output_dir = Path('/tmp')
+    obj.signals = None
+    obj.check_cancelled = lambda: False
+    obj.checks_config = SimpleNamespace(
+        outputs=SimpleNamespace(frame_analysis=saved_config))
+    obj.qctools_report = None
+    obj.qctools_parser = None
+    obj.signalstats_analyzer = MagicMock()
+    obj.border_detector = MagicMock()
+    obj.brng_analyzer = None
+    return obj
+
+
+def _steps_chosen(analyzer, **analyze_kwargs):
+    """Run analyze() only as far as the enable decisions.
+
+    _run_analysis_steps returning False makes analyze() return immediately,
+    with results['steps_enabled'] already populated.
+    """
+    analyzer._run_analysis_steps = lambda steps, results, signals: False
+    return analyzer.analyze(signals=None, **analyze_kwargs)['steps_enabled']
+
+
+def _config(**overrides):
+    from AV_Spex.utils.config_setup import FrameAnalysisConfig
+    return FrameAnalysisConfig(**overrides)
+
+
+def test_passed_config_overrides_the_saved_one():
+    saved = _config(enable_border_detection=False, enable_brng_analysis=False,
+                    enable_signalstats=False)
+    chosen = _steps_chosen(_analyzer(saved), frame_config=_config())
+    assert chosen['border_detection'] is True
+    assert chosen['brng_analysis'] is True
+    assert chosen['signalstats'] is True
+
+
+def test_passed_config_can_also_disable():
+    saved = _config()  # everything on
+    off = _config(enable_bitplane_check=False, enable_border_detection=False,
+                  enable_brng_analysis=False, enable_signalstats=False,
+                  enable_dropped_sample_detection=False,
+                  enable_duplicate_frame_detection=False)
+    chosen = _steps_chosen(_analyzer(saved), frame_config=off)
+    assert not any(chosen.values())
+
+
+def test_without_an_argument_the_saved_config_still_applies():
+    """Callers that pass nothing keep the previous behaviour."""
+    saved = _config(enable_border_detection=False, enable_signalstats=False)
+    chosen = _steps_chosen(_analyzer(saved))
+    assert chosen['border_detection'] is False
+    assert chosen['signalstats'] is False
+    assert chosen['bitplane_check'] is True
+
+
+def test_entry_point_forwards_the_config_to_analyze(monkeypatch):
+    """analyze_frame_quality must hand its config down, not just read fields."""
+    from unittest.mock import MagicMock
+    from AV_Spex.checks import frame_analysis as fa
+
+    fake = MagicMock()
+    fake.analyze.return_value = {}
+    monkeypatch.setattr(fa, "EnhancedFrameAnalysis", lambda *a, **kw: fake)
+
+    cfg = _config(enable_signalstats=False)
+    fa.analyze_frame_quality("/v.mkv", frame_config=cfg)
+
+    assert fake.analyze.call_args.kwargs["frame_config"] is cfg
