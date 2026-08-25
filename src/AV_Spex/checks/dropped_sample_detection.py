@@ -153,6 +153,11 @@ def _generate_spectrogram(video_path, video_id, output_dir, signals=None, check_
     stdio buffer over a pipe. Time-based estimation is the same kind of
     Python-driven approach used by `generate_color_strip_base64`.
     """
+    # Callers may pass str or Path; the body does path arithmetic on both.
+    video_path = Path(video_path)
+    output_dir = Path(output_dir)
+    check_cancelled = check_cancelled or (lambda: False)
+
     output_path = output_dir / f"{video_id}_spectrogram.png"
 
     audio_duration, _, _ = _get_av_durations(video_path, video_id, output_dir)

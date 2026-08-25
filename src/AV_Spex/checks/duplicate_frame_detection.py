@@ -12,6 +12,7 @@ flat-field (signal-loss) frames that are not true freezes.
 """
 
 import os
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -86,6 +87,10 @@ def detect_duplicate_frames(
     Returns:
         DuplicateFrameResult or None if no QCTools report is available
     """
+    # Callers may pass str or Path; the body does path arithmetic on both.
+    video_path = Path(video_path)
+    output_dir = Path(output_dir)
+
     if not qctools_parser:
         logger.warning("Skipping duplicate frame detection — no QCTools report available\n")
         return None
