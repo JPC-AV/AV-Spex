@@ -1088,7 +1088,7 @@ def make_fixity_section_html(fixity_summary_json, fixity_file_content):
 
     section_body = ''.join(blocks)
     return (
-        '<div style="background-color: #f5e9e3; border: 1px solid #4d2b12; border-radius: 4px; '
+        '<div style="background-color: var(--report-paper); border: 1px solid var(--report-ink); border-radius: 4px; '
         'padding: 10px 30px 20px 30px; margin: 10px 0 20px 0;">'
         f'{section_body}'
         '</div>'
@@ -1313,10 +1313,10 @@ def make_audio_clipping_html(audio_clipping_csv):
     html = f'''
     <a id="link_clipping_methodology" href="javascript:void(0);"
        onclick="toggleContent('clipping_methodology', 'What is audio clipping detection? ▼', 'What is audio clipping detection? ▲')"
-       style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+       style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
        What is audio clipping detection? ▼</a>
-    <div id="clipping_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px;
-         margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+    <div id="clipping_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px;
+         margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
         <p style="margin: 0 0 10px 0;">
             <strong>Audio clipping detection</strong> scans the audio frames of the QCTools report to
             identify moments where the audio signal reaches or exceeds digital full scale, indicating
@@ -1357,10 +1357,10 @@ def make_audio_clipping_html(audio_clipping_csv):
     clipping_events = [r for r in rows[9:] if len(r) >= 2]
     if clipping_events:
         html += f'''
-        <a href="javascript:void(0);" onclick="toggleContent('audio_clipping_events', 'Show clipping events ({len(clipping_events)}) ▼', 'Hide clipping events ▲')" style="color: #378d6a; text-decoration: underline; margin: 10px 0; display: block;">Show clipping events ({len(clipping_events)}) ▼</a>
+        <a href="javascript:void(0);" onclick="toggleContent('audio_clipping_events', 'Show clipping events ({len(clipping_events)}) ▼', 'Hide clipping events ▲')" style="color: var(--report-accent); text-decoration: underline; margin: 10px 0; display: block;">Show clipping events ({len(clipping_events)}) ▼</a>
         <div id="audio_clipping_events" style="display: none;">
         <table style="border-collapse: collapse; margin: 10px 0;">
-            <tr><th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Timestamp</th><th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Peak Level (dBFS)</th><th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Flat Factor</th></tr>
+            <tr><th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Timestamp</th><th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Peak Level (dBFS)</th><th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Flat Factor</th></tr>
         '''
         for event in clipping_events:
             ff_val = event[2] if len(event) > 2 else "N/A"
@@ -1458,10 +1458,10 @@ def make_channel_imbalance_html(channel_imbalance_csv):
     html = f'''
     <a id="link_imbalance_methodology" href="javascript:void(0);"
        onclick="toggleContent('imbalance_methodology', 'What is channel imbalance analysis? ▼', 'What is channel imbalance analysis? ▲')"
-       style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+       style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
        What is channel imbalance analysis? ▼</a>
-    <div id="imbalance_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px;
-         margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+    <div id="imbalance_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px;
+         margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
         <p style="margin: 0 0 10px 0;">
             {methodology_text}
         </p>
@@ -1499,7 +1499,7 @@ def make_channel_imbalance_html(channel_imbalance_csv):
         html += f'<tr><td style="padding: 4px 12px; border: 1px solid #ddd;"><strong>Channel {ch} Mean RMS (dBFS)</strong></td><td style="padding: 4px 12px; border: 1px solid #ddd;">{channel_means[ch]}</td></tr>\n'
 
     if silent_channels:
-        html += f'<tr><td style="padding: 4px 12px; border: 1px solid #ddd;"><strong>Silent Channels</strong></td><td style="padding: 4px 12px; border: 1px solid #ddd; color: #dc3545;"><strong>{silent_channels}</strong></td></tr>\n'
+        html += f'<tr><td style="padding: 4px 12px; border: 1px solid #ddd;"><strong>Silent Channels</strong></td><td style="padding: 4px 12px; border: 1px solid #ddd; color: var(--report-danger);"><strong>{silent_channels}</strong></td></tr>\n'
 
     # For stereo, show simple difference and louder channel
     if num_channels == 2:
@@ -1532,11 +1532,11 @@ def make_channel_imbalance_html(channel_imbalance_csv):
             <h4 style="margin-top: 16px;">Pairwise Comparisons</h4>
             <table style="border-collapse: collapse; margin: 10px 0;">
                 <tr>
-                    <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Channel A</th>
-                    <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Channel B</th>
-                    <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Mean Diff (dB)</th>
-                    <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Characterization</th>
-                    <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Louder Channel</th>
+                    <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Channel A</th>
+                    <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Channel B</th>
+                    <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Mean Diff (dB)</th>
+                    <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Characterization</th>
+                    <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Louder Channel</th>
                 </tr>
             '''
             for row in pairwise_rows:
@@ -1646,10 +1646,10 @@ def make_identical_channels_html(identical_channels_csv):
     html = f'''
     <a id="link_identical_methodology" href="javascript:void(0);"
        onclick="toggleContent('identical_methodology', 'What is identical channel detection? ▼', 'What is identical channel detection? ▲')"
-       style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+       style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
        What is identical channel detection? ▼</a>
-    <div id="identical_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px;
-         margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+    <div id="identical_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px;
+         margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
         <p style="margin: 0 0 10px 0;">
             <strong>Identical channel detection</strong> looks for the same audio duplicated across two
             channels &mdash; a file that is stereo on paper but effectively mono. That is common when a
@@ -1704,13 +1704,13 @@ def make_identical_channels_html(identical_channels_csv):
         html += '''
         <table style="border-collapse: collapse; margin: 10px 0; font-size: 13px;">
             <tr>
-                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Channels</th>
-                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Matching Frames</th>
-                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Phase</th>
-                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Difference Peak</th>
-                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Program Peak</th>
-                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Compared</th>
-                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Result</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: var(--report-surface);">Channels</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: var(--report-surface);">Matching Frames</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: var(--report-surface);">Phase</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: var(--report-surface);">Difference Peak</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: var(--report-surface);">Program Peak</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: var(--report-surface);">Compared</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: var(--report-surface);">Result</th>
             </tr>
         '''
         for row in pair_rows:
@@ -1735,10 +1735,10 @@ def make_identical_channels_html(identical_channels_csv):
         <h4 style="margin-top: 16px;">Matching Regions</h4>
         <table style="border-collapse: collapse; margin: 10px 0; font-size: 13px;">
             <tr>
-                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Channels</th>
-                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Start</th>
-                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">End</th>
-                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Duration (s)</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: var(--report-surface);">Channels</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: var(--report-surface);">Start</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: var(--report-surface);">End</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: var(--report-surface);">Duration (s)</th>
             </tr>
         '''
         for row in region_rows:
@@ -1819,10 +1819,10 @@ def make_audible_timecode_html(audible_timecode_csv):
     html = f'''
     <a id="link_timecode_methodology" href="javascript:void(0);"
        onclick="toggleContent('timecode_methodology', 'What is audible timecode detection? ▼', 'What is audible timecode detection? ▲')"
-       style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+       style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
        What is audible timecode detection? ▼</a>
-    <div id="timecode_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px;
-         margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+    <div id="timecode_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px;
+         margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
         <p style="margin: 0 0 10px 0;">
             <strong>Audible timecode detection</strong> scans the audio frames of the QCTools report to
             identify the presence of Linear Timecode (LTC) artifacts &mdash; a biphase-modulated square
@@ -1913,19 +1913,19 @@ def make_audible_timecode_html(audible_timecode_csv):
         summary_text = (f"Audible timecode detected in {len(consensus_rows)} region(s), "
                         f"{span}; highest confidence: {top_conf}.")
         html += (
-            f'<p style="margin: 10px 0; padding: 10px 14px; background-color: #f5e9e3; '
-            f'border-radius: 4px; color: #4d2b12;">{summary_text}</p>'
+            f'<p style="margin: 10px 0; padding: 10px 14px; background-color: var(--report-paper); '
+            f'border-radius: 4px; color: var(--report-ink);">{summary_text}</p>'
         )
 
         html += '''
         <table style="border-collapse: collapse; margin: 10px 0;">
             <tr>
-                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Start Time</th>
-                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">End Time</th>
-                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Duration</th>
-                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Channel</th>
-                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Confidence</th>
-                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Detection Methods</th>
+                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Start Time</th>
+                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">End Time</th>
+                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Duration</th>
+                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Channel</th>
+                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Confidence</th>
+                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Detection Methods</th>
             </tr>
         '''
         for row in consensus_rows:
@@ -1989,10 +1989,10 @@ def make_audio_dropout_html(audio_dropout_csv):
     html = f'''
     <a id="link_dropout_methodology" href="javascript:void(0);"
        onclick="toggleContent('dropout_methodology', 'What is audio dropout detection? ▼', 'What is audio dropout detection? ▲')"
-       style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+       style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
        What is audio dropout detection? ▼</a>
-    <div id="dropout_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px;
-         margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+    <div id="dropout_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px;
+         margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
         <p style="margin: 0 0 10px 0;">
             <strong>Audio dropout detection</strong> identifies moments where the audio signal level
             drops suddenly and significantly, which is characteristic of tape dropout during analog
@@ -2044,18 +2044,18 @@ def make_audio_dropout_html(audio_dropout_csv):
             'low': '#ffc107',
         }
         html += f'''
-        <a href="javascript:void(0);" onclick="toggleContent('audio_dropout_events', 'Show dropout events ({len(dropout_events)}) ▼', 'Hide dropout events ▲')" style="color: #378d6a; text-decoration: underline; margin: 10px 0; display: block;">Show dropout events ({len(dropout_events)}) ▼</a>
+        <a href="javascript:void(0);" onclick="toggleContent('audio_dropout_events', 'Show dropout events ({len(dropout_events)}) ▼', 'Hide dropout events ▲')" style="color: var(--report-accent); text-decoration: underline; margin: 10px 0; display: block;">Show dropout events ({len(dropout_events)}) ▼</a>
         <div id="audio_dropout_events" style="display: none;">
         <table style="border-collapse: collapse; margin: 10px 0;">
             <tr>
-                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Timestamp Start</th>
-                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Timestamp End</th>
-                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Channel</th>
-                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Worst RMS (dBFS)</th>
-                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Median RMS (dBFS)</th>
-                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Drop (dB)</th>
-                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Confidence</th>
-                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Corroborating Metrics</th>
+                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Timestamp Start</th>
+                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Timestamp End</th>
+                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Channel</th>
+                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Worst RMS (dBFS)</th>
+                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Median RMS (dBFS)</th>
+                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Drop (dB)</th>
+                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Confidence</th>
+                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Corroborating Metrics</th>
             </tr>
         '''
         for event in dropout_events:
@@ -2152,10 +2152,10 @@ def make_clamped_levels_html(clamped_levels_csv, clamped_traces_csv=None):
     html = f'''
     <a id="link_clamp_methodology" href="javascript:void(0);"
        onclick="toggleContent('clamp_methodology', 'What is clamped-levels detection? ▼', 'What is clamped-levels detection? ▲')"
-       style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+       style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
        What is clamped-levels detection? ▼</a>
-    <div id="clamp_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px;
-         margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+    <div id="clamp_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px;
+         margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
         <p style="margin: 0 0 10px 0;">
             <strong>Clamped-levels detection</strong> flags analog-to-digital converters that truncate
             the video signal at the broadcast (legal) range limits. A clamped channel will pile up at
@@ -2189,14 +2189,14 @@ def make_clamped_levels_html(clamped_levels_csv, clamped_traces_csv=None):
     </table>
     <table style="border-collapse: collapse; margin: 10px 0;">
         <tr>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Channel</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Direction</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Limit</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Global Extreme</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Frames at/near Limit</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Hit %</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Frames Beyond Limit</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Verdict</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Channel</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Direction</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Limit</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Global Extreme</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Frames at/near Limit</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Hit %</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Frames Beyond Limit</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Verdict</th>
         </tr>
         {rows_html}
     </table>
@@ -2441,19 +2441,19 @@ def make_chroma_phase_html(chroma_phase_summary_csv, chroma_phase_events_csv):
     events_table = ""
     if events:
         events_table = f'''
-    <a href="javascript:void(0);" onclick="toggleContent('chroma_phase_events', 'Show chroma phase events ({len(events)}) ▼', 'Hide chroma phase events ▲')" style="color: #378d6a; text-decoration: underline; margin: 10px 0; display: block;">Show chroma phase events ({len(events)}) ▼</a>
+    <a href="javascript:void(0);" onclick="toggleContent('chroma_phase_events', 'Show chroma phase events ({len(events)}) ▼', 'Hide chroma phase events ▲')" style="color: var(--report-accent); text-decoration: underline; margin: 10px 0; display: block;">Show chroma phase events ({len(events)}) ▼</a>
     <div id="chroma_phase_events" style="display: none;">
     <table style="border-collapse: collapse; margin: 10px 0;">
         <tr>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Event</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Start</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">End</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Duration (s)</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Frames</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Rule</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Peak SATMAX</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Peak Time</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Hue at Peak (deg)</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Event</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Start</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">End</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Duration (s)</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Frames</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Rule</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Peak SATMAX</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Peak Time</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Hue at Peak (deg)</th>
         </tr>
         {rows_html}
     </table>
@@ -2467,10 +2467,10 @@ def make_chroma_phase_html(chroma_phase_summary_csv, chroma_phase_events_csv):
     html = f'''
     <a id="link_chroma_phase_methodology" href="javascript:void(0);"
        onclick="toggleContent('chroma_phase_methodology', 'What is chroma phase detection? ▼', 'What is chroma phase detection? ▲')"
-       style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+       style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
        What is chroma phase detection? ▼</a>
-    <div id="chroma_phase_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px;
-         margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+    <div id="chroma_phase_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px;
+         margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
         <p style="margin: 0 0 10px 0;">
             <strong>Chroma phase detection</strong> flags frames where the chroma signal has collapsed
             toward a single hue (typically cyan or magenta), usually caused by helical-scan tracking
@@ -2566,7 +2566,7 @@ def _make_chroma_phase_thumbs_html(chroma_phase_summary_csv, events):
         items_html += f'''
         <div style="text-align: center; margin: 5px;">
             <img src="{data_uri}"
-                 style="width: 300px; height: auto; border: 1px solid #4d2b12; cursor: pointer;"
+                 style="width: 300px; height: auto; border: 1px solid var(--report-ink); cursor: pointer;"
                  onclick="openImage(this.src, 'Chroma Phase Event {idx} - peak at {peak_time}')"
                  title="Click to enlarge" />
             <p style="font-size: 12px; margin: 4px 0 0 0;"><strong>Event {idx}</strong> &mdash; starts {start}</p>
@@ -2646,7 +2646,7 @@ def make_tone_leak_html(tone_leak_summary_csv, tone_leak_events_csv):
     channel_table = ""
     if channel_header and channel_rows:
         header_html = "".join(
-            f'<th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">{h}</th>'
+            f'<th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">{h}</th>'
             for h in channel_header
         )
         rows_html = ""
@@ -2697,18 +2697,18 @@ def make_tone_leak_html(tone_leak_summary_csv, tone_leak_events_csv):
                 f'</tr>\n'
             )
         events_table = f'''
-    <a href="javascript:void(0);" onclick="toggleContent('tone_leak_events', 'Show tone leak regions ({len(events)}) ▼', 'Hide tone leak regions ▲')" style="color: #378d6a; text-decoration: underline; margin: 10px 0; display: block;">Show tone leak regions ({len(events)}) ▼</a>
+    <a href="javascript:void(0);" onclick="toggleContent('tone_leak_events', 'Show tone leak regions ({len(events)}) ▼', 'Hide tone leak regions ▲')" style="color: var(--report-accent); text-decoration: underline; margin: 10px 0; display: block;">Show tone leak regions ({len(events)}) ▼</a>
     <div id="tone_leak_events" style="display: none;">
     <table style="border-collapse: collapse; margin: 10px 0;">
         <tr>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Start</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">End</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Stream</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Channel</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Duration (s)</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Mean Comb (dB)</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Peak Comb (dB)</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Median 1kHz Level (dBFS)</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Start</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">End</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Stream</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Channel</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Duration (s)</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Mean Comb (dB)</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Peak Comb (dB)</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Median 1kHz Level (dBFS)</th>
         </tr>
         {event_rows_html}
     </table>
@@ -2717,10 +2717,10 @@ def make_tone_leak_html(tone_leak_summary_csv, tone_leak_events_csv):
     html = f'''
     <a id="link_tone_leak_methodology" href="javascript:void(0);"
        onclick="toggleContent('tone_leak_methodology', 'What is tone leak detection? ▼', 'What is tone leak detection? ▲')"
-       style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+       style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
        What is tone leak detection? ▼</a>
-    <div id="tone_leak_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px;
-         margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+    <div id="tone_leak_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px;
+         margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
         <p style="margin: 0 0 10px 0;">
             <strong>Tone leak detection</strong> flags a continuous ~1 kHz calibration/reference tone
             leaking from the transfer chain into the recorded audio &mdash; heard as a faint
@@ -2918,7 +2918,7 @@ def make_color_bars_graphs(video_id, qctools_colorbars_duration_output, colorbar
     # instead of widening the column and pushing the fixed-width chart into the
     # section's overflow clip.
     colorbars_html = f'''
-    <div style="background-color: #f5e9e3; padding: 20px 30px; border-radius: 6px;">
+    <div style="background-color: var(--report-paper); padding: 20px 30px; border-radius: 6px;">
         <div style="display: flex; align-items: center; justify-content: center;">
             <div style="flex: 0 0 200px; max-width: 200px; overflow-wrap: break-word;">
                 {thumbnail_html}
@@ -3101,12 +3101,12 @@ def make_bars_detection_comparison_html(qct_csv_path, clams_csv_path, agreement_
     # both methods together, then additional bars); "not detected" rows last.
     body_rows.sort(key=lambda r: (r[3] is None, r[3] if r[3] is not None else 0.0))
 
-    cell = "padding: 6px 12px; border: 1px solid #e0d0c0;"
+    cell = "padding: 6px 12px; border: 1px solid var(--report-border-soft);"
 
     def render_row(source, pass_label, found, start_sec, end_sec, is_secondary):
-        bg = "background-color: #fff3cd;" if is_secondary else ""
+        bg = "background-color: var(--report-notice-bg);" if is_secondary else ""
         if found:
-            detected = '<span style="color: #0a5f1c; font-weight: bold;">✓ Detected</span>'
+            detected = '<span style="color: var(--report-success); font-weight: bold;">✓ Detected</span>'
             dur = f"{end_sec - start_sec:.1f}s" if (start_sec is not None and end_sec is not None) else "—"
         else:
             detected = '<span style="color: #999;">Not detected</span>'
@@ -3138,8 +3138,8 @@ def make_bars_detection_comparison_html(qct_csv_path, clams_csv_path, agreement_
     if mid_count:
         summary_text += f" {mid_count} additional mid-file detection(s) shown below (report-only)."
     summary_html = (
-        f'<p style="margin: 10px 0; padding: 10px 14px; background-color: #f5e9e3; '
-        f'border-radius: 4px; color: #4d2b12;">{summary_text}</p>'
+        f'<p style="margin: 10px 0; padding: 10px 14px; background-color: var(--report-paper); '
+        f'border-radius: 4px; color: var(--report-ink);">{summary_text}</p>'
     )
 
     note_lines = [
@@ -3159,16 +3159,16 @@ def make_bars_detection_comparison_html(qct_csv_path, clams_csv_path, agreement_
             "head bars."
         )
     note = "".join(
-        f'<p style="font-size: 13px; color: #4d2b12; margin: 10px 0 0 0;">{line}</p>'
+        f'<p style="font-size: 13px; color: var(--report-ink); margin: 10px 0 0 0;">{line}</p>'
         for line in note_lines
     )
 
     legend = ""
     if has_secondary:
         legend = (
-            '<p style="font-size: 13px; color: #4d2b12; margin: 8px 0 0 0;">'
+            '<p style="font-size: 13px; color: var(--report-ink); margin: 8px 0 0 0;">'
             '<span style="display: inline-block; width: 12px; height: 12px; '
-            'background-color: #fff3cd; border: 1px solid #e0d0c0; vertical-align: middle; '
+            'background-color: var(--report-notice-bg); border: 1px solid var(--report-border-soft); vertical-align: middle; '
             'margin-right: 6px;"></span>'
             '= targeted re-scan (report-only)</p>'
         )
@@ -3185,7 +3185,7 @@ def make_bars_detection_comparison_html(qct_csv_path, clams_csv_path, agreement_
     {summary_html}
     <table style="border-collapse: collapse; margin-top: 10px;">
         <thead>
-            <tr style="background-color: #f5e9e3;">
+            <tr style="background-color: var(--report-paper);">
                 <th style="text-align: left; {cell}">Source</th>
                 <th style="text-align: left; {cell}">Pass</th>
                 <th style="text-align: left; {cell}">Bars detected</th>
@@ -3273,7 +3273,7 @@ def make_tone_detection_html(tone_csv_path):
 
     if not tones:
         return (
-            '<div style="background-color: #f5e9e3; padding: 10px;">'
+            '<div style="background-color: var(--report-paper); padding: 10px;">'
             '<p style="margin: 0;">CLAMS tone detector ran on the audio track '
             'and found no monotonic spans meeting the minimum duration threshold.</p>'
             '</div>'
@@ -3281,10 +3281,10 @@ def make_tone_detection_html(tone_csv_path):
 
     has_secondary = any(p != "primary" for p, _, _ in tones)
 
-    cell = "padding: 6px 12px; border: 1px solid #e0d0c0;"
+    cell = "padding: 6px 12px; border: 1px solid var(--report-border-soft);"
 
     def render_row(i, pass_label, s, e):
-        bg = "background-color: #fff3cd;" if pass_label != "primary" else ""
+        bg = "background-color: var(--report-notice-bg);" if pass_label != "primary" else ""
         return (
             f'<tr style="{bg}">'
             f'<td style="{cell} text-align: right;">{i + 1}</td>'
@@ -3311,8 +3311,8 @@ def make_tone_detection_html(tone_csv_path):
     if secondary_count:
         summary_text += f" {secondary_count} targeted re-scan detection(s) shown below."
     summary_html = (
-        f'<p style="margin: 10px 0; padding: 10px 14px; background-color: #f5e9e3; '
-        f'border-radius: 4px; color: #4d2b12;">{summary_text}</p>'
+        f'<p style="margin: 10px 0; padding: 10px 14px; background-color: var(--report-paper); '
+        f'border-radius: 4px; color: var(--report-ink);">{summary_text}</p>'
     )
 
     note_lines = [
@@ -3325,16 +3325,16 @@ def make_tone_detection_html(tone_csv_path):
             "primary tone window, run with relaxed thresholds (tolerance 0.7, min duration 500 ms)."
         )
     note = "".join(
-        f'<p style="font-size: 13px; color: #4d2b12; margin: 10px 0 0 0;">{line}</p>'
+        f'<p style="font-size: 13px; color: var(--report-ink); margin: 10px 0 0 0;">{line}</p>'
         for line in note_lines
     )
 
     legend = ""
     if has_secondary:
         legend = (
-            '<p style="font-size: 13px; color: #4d2b12; margin: 8px 0 0 0;">'
+            '<p style="font-size: 13px; color: var(--report-ink); margin: 8px 0 0 0;">'
             '<span style="display: inline-block; width: 12px; height: 12px; '
-            'background-color: #fff3cd; border: 1px solid #e0d0c0; vertical-align: middle; '
+            'background-color: var(--report-notice-bg); border: 1px solid var(--report-border-soft); vertical-align: middle; '
             'margin-right: 6px;"></span>'
             '= targeted re-scan (report-only)</p>'
         )
@@ -3343,7 +3343,7 @@ def make_tone_detection_html(tone_csv_path):
     {summary_html}
     <table style="border-collapse: collapse; margin-top: 10px;">
         <thead>
-            <tr style="background-color: #f5e9e3;">
+            <tr style="background-color: var(--report-paper);">
                 <th style="text-align: left; {cell}">#</th>
                 <th style="text-align: left; {cell}">Pass</th>
                 <th style="text-align: left; {cell}">Start</th>
@@ -3490,7 +3490,7 @@ def make_profile_piecharts(qctools_profile_check_output, sorted_thumbs_dict, fai
             if percentage > 0 and not failure_details:
                 # Failure specifics are shown in the timeline below the pies
                 summary_html = f"""
-                <div style="display: flex; flex-direction: column; align-items: flex-start; background-color: #f5e9e3; padding: 10px;">
+                <div style="display: flex; flex-direction: column; align-items: flex-start; background-color: var(--report-paper); padding: 10px;">
                     <p><b>{failed_frames} frames outside threshold &mdash; see timeline below</b></p>
                 </div>
                 """
@@ -3544,11 +3544,11 @@ def make_profile_piecharts(qctools_profile_check_output, sorted_thumbs_dict, fai
                     
                     full_table_html = f"""
                     <div id="table_{tag_id}" style="display: none; margin-top: 10px;">
-                        <table style="border-collapse: collapse; width: 100%; border: 1px solid #4d2b12;">
+                        <table style="border-collapse: collapse; width: 100%; border: 1px solid var(--report-ink);">
                             <tr style="background-color: #fbe4eb;">
-                                <th style="border: 1px solid #4d2b12; padding: 8px;">Timestamp</th>
-                                <th style="border: 1px solid #4d2b12; padding: 8px;">Value</th>
-                                <th style="border: 1px solid #4d2b12; padding: 8px;">Threshold</th>
+                                <th style="border: 1px solid var(--report-ink); padding: 8px;">Timestamp</th>
+                                <th style="border: 1px solid var(--report-ink); padding: 8px;">Value</th>
+                                <th style="border: 1px solid var(--report-ink); padding: 8px;">Threshold</th>
                             </tr>
                             {''.join(table_rows)}
                         </table>
@@ -3556,17 +3556,17 @@ def make_profile_piecharts(qctools_profile_check_output, sorted_thumbs_dict, fai
                     """
                 
                 summary_html = f"""
-                <div style="display: flex; flex-direction: column; align-items: flex-start; background-color: #f5e9e3; padding: 10px; max-height: 400px; overflow-y: auto;">
+                <div style="display: flex; flex-direction: column; align-items: flex-start; background-color: var(--report-paper); padding: 10px; max-height: 400px; overflow-y: auto;">
                     <p><b>Peak Values outside of Threshold for {tag}:</b></p>
                     {formatted_failures}
-                    <a id="link_{tag_id}" href="javascript:void(0);" onclick="toggleTable('{tag_id}')" style="color: #378d6a; text-decoration: underline; margin-top: 10px;">Show all failures ▼</a>
+                    <a id="link_{tag_id}" href="javascript:void(0);" onclick="toggleTable('{tag_id}')" style="color: var(--report-accent); text-decoration: underline; margin-top: 10px;">Show all failures ▼</a>
                     {full_table_html}
                 </div>
                 """
             else:
                 # For 0% failures, show a simple message without thumbnails
                 summary_html = f"""
-                <div style="display: flex; flex-direction: column; align-items: flex-start; background-color: #f5e9e3; padding: 10px;">
+                <div style="display: flex; flex-direction: column; align-items: flex-start; background-color: var(--report-paper); padding: 10px;">
                     <p><b>All values within specified threshold</b></p>
                 </div>
                 """
@@ -3598,7 +3598,7 @@ def make_profile_piecharts(qctools_profile_check_output, sorted_thumbs_dict, fai
 
             # Wrap everything in one div
             pie_chart_html = f"""
-            <div style="display: flex; flex-direction: column; align-items: start; background-color: #f5e9e3; padding: 10px;"> 
+            <div style="display: flex; flex-direction: column; align-items: start; background-color: var(--report-paper); padding: 10px;"> 
                 <div style="width: 400px;">{pie_fig.to_html(full_html=False, include_plotlyjs='cdn', config=config)}</div>
                 {summary_html}
             </div>
@@ -4075,14 +4075,14 @@ def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_d
         </tr>
         """)
     full_table_html = f"""
-    <a id="link_evalbars_all" href="javascript:void(0);" onclick="toggleTable('evalbars_all')" style="color: #378d6a; text-decoration: underline; margin-top: 10px;">Show all failures ▼</a>
+    <a id="link_evalbars_all" href="javascript:void(0);" onclick="toggleTable('evalbars_all')" style="color: var(--report-accent); text-decoration: underline; margin-top: 10px;">Show all failures ▼</a>
     <div id="table_evalbars_all" style="display: none; margin-top: 10px; max-height: 400px; overflow-y: auto;">
-        <table style="border-collapse: collapse; width: 100%; border: 1px solid #4d2b12;">
+        <table style="border-collapse: collapse; width: 100%; border: 1px solid var(--report-ink);">
             <tr style="background-color: #fbe4eb;">
-                <th style="border: 1px solid #4d2b12; padding: 8px;">Timestamp</th>
-                <th style="border: 1px solid #4d2b12; padding: 8px;">Tag</th>
-                <th style="border: 1px solid #4d2b12; padding: 8px;">Value</th>
-                <th style="border: 1px solid #4d2b12; padding: 8px;">Threshold</th>
+                <th style="border: 1px solid var(--report-ink); padding: 8px;">Timestamp</th>
+                <th style="border: 1px solid var(--report-ink); padding: 8px;">Tag</th>
+                <th style="border: 1px solid var(--report-ink); padding: 8px;">Value</th>
+                <th style="border: 1px solid var(--report-ink); padding: 8px;">Threshold</th>
             </tr>
             {''.join(table_rows)}
         </table>
@@ -4106,7 +4106,7 @@ def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_d
                      " analysis uses to choose where to place its analysis periods.")
     timeline_html = f"""
     {FAILURE_SECTION_JS}
-    <div style="background-color: #f5e9e3; padding: 10px; margin-top: 10px;">
+    <div style="background-color: var(--report-paper); padding: 10px; margin-top: 10px;">
         <p><b>Failure distribution over the video's duration</b></p>
         <p style="font-size: 13px;">Each line shows, per {bin_label}-second interval, the percentage of frames
         whose value fell outside that tag's threshold.
@@ -4171,7 +4171,7 @@ def generate_bitplane_html(frame_outputs):
         status_color = '#666666'
         status_icon = '&#x2753;'
 
-    html = "<h3 style='color: #bf971b;'>Bitplane Check (7th–10th Bit Verification)</h3>"
+    html = "<h3 style='color: var(--report-gold);'>Bitplane Check (7th–10th Bit Verification)</h3>"
     html += f"""
     <p style="font-size: 14px; color: {status_color}; font-weight: bold;">
         {status_icon} {message}
@@ -4183,16 +4183,16 @@ def generate_bitplane_html(frame_outputs):
         html += """
         <table style="border-collapse: collapse; margin: 10px 0; font-size: 13px;">
             <tr style="background-color: #f0ebe4;">
-                <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: left;">Bitplane</th>
-                <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">Avg Noise (all channels)</th>
+                <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: left;">Bitplane</th>
+                <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">Avg Noise (all channels)</th>
             </tr>
         """
         for bp_name, avg in overall_avgs.items():
             val_str = f"{avg:.6f}" if avg is not None else "N/A"
             html += f"""
             <tr>
-                <td style="padding: 6px 12px; border: 1px solid #d0c0b0;">{bp_name}</td>
-                <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{val_str}</td>
+                <td style="padding: 6px 12px; border: 1px solid var(--report-border);">{bp_name}</td>
+                <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{val_str}</td>
             </tr>
             """
         html += "</table>"
@@ -4222,17 +4222,17 @@ def generate_bitplane_html(frame_outputs):
         html += """
         <a id="link_bitplane_detail" href="javascript:void(0);"
            onclick="toggleContent('bitplane_detail', 'Per-channel detail ▼', 'Per-channel detail ▲')"
-           style="color: #378d6a; text-decoration: underline; margin: 10px 0; display: block; font-size: 13px;">
+           style="color: var(--report-accent); text-decoration: underline; margin: 10px 0; display: block; font-size: 13px;">
            Per-channel detail ▼</a>
         <div id="bitplane_detail" style="display: none; margin: 0 0 16px 0;">
         <table style="border-collapse: collapse; font-size: 13px;">
             <tr style="background-color: #f0ebe4;">
-                <th style="padding: 6px 12px; border: 1px solid #d0c0b0;">Channel</th>
-                <th style="padding: 6px 12px; border: 1px solid #d0c0b0;">Bitplane</th>
-                <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: center;">Status</th>
-                <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">Avg Noise</th>
-                <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">Max Noise</th>
-                <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">Zero Frames</th>
+                <th style="padding: 6px 12px; border: 1px solid var(--report-border);">Channel</th>
+                <th style="padding: 6px 12px; border: 1px solid var(--report-border);">Bitplane</th>
+                <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: center;">Status</th>
+                <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">Avg Noise</th>
+                <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">Max Noise</th>
+                <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">Zero Frames</th>
             </tr>
         """
         for ch_name, bp_data in channels.items():
@@ -4245,14 +4245,14 @@ def generate_bitplane_html(frame_outputs):
                 style = f' style="background-color: {row_color};"' if row_color else ''
                 html += f"""
                 <tr{style}>
-                    <td style="padding: 6px 12px; border: 1px solid #d0c0b0;">{ch_name}</td>
-                    <td style="padding: 6px 12px; border: 1px solid #d0c0b0;">{bp_name}</td>
-                    <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: center;">
+                    <td style="padding: 6px 12px; border: 1px solid var(--report-border);">{ch_name}</td>
+                    <td style="padding: 6px 12px; border: 1px solid var(--report-border);">{bp_name}</td>
+                    <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: center;">
                         {'&#x274C; empty' if bp_status == 'empty' else '&#x2705; active'}
                     </td>
-                    <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{avg_noise:.6f}</td>
-                    <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{max_noise:.6f}</td>
-                    <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{zero_pct:.1f}%</td>
+                    <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{avg_noise:.6f}</td>
+                    <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{max_noise:.6f}</td>
+                    <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{zero_pct:.1f}%</td>
                 </tr>
                 """
         html += "</table></div>"
@@ -4282,21 +4282,21 @@ def generate_frame_analysis_html(frame_outputs, video_id):
 
     html = """
     <div class="frame-analysis-section" id="section-frame-analysis">
-        <h2 style="color: #0a5f1c; text-decoration: underline; margin-top: 30px;">Frame Analysis Results</h2>
+        <h2 style="color: var(--report-success); text-decoration: underline; margin-top: 30px;">Frame Analysis Results</h2>
     """
 
     # Border Detection Section
     if frame_outputs['border_visualization'] or frame_outputs['border_data']:
-        html += "<h3 id='section-border-detection' style='color: #bf971b;'>Border Detection</h3>"
+        html += "<h3 id='section-border-detection' style='color: var(--report-gold);'>Border Detection</h3>"
         
         # Methodology explanation (collapsible)
         html += """
         <a id="link_border_methodology" href="javascript:void(0);" 
            onclick="toggleContent('border_methodology', 'What is border detection? ▼', 'What is border detection? ▲')" 
-           style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+           style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
            What is border detection? ▼</a>
-        <div id="border_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px; 
-             margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+        <div id="border_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px; 
+             margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
             <p style="margin: 0 0 10px 0;">
                 <strong>Border detection</strong> identifies the active picture area within the video frame, 
                 excluding non-content regions such as blanking intervals, head switching noise, and 
@@ -4437,23 +4437,23 @@ def generate_frame_analysis_html(frame_outputs, video_id):
             if active_area_html and hs_html:
                 html += f"""
                 <div style="display: flex; gap: 12px; margin: 10px 0; align-items: stretch;">
-                    <div style="background-color: #f5e9e3; padding: 10px; border-radius: 4px; flex: 1; min-width: 0;">
+                    <div style="background-color: var(--report-paper); padding: 10px; border-radius: 4px; flex: 1; min-width: 0;">
                         {active_area_html}
                     </div>
-                    <div style="background-color: #f5e9e3; padding: 10px; border-radius: 4px; flex: 1; min-width: 0;">
+                    <div style="background-color: var(--report-paper); padding: 10px; border-radius: 4px; flex: 1; min-width: 0;">
                         {hs_html}
                     </div>
                 </div>
                 """
             elif active_area_html:
                 html += f"""
-                <div style="background-color: #f5e9e3; padding: 10px; margin: 10px 0; border-radius: 4px;">
+                <div style="background-color: var(--report-paper); padding: 10px; margin: 10px 0; border-radius: 4px;">
                     {active_area_html}
                 </div>
                 """
             elif hs_html:
                 html += f"""
-                <div style="background-color: #f5e9e3; padding: 10px; margin: 10px 0; border-radius: 4px;">
+                <div style="background-color: var(--report-paper); padding: 10px; margin: 10px 0; border-radius: 4px;">
                     {hs_html}
                 </div>
                 """
@@ -4468,7 +4468,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                 <div style="margin: 15px 0;">
                     <p style="font-size: 13px; color: #666; margin-bottom: 6px;"><em>{viz_label}</em></p>
                     <img src="data:image/jpeg;base64,{encoded_img}" 
-                         style="max-width: 100%; height: auto; border: 1px solid #4d2b12;"
+                         style="max-width: 100%; height: auto; border: 1px solid var(--report-ink);"
                          alt="{viz_label} visualization" />
                 </div>
                 """
@@ -4478,8 +4478,8 @@ def generate_frame_analysis_html(frame_outputs, video_id):
         # === Border Refinement Section ===
         if refinement_iterations and refinement_iterations > 0:
             html += f"""
-            <div style="margin-top: 20px; padding: 14px 16px; background-color: #fff3cd; border: 1px solid #bf971b; border-radius: 4px;">
-                <p style="margin: 0 0 10px 0; font-weight: bold; color: #856404;">
+            <div style="margin-top: 20px; padding: 14px 16px; background-color: var(--report-notice-bg); border: 1px solid var(--report-gold); border-radius: 4px;">
+                <p style="margin: 0 0 10px 0; font-weight: bold; color: var(--report-notice-ink);">
                     ⚠️ Border Refinement Performed ({refinement_iterations} iteration{'s' if refinement_iterations > 1 else ''})
                 </p>
                 <p style="margin: 0 0 10px 0; font-size: 13px;">
@@ -4503,10 +4503,10 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     html += f"""
                 <table style="border-collapse: collapse; width: 100%; font-size: 13px; margin-bottom: 10px;">
                     <tr style="background-color: rgba(255,255,255,0.5);">
-                        <th style="padding: 5px 10px; text-align: left; border-bottom: 1px solid #bf971b;"></th>
-                        <th style="padding: 5px 10px; text-align: left; border-bottom: 1px solid #bf971b;">Initial</th>
-                        <th style="padding: 5px 10px; text-align: left; border-bottom: 1px solid #bf971b;">Final</th>
-                        <th style="padding: 5px 10px; text-align: left; border-bottom: 1px solid #bf971b;">Change</th>
+                        <th style="padding: 5px 10px; text-align: left; border-bottom: 1px solid var(--report-gold);"></th>
+                        <th style="padding: 5px 10px; text-align: left; border-bottom: 1px solid var(--report-gold);">Initial</th>
+                        <th style="padding: 5px 10px; text-align: left; border-bottom: 1px solid var(--report-gold);">Final</th>
+                        <th style="padding: 5px 10px; text-align: left; border-bottom: 1px solid var(--report-gold);">Change</th>
                     </tr>
                     <tr>
                         <td style="padding: 4px 10px; font-weight: bold;">Active area</td>
@@ -4595,7 +4595,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     html += f"""
                         <div style="flex: 1 1 0; min-width: 180px; max-width: {max(100 // len(refinement_thumbs), 20)}%; text-align: center;">
                             <img src="data:image/jpeg;base64,{encoded_img}"
-                                 style="width: 100%; height: auto; border: 1px solid #4d2b12; cursor: pointer; transition: opacity 0.2s;"
+                                 style="width: 100%; height: auto; border: 1px solid var(--report-ink); cursor: pointer; transition: opacity 0.2s;"
                                  onmouseover="this.style.opacity='0.85'" onmouseout="this.style.opacity='1'"
                                  onclick="openImage(this.src, '{caption}')"
                                  title="Click to enlarge"
@@ -4609,16 +4609,16 @@ def generate_frame_analysis_html(frame_outputs, video_id):
     
     # Signalstats Analysis Section
     if frame_outputs['signalstats_analysis']:
-        html += "<h3 id='section-signalstats' style='color: #bf971b;'>Signalstats Analysis</h3>"
+        html += "<h3 id='section-signalstats' style='color: var(--report-gold);'>Signalstats Analysis</h3>"
         
         # Methodology explanation (collapsible)
         html += """
         <a id="link_signalstats_methodology" href="javascript:void(0);" 
            onclick="toggleContent('signalstats_methodology', 'What is signalstats analysis? ▼', 'What is signalstats analysis? ▲')" 
-           style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+           style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
            What is signalstats analysis? ▼</a>
-        <div id="signalstats_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px; 
-             margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+        <div id="signalstats_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px; 
+             margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
             <p style="margin: 0 0 10px 0;">
                 <strong>Signalstats analysis</strong> evaluates broadcast range compliance across sampled 
                 time periods of the video. It reads the FFmpeg 
@@ -4750,11 +4750,11 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                         <figure style="margin: 12px 0 0 0;">
                             <img src="{uri}" alt="{caption_label}"
                                  style="display: block; width: 100%; height: auto;
-                                        border: 1px solid #e0d0c0; border-radius: 5px;">
+                                        border: 1px solid var(--report-border-soft); border-radius: 5px;">
                             <figcaption style="margin-top: 8px;">
                                 <span style="display: inline-block; font-size: 11px; font-weight: 600;
-                                             color: #4d2b12; background-color: #f8f6f3;
-                                             border: 1px solid #e0d0c0; border-radius: 10px;
+                                             color: var(--report-ink); background-color: var(--report-panel);
+                                             border: 1px solid var(--report-border-soft); border-radius: 10px;
                                              padding: 2px 10px;">{badge_text}</span>
                             </figcaption>
                         </figure>
@@ -4779,7 +4779,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                             <span style="font-size: 11px; text-transform: uppercase;
                                          letter-spacing: 0.06em; color: #8a7a6d;
                                          font-weight: 600;">{label}</span>
-                            <span style="font-size: 22px; font-weight: 700; color: #4d2b12;
+                            <span style="font-size: 22px; font-weight: 700; color: var(--report-ink);
                                          white-space: nowrap;">{value_main}</span>
                         </div>
                         <div style="font-size: 12px; color: #9a8a7d; text-align: right;
@@ -4808,7 +4808,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
 
                 html += f"""
                 <div style="margin: 16px 0;">
-                    <p style="font-weight: bold; margin-bottom: 10px; color: #4d2b12;">Overall Results{region_label}</p>
+                    <p style="font-weight: bold; margin-bottom: 10px; color: var(--report-ink);">Overall Results{region_label}</p>
                     <div style="display: flex; flex-direction: column; gap: 10px; max-width: 560px;">
                         {''.join(cards)}
                     </div>
@@ -4821,7 +4821,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                 active_area = signalstats_data['results']['active_area']
                 html += f"""
                 <div style="margin: 16px 0;">
-                    <p style="font-weight: bold; margin-bottom: 8px; color: #4d2b12;">Active Area Results</p>
+                    <p style="font-weight: bold; margin-bottom: 8px; color: var(--report-ink);">Active Area Results</p>
                     <table style="border-collapse: collapse; width: auto; margin: 0;">
                         <tr>
                             <td style="padding: 4px 12px 4px 0; color: #555; font-size: 13px; border: none;">Frames with violations</td>
@@ -4859,7 +4859,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                 
                 html += f"""
                 <div style="margin: 16px 0;">
-                    <p style="font-weight: bold; margin-bottom: 8px; color: #4d2b12;">
+                    <p style="font-weight: bold; margin-bottom: 8px; color: var(--report-ink);">
                         Period Comparison: {len(comparison_results)} periods{coverage_label}
                     </p>
                 """
@@ -4893,10 +4893,10 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                         diag_bg = ''
                     
                     html += f"""
-                    <div style="background-color: #f5e9e3; padding: 10px 14px; margin: 6px 0; 
-                                border-radius: 4px; border: 1px solid #e0d0c0;">
+                    <div style="background-color: var(--report-paper); padding: 10px 14px; margin: 6px 0; 
+                                border-radius: 4px; border: 1px solid var(--report-border-soft);">
                         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                            <span style="font-weight: bold; color: #4d2b12;">
+                            <span style="font-weight: bold; color: var(--report-ink);">
                                 Period {period_num}: {start_display} – {end_display}
                             </span>
                     """
@@ -4993,7 +4993,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                 
                 html += f"""
                 <div style="margin: 16px 0;">
-                    <p style="font-weight: bold; margin-bottom: 8px; color: #4d2b12;">
+                    <p style="font-weight: bold; margin-bottom: 8px; color: var(--report-ink);">
                         Analysis Periods: {len(periods)} periods{coverage_label}
                     </p>
                 """
@@ -5011,9 +5011,9 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     end_display = _seconds_to_display(start + duration)
                     
                     html += f"""
-                    <div style="background-color: #f5e9e3; padding: 8px 14px; margin: 4px 0; 
-                                border-radius: 4px; border: 1px solid #e0d0c0; font-size: 13px;">
-                        <span style="font-weight: bold; color: #4d2b12;">Period {i+1}:</span> 
+                    <div style="background-color: var(--report-paper); padding: 8px 14px; margin: 4px 0; 
+                                border-radius: 4px; border: 1px solid var(--report-border-soft); font-size: 13px;">
+                        <span style="font-weight: bold; color: var(--report-ink);">Period {i+1}:</span> 
                         {start_display} – {end_display} ({duration}s duration)
                     </div>
                     """
@@ -5025,16 +5025,16 @@ def generate_frame_analysis_html(frame_outputs, video_id):
     
     # BRNG Analysis Section
     if frame_outputs['brng_analysis']:
-        html += "<h3 id='section-brng-analysis' style='color: #bf971b;'>BRNG Violation Analysis</h3>"
+        html += "<h3 id='section-brng-analysis' style='color: var(--report-gold);'>BRNG Violation Analysis</h3>"
         
         # Methodology explanation (collapsible)
         html += """
         <a id="link_brng_methodology" href="javascript:void(0);" 
            onclick="toggleContent('brng_methodology', 'What is BRNG analysis? ▼', 'What is BRNG analysis? ▲')" 
-           style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+           style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
            What is BRNG analysis? ▼</a>
-        <div id="brng_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px; 
-             margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+        <div id="brng_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px; 
+             margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
             <p style="margin: 0 0 10px 0;">
                 <strong>BRNG (Broadcast Range)</strong> measures whether pixel values fall outside the 
                 broadcast-legal range (16–235 for luma, 16–240 for chroma in 8-bit video). Pixels outside 
@@ -5196,8 +5196,8 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                                  "Interpret the values below with care."))
                 confidence_note = brng_data.get('period_confidence_note') or default_note
                 html += f"""
-            <div style="background-color: #fff3cd; padding: 12px 16px; margin: 10px 0;
-                        border-left: 4px solid #bf971b; border-radius: 0 4px 4px 0;">
+            <div style="background-color: var(--report-notice-bg); padding: 12px 16px; margin: 10px 0;
+                        border-left: 4px solid var(--report-gold); border-radius: 0 4px 4px 0;">
                 <p style="margin: 0; font-size: 14px;"><strong>{heading}:</strong> {confidence_note}</p>
                 <p style="margin: 6px 0 0 0; font-size: 13px; color: #6b5a3e;">{qualifier}</p>
             </div>
@@ -5214,7 +5214,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                 
                 html += f"""
                 <div style="margin: 16px 0;">
-                    <p style="font-weight: bold; margin-bottom: 8px; color: #4d2b12;">
+                    <p style="font-weight: bold; margin-bottom: 8px; color: var(--report-ink);">
                         Analysis Coverage: {len(period_summaries)} periods 
                         ({_seconds_to_display(time_range_start)} – {_seconds_to_display(time_range_end)})
                     </p>
@@ -5238,10 +5238,10 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     bar_color = '#d32f2f' if bar_pct > 50 else '#bf971b' if bar_pct > 20 else '#1976d2'
                     
                     html += f"""
-                    <div style="background-color: #f5e9e3; padding: 10px 14px; margin: 6px 0; 
-                                border-radius: 4px; border: 1px solid #e0d0c0;">
+                    <div style="background-color: var(--report-paper); padding: 10px 14px; margin: 6px 0; 
+                                border-radius: 4px; border: 1px solid var(--report-border-soft);">
                         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-                            <span style="font-weight: bold; color: #4d2b12;">
+                            <span style="font-weight: bold; color: var(--report-ink);">
                                 Period {p_num}: {_seconds_to_display(p_start)} – {_seconds_to_display(p_end)}
                             </span>
                             <span style="display: flex; align-items: center; gap: 6px;">
@@ -5352,7 +5352,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
 
                     html += """
                     <div style="flex: 1 1 320px; min-width: 0;">
-                        <p style="font-weight: bold; margin-bottom: 8px; color: #4d2b12;">Violation Types Detected</p>
+                        <p style="font-weight: bold; margin-bottom: 8px; color: var(--report-ink);">Violation Types Detected</p>
                     """
                     
                     # Sort by count (descending)
@@ -5417,8 +5417,8 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     # High edge percentage warning
                     if edge_pct > 50:
                         html += f"""
-                        <div style="background-color: #fff3cd; padding: 8px 12px; margin-top: 8px; 
-                                    border-left: 3px solid #bf971b; border-radius: 0 4px 4px 0; font-size: 13px;">
+                        <div style="background-color: var(--report-notice-bg); padding: 8px 12px; margin-top: 8px; 
+                                    border-left: 3px solid var(--report-gold); border-radius: 0 4px 4px 0; font-size: 13px;">
                             ⚠ High edge percentage ({edge_pct:.1f}%) suggests border detection may need adjustment
                         </div>
                         """
@@ -5432,7 +5432,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                 
                 html += """
                 <div style="flex: 1 1 320px; min-width: 0;">
-                    <p style="font-weight: bold; margin-bottom: 8px; color: #4d2b12;">Violation Statistics</p>
+                    <p style="font-weight: bold; margin-bottom: 8px; color: var(--report-ink);">Violation Statistics</p>
                     <table style="border-collapse: collapse; width: auto; margin: 0;">
                 """
                 
@@ -5479,7 +5479,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
             skip_info = brng_data.get('skip_info', {})
             if skip_info and skip_info.get('total_skipped_seconds', 0) > 0:
                 html += f"""
-                <div style="background-color: #f5e9e3; padding: 10px; margin: 10px 0; border-radius: 4px;">
+                <div style="background-color: var(--report-paper); padding: 10px; margin: 10px 0; border-radius: 4px;">
                     <p style="margin: 0; font-size: 13px;"><strong>Content Start Detection:</strong> 
                     Skipped first {skip_info['total_skipped_seconds']:.1f} seconds (test patterns/color bars)</p>
                 </div>
@@ -5487,7 +5487,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
             
             # ── Recommendations ──
             if report.get('recommendations'):
-                html += "<div style='margin: 16px 0;'><p style='font-weight: bold; margin-bottom: 8px; color: #4d2b12;'>Recommendations</p>"
+                html += "<div style='margin: 16px 0;'><p style='font-weight: bold; margin-bottom: 8px; color: var(--report-ink);'>Recommendations</p>"
                 for rec in report['recommendations']:
                     severity = rec.get('severity', 'low')
                     if severity == 'high':
@@ -5532,13 +5532,13 @@ def generate_frame_analysis_html(frame_outputs, video_id):
         num_thumbs = len(frame_outputs['brng_thumbnails'])
         
         html += f"""
-        <h3 style='color: #bf971b;'>BRNG Diagnostic Thumbnails</h3>
+        <h3 style='color: var(--report-gold);'>BRNG Diagnostic Thumbnails</h3>
         <a id="link_brng_thumb_info" href="javascript:void(0);" 
            onclick="toggleContent('brng_thumb_info', 'How are thumbnails selected? ▼', 'How are thumbnails selected? ▲')" 
-           style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+           style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
            How are thumbnails selected? ▼</a>
-        <div id="brng_thumb_info" style="display: none; background-color: #f8f6f3; padding: 12px 14px; margin: 0 0 12px 0; 
-                    border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+        <div id="brng_thumb_info" style="display: none; background-color: var(--report-panel); padding: 12px 14px; margin: 0 0 12px 0; 
+                    border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
             <p style="margin: 0 0 6px 0;">
                 <strong>Thumbnail selection:</strong> Up to 5 diagnostic thumbnails are chosen from the 
                 frames with detected violations. The highest-scoring violation frame is always included. 
@@ -5615,7 +5615,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
             html += f"""
             <div style="text-align: center; margin: 5px;">
                 <img src="data:image/jpeg;base64,{encoded_thumb}"
-                     style="width: 300px; height: auto; border: 1px solid #4d2b12; cursor: pointer;"
+                     style="width: 300px; height: auto; border: 1px solid var(--report-ink); cursor: pointer;"
                      onclick="openImage(this.src, 'BRNG Diagnostic - {caption_line1}')"
                      title="Click to enlarge" />
                 <p style="font-size: 12px; margin: 4px 0 0 0;">{caption_line1}</p>
@@ -5654,10 +5654,10 @@ def generate_dropped_sample_html(frame_outputs):
     html += """
     <a id="link_dropped_sample_methodology" href="javascript:void(0);"
        onclick="toggleContent('dropped_sample_methodology', 'What is dropped sample detection? ▼', 'What is dropped sample detection? ▲')"
-       style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+       style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
        What is dropped sample detection? ▼</a>
-    <div id="dropped_sample_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px;
-         margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+    <div id="dropped_sample_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px;
+         margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
         <p style="margin: 0 0 10px 0;">
             <strong>Dropped sample detection</strong> identifies potential audio sample drops caused by
             TBC/framesync devices or analog-to-digital converters during digitization. Two indicators are analyzed:
@@ -5726,7 +5726,7 @@ def generate_dropped_sample_html(frame_outputs):
             html += f"""
             <p style="font-size: 13px; font-weight: bold; margin: 16px 0 6px 0;">Audio Spectrogram:</p>
             <img src="data:image/jpeg;base64,{encoded_img}"
-                 style="max-width: 100%; height: auto; margin: 0 0 10px 0; border: 1px solid #d0c0b0;" />
+                 style="max-width: 100%; height: auto; margin: 0 0 10px 0; border: 1px solid var(--report-border);" />
             """
         except Exception as e:
             logger.warning(f"Could not embed spectrogram image: {e}")
@@ -5735,38 +5735,38 @@ def generate_dropped_sample_html(frame_outputs):
     html += """
     <table style="border-collapse: collapse; margin: 10px 0; font-size: 13px;">
         <tr style="background-color: #f0ebe4;">
-            <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: left;">Metric</th>
-            <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">Value</th>
+            <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: left;">Metric</th>
+            <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">Value</th>
         </tr>
     """
     html += f"""
         <tr>
-            <td style="padding: 6px 12px; border: 1px solid #d0c0b0;">Spectrogram spikes detected</td>
-            <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{spike_count}</td>
+            <td style="padding: 6px 12px; border: 1px solid var(--report-border);">Spectrogram spikes detected</td>
+            <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{spike_count}</td>
         </tr>
         <tr>
-            <td style="padding: 6px 12px; border: 1px solid #d0c0b0;">Audio/video duration difference</td>
-            <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{duration_diff_ms:.3f} ms</td>
+            <td style="padding: 6px 12px; border: 1px solid var(--report-border);">Audio/video duration difference</td>
+            <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{duration_diff_ms:.3f} ms</td>
         </tr>
         <tr>
-            <td style="padding: 6px 12px; border: 1px solid #d0c0b0;">Audio stream duration</td>
-            <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{audio_duration:.6f} s</td>
+            <td style="padding: 6px 12px; border: 1px solid var(--report-border);">Audio stream duration</td>
+            <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{audio_duration:.6f} s</td>
         </tr>
         <tr>
-            <td style="padding: 6px 12px; border: 1px solid #d0c0b0;">Video stream duration</td>
-            <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{video_duration:.6f} s</td>
+            <td style="padding: 6px 12px; border: 1px solid var(--report-border);">Video stream duration</td>
+            <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{video_duration:.6f} s</td>
         </tr>
         <tr>
-            <td style="padding: 6px 12px; border: 1px solid #d0c0b0;">Estimated loss from detected spikes</td>
-            <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{estimated_loss_ms:.4f} ms</td>
+            <td style="padding: 6px 12px; border: 1px solid var(--report-border);">Estimated loss from detected spikes</td>
+            <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{estimated_loss_ms:.4f} ms</td>
         </tr>
         <tr>
-            <td style="padding: 6px 12px; border: 1px solid #d0c0b0;">Audio sample rate</td>
-            <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{sample_rate} Hz</td>
+            <td style="padding: 6px 12px; border: 1px solid var(--report-border);">Audio sample rate</td>
+            <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{sample_rate} Hz</td>
         </tr>
         <tr>
-            <td style="padding: 6px 12px; border: 1px solid #d0c0b0;">Combined risk score</td>
-            <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{combined_score:.3f}</td>
+            <td style="padding: 6px 12px; border: 1px solid var(--report-border);">Combined risk score</td>
+            <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{combined_score:.3f}</td>
         </tr>
     </table>
     """
@@ -5796,20 +5796,20 @@ def generate_dropped_sample_html(frame_outputs):
         html += f"""
         <a id="link_spike_timestamps" href="javascript:void(0);"
            onclick="toggleContent('spike_timestamps', 'Estimated spike timestamps ({len(spike_timestamps)}) ▼', 'Estimated spike timestamps ▲')"
-           style="color: #378d6a; text-decoration: underline; margin: 10px 0; display: block; font-size: 13px;">
+           style="color: var(--report-accent); text-decoration: underline; margin: 10px 0; display: block; font-size: 13px;">
            Estimated spike timestamps ({len(spike_timestamps)}) ▼</a>
         <div id="spike_timestamps" style="display: none; margin: 0 0 16px 0;">
         <table style="border-collapse: collapse; font-size: 13px;">
             <tr style="background-color: #f0ebe4;">
-                <th style="padding: 6px 12px; border: 1px solid #d0c0b0;">#</th>
-                <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">Timestamp (s)</th>
+                <th style="padding: 6px 12px; border: 1px solid var(--report-border);">#</th>
+                <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">Timestamp (s)</th>
             </tr>
         """
         for i, ts in enumerate(spike_timestamps, 1):
             html += f"""
             <tr>
-                <td style="padding: 6px 12px; border: 1px solid #d0c0b0;">{i}</td>
-                <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{ts:.2f}</td>
+                <td style="padding: 6px 12px; border: 1px solid var(--report-border);">{i}</td>
+                <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{ts:.2f}</td>
             </tr>
             """
         html += "</table></div>"
@@ -5868,10 +5868,10 @@ def generate_duplicate_frame_html(frame_outputs):
     html += f"""
     <a id="link_duplicate_frame_methodology" href="javascript:void(0);"
        onclick="toggleContent('duplicate_frame_methodology', 'What is duplicate frame detection? &#x25BC;', 'What is duplicate frame detection? &#x25B2;')"
-       style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+       style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
        What is duplicate frame detection? &#x25BC;</a>
-    <div id="duplicate_frame_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px;
-         margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+    <div id="duplicate_frame_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px;
+         margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
         <p style="margin: 0 0 10px 0;">
             <strong>Duplicate frame detection</strong> identifies runs of repeated frames likely caused by
             TBC or framesync error concealment during digitization. The detection pipeline:
@@ -5914,23 +5914,23 @@ def generate_duplicate_frame_html(frame_outputs):
     html += """
     <table style="border-collapse: collapse; margin: 10px 0; font-size: 13px;">
         <tr style="background-color: #f0ebe4;">
-            <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: left;">#</th>
-            <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: left;">Start</th>
-            <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: left;">End</th>
-            <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">Frozen frames</th>
-            <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">Est. loss (s)</th>
-            <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">YDIF avg</th>
-            <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">VREP</th>
-            <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">OpenCV MSE</th>
-            <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: center;">First frame</th>
-            <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: center;">Last frame</th>
+            <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: left;">#</th>
+            <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: left;">Start</th>
+            <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: left;">End</th>
+            <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">Frozen frames</th>
+            <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">Est. loss (s)</th>
+            <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">YDIF avg</th>
+            <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">VREP</th>
+            <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">OpenCV MSE</th>
+            <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: center;">First frame</th>
+            <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: center;">Last frame</th>
         </tr>
     """
 
     if not runs:
         html += """
         <tr>
-            <td colspan="10" style="padding: 12px; border: 1px solid #d0c0b0;
+            <td colspan="10" style="padding: 12px; border: 1px solid var(--report-border);
                 text-align: center; color: #666; font-style: italic;">
                 No duplicate frame runs detected.
             </td>
@@ -5950,7 +5950,7 @@ def generate_duplicate_frame_html(frame_outputs):
                     encoded = b64encode(fh.read()).decode()
                 return (
                     f'<img src="data:image/jpeg;base64,{encoded}" '
-                    f'style="max-width: 220px; height: auto; border: 1px solid #d0c0b0;" />'
+                    f'style="max-width: 220px; height: auto; border: 1px solid var(--report-border);" />'
                 )
             except Exception as e:
                 logger.warning(f"Could not embed duplicate frame thumbnail {thumb_path}: {e}")
@@ -5972,16 +5972,16 @@ def generate_duplicate_frame_html(frame_outputs):
             mse_cell = f"{cv_mse:.2f}" if isinstance(cv_mse, (int, float)) else "&mdash;"
             html += f"""
             <tr>
-                <td style="padding: 6px 12px; border: 1px solid #d0c0b0;">{i}</td>
-                <td style="padding: 6px 12px; border: 1px solid #d0c0b0; font-family: monospace;">{start_tc}</td>
-                <td style="padding: 6px 12px; border: 1px solid #d0c0b0; font-family: monospace;">{end_tc}</td>
-                <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{frozen}</td>
-                <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{est_loss:.3f}</td>
-                <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{avg_ydif:.3f}</td>
-                <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{avg_vrep:.2f}</td>
-                <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{mse_cell}</td>
-                <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: center;">{_embed_thumb(first_thumb)}</td>
-                <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: center;">{_embed_thumb(last_thumb)}</td>
+                <td style="padding: 6px 12px; border: 1px solid var(--report-border);">{i}</td>
+                <td style="padding: 6px 12px; border: 1px solid var(--report-border); font-family: monospace;">{start_tc}</td>
+                <td style="padding: 6px 12px; border: 1px solid var(--report-border); font-family: monospace;">{end_tc}</td>
+                <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{frozen}</td>
+                <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{est_loss:.3f}</td>
+                <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{avg_ydif:.3f}</td>
+                <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{avg_vrep:.2f}</td>
+                <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{mse_cell}</td>
+                <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: center;">{_embed_thumb(first_thumb)}</td>
+                <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: center;">{_embed_thumb(last_thumb)}</td>
             </tr>
             """
 
@@ -6077,10 +6077,10 @@ def _read_mkvalidator_summary(summary_path):
 _MKVALIDATOR_METHODOLOGY_HTML = """
     <a id="link_mkvalidator_methodology" href="javascript:void(0);"
        onclick="toggleContent('mkvalidator_methodology', 'What is mkvalidator? &#x25BC;', 'What is mkvalidator? &#x25B2;')"
-       style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+       style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
        What is mkvalidator? &#x25BC;</a>
-    <div id="mkvalidator_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px;
-         margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+    <div id="mkvalidator_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px;
+         margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
         <p style="margin: 0 0 10px 0;">
             <strong>mkvalidator</strong> (from the Matroska project) parses the file's Matroska/EBML
             structure and reports whether it is well-formed. AV Spex surfaces that verdict as the
@@ -6171,7 +6171,7 @@ def make_mkvalidator_html(summary_path, clusters_csv_path, video_path=None):
     status_html = (
         f'<p style="margin-top: 0; font-size: 1.15em;">Result: '
         f'<strong style="color: {status_color};">{status_text}</strong></p>'
-        f'<p style="margin: 0; color: #4d2b12;">{verdict}</p>'
+        f'<p style="margin: 0; color: var(--report-ink);">{verdict}</p>'
     )
 
     # Optional WRN0C2 timecode-warnings table (only when the clusters CSV has rows).
@@ -6188,8 +6188,8 @@ def make_mkvalidator_html(summary_path, clusters_csv_path, video_path=None):
         if data_rows:
             # Optional approximate file-timecode column (only when we can derive it).
             to_timecode = _mkvalidator_timecode_mapper(video_path)
-            td = 'padding: 4px 12px; border: 1px solid #4d2b12;'
-            th = ('padding: 6px 12px; border: 1px solid #4d2b12; '
+            td = 'padding: 4px 12px; border: 1px solid var(--report-ink);'
+            th = ('padding: 6px 12px; border: 1px solid var(--report-ink); '
                   'background-color: #fbe4eb; position: sticky; top: 0;')
 
             def _row(cells):
@@ -6208,7 +6208,7 @@ def make_mkvalidator_html(summary_path, clusters_csv_path, video_path=None):
             clusters_html = f"""
         <p style="margin-bottom: 6px;"><strong>{len(data_rows)}</strong> non-incrementing
         cluster timecode warning(s) (<code>WRN0C2</code>, informational &mdash; may be intentional).</p>
-        <div style="max-width: {table_width}; max-height: 360px; overflow-y: auto; border: 1px solid #4d2b12;">
+        <div style="max-width: {table_width}; max-height: 360px; overflow-y: auto; border: 1px solid var(--report-ink);">
             <table style="border-collapse: collapse; width: 100%; background-color: #ffffff;">
                 <tr>
                     <th style="{th}">Cluster #</th>
@@ -6221,7 +6221,7 @@ def make_mkvalidator_html(summary_path, clusters_csv_path, video_path=None):
 
     return f"""
     {_MKVALIDATOR_METHODOLOGY_HTML}
-    <div style="background-color: #f5e9e3; padding: 20px 30px; margin-top: 10px; border-radius: 6px;">
+    <div style="background-color: var(--report-paper); padding: 20px 30px; margin-top: 10px; border-radius: 6px;">
         {status_html}
         <div style="margin-top: 16px;">
         {clusters_html}
@@ -6235,16 +6235,16 @@ def make_mkvalidator_html(summary_path, clusters_csv_path, video_path=None):
 CLAMS_METHODOLOGY_HTML = """
         <a id="link_clams_methodology" href="javascript:void(0);"
            onclick="toggleContent('clams_methodology', 'What is CLAMS Detection? ▼', 'What is CLAMS Detection? ▲')"
-           style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+           style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
            What is CLAMS Detection? ▼</a>
-        <div id="clams_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px;
-             margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+        <div id="clams_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px;
+             margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
             <p style="margin: 0 0 10px 0;">
                 <strong>CLAMS</strong> (Computational Linguistics Applications for Multimedia Services) is an
                 open-source project led by Brandeis University that builds reusable tools for analyzing
                 audiovisual collections. AV Spex adapts two CLAMS apps —
-                <a href="https://github.com/clamsproject/app-barsdetection" style="color: #378d6a;">app-barsdetection</a>
-                and <a href="https://github.com/clamsproject/app-tonedetection" style="color: #378d6a;">app-tonedetection</a> —
+                <a href="https://github.com/clamsproject/app-barsdetection" style="color: var(--report-accent);">app-barsdetection</a>
+                and <a href="https://github.com/clamsproject/app-tonedetection" style="color: var(--report-accent);">app-tonedetection</a> —
                 porting just their detection cores into the AV Spex pipeline. Both upstream apps are
                 distributed under the Apache License 2.0.
             </p>
@@ -6330,9 +6330,9 @@ def _build_toc_html(toc_entries):
         )
         toc_html = (
             '<nav aria-label="Report sections" '
-            'style="background-color: #f5e9e3; border: 1px solid #4d2b12; '
+            'style="background-color: var(--report-paper); border: 1px solid var(--report-ink); '
             'border-radius: 4px; padding: 14px 18px; margin: 18px 0;">'
-            '<p style="font-weight: bold; margin: 0 0 10px 0; color: #4d2b12; '
+            '<p style="font-weight: bold; margin: 0 0 10px 0; color: var(--report-ink); '
             'font-size: 14px;">Jump to section</p>'
             '<ul style="list-style: none; padding: 0; margin: 0; '
             'display: flex; flex-wrap: wrap; gap: 8px;">'
@@ -6342,6 +6342,20 @@ def _build_toc_html(toc_entries):
     else:
         toc_html = ''
     return toc_html
+
+
+def _undefined_style_tokens(html):
+    """Palette tokens referenced by the markup but never defined in :root.
+
+    An undefined CSS variable does not error — the declaration is simply
+    dropped and the element inherits, so a typo'd token name is a silent
+    cosmetic failure. This catches that the same way _dangling_toc_anchors
+    catches a nav link pointing nowhere.
+    """
+    root = re.search(r':root \{(.*?)\}', html, re.S)
+    defined = set(re.findall(r'--(report-[\w-]+)\s*:', root.group(1))) if root else set()
+    used = set(re.findall(r'var\(--(report-[\w-]+)\)', html))
+    return sorted(used - defined)
 
 
 def _dangling_toc_anchors(sections):
@@ -6371,6 +6385,25 @@ def _report_head_html(video_id, logo_image_path, color_strip_store, waveform_sto
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>AV Spex Report</title>
         <style>
+            /* Report palette. Defined once here and referenced as var(...)
+               from the section markup, so a color change is a one-line edit.
+               Plotly figure colors are passed to the charting library as
+               config rather than CSS, so those stay literal — see
+               _WAVEFORM_CHANNEL_COLORS and the *_status_colors helpers. */
+            :root {{
+                --report-accent: #378d6a;
+                --report-border: #d0c0b0;
+                --report-border-soft: #e0d0c0;
+                --report-danger: #dc3545;
+                --report-gold: #bf971b;
+                --report-ink: #4d2b12;
+                --report-notice-bg: #fff3cd;
+                --report-notice-ink: #856404;
+                --report-panel: #f8f6f3;
+                --report-paper: #f5e9e3;
+                --report-success: #0a5f1c;
+                --report-surface: #f2f2f2;
+            }}
             body {{
                 font-family: Arial, sans-serif;
                 background-color: #fcfdff;
@@ -6381,28 +6414,28 @@ def _report_head_html(video_id, logo_image_path, color_strip_store, waveform_sto
                 font-size: 24px;
                 text-align: center;
                 margin-top: 20px;
-                color: #378d6a;
+                color: var(--report-accent);
             }}
             h2 {{
                 font-size: 20px;
                 font-weight: bold;
                 margin-top: 30px;
-                color: #0a5f1c;
+                color: var(--report-success);
                 text-decoration: underline;
             }}
             h3 {{
                 font-size: 18px;
                 margin-top: 20px;
-                color: #bf971b;
+                color: var(--report-gold);
             }}
             table {{
                 border-collapse: collapse;
                 margin-top: 10px;
                 margin-bottom: 20px;
-                border: 2px solid #4d2b12;
+                border: 2px solid var(--report-ink);
             }}
             th, td {{
-                border: 1.5px solid #4d2b12;
+                border: 1.5px solid var(--report-ink);
                 padding: 8px;
                 text-align: left;
             }}
@@ -6411,8 +6444,8 @@ def _report_head_html(video_id, logo_image_path, color_strip_store, waveform_sto
                 font-weight: bold;
             }}
             pre {{
-                background-color: #f5e9e3;
-                border: 1px solid #4d2b12;
+                background-color: var(--report-paper);
+                border: 1px solid var(--report-ink);
                 padding: 10px;
                 white-space: pre-wrap;
                 word-wrap: break-word;
@@ -6429,8 +6462,8 @@ def _report_head_html(video_id, logo_image_path, color_strip_store, waveform_sto
                 overflow-y: auto;
             }}
             .metadata-content {{
-                background-color: #f5e9e3;
-                border: 1px solid #4d2b12;
+                background-color: var(--report-paper);
+                border: 1px solid var(--report-ink);
                 padding: 10px;
                 white-space: pre-wrap;
                 word-wrap: break-word;
@@ -6461,8 +6494,8 @@ def _report_head_html(video_id, logo_image_path, color_strip_store, waveform_sto
                 display: inline-block;
                 padding: 6px 14px;
                 background-color: #fcfdff;
-                color: #378d6a;
-                border: 1px solid #378d6a;
+                color: var(--report-accent);
+                border: 1px solid var(--report-accent);
                 border-radius: 999px;
                 text-decoration: none;
                 font-size: 13px;
@@ -6471,7 +6504,7 @@ def _report_head_html(video_id, logo_image_path, color_strip_store, waveform_sto
             }}
             .toc-pill:hover,
             .toc-pill:focus {{
-                background-color: #378d6a;
+                background-color: var(--report-accent);
                 color: #fcfdff;
                 outline: none;
             }}
@@ -6724,7 +6757,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
             bars_regions=bars_regions)
     elif artifacts.qctools_bars_eval_check_output and failureInfoSummary_colorbars is None:
        color_bars_segment = f"""
-        <div style="display: flex; flex-direction: column; align-items: start; background-color: #f5e9e3; padding: 10px;"> 
+        <div style="display: flex; flex-direction: column; align-items: start; background-color: var(--report-paper); padding: 10px;"> 
             <p><b>All QCTools values of the video file are within the median values of the color bars.</b></p>
         </div>
         """
@@ -6747,8 +6780,8 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     # colorbars_html is just an info box with no graph (drives the graph
     # section header).
     smpte_selected_box = """
-                <div style="background-color: #fff3cd; padding: 15px; border: 1px solid #856404; margin: 10px 0; border-radius: 5px;">
-                    <p style="margin: 0; color: #856404;">Evaluation was performed against standard SMPTE color bar values (selected reference).</p>
+                <div style="background-color: var(--report-notice-bg); padding: 15px; border: 1px solid var(--report-notice-ink); margin: 10px 0; border-radius: 5px;">
+                    <p style="margin: 0; color: var(--report-notice-ink);">Evaluation was performed against standard SMPTE color bar values (selected reference).</p>
                 </div>
                 """
     smpte_reference = False
@@ -6761,8 +6794,8 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
                 smpte_reference = True
                 colorbars_box_only = True
                 colorbars_html = """
-                <div style="background-color: #fff3cd; padding: 15px; border: 1px solid #856404; margin: 10px 0; border-radius: 5px;">
-                    <p style="margin: 0; color: #856404;"><strong>No color bars detected.</strong> Evaluation was performed using standard SMPTE color bar values.</p>
+                <div style="background-color: var(--report-notice-bg); padding: 15px; border: 1px solid var(--report-notice-ink); margin: 10px 0; border-radius: 5px;">
+                    <p style="margin: 0; color: var(--report-notice-ink);"><strong>No color bars detected.</strong> Evaluation was performed using standard SMPTE color bar values.</p>
                 </div>
                 """
             elif first_line == "SMPTE_SELECTED":
@@ -6933,7 +6966,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         # Divider: The placeholder that will be cloned by the script
         waveform_divider = (
             '<div style="margin: 20px 0; text-align: center;">'
-            '<img class="waveform-clone" style="width: 100%; height: auto; border: 1px solid #378d6a;">'
+            '<img class="waveform-clone" style="width: 100%; height: auto; border: 1px solid var(--report-accent);">'
             '</div>'
         )
         
@@ -6990,7 +7023,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     if mediaconch_policy_content and mediaconch_policy_name:
         add_section(f"""
         <h3 id="section-mediaconch-policy">MediaConch Policy File: {mediaconch_policy_name}</h3>
-        <a id="link_mediaconch_policy" href="javascript:void(0);" onclick="toggleContent('mediaconch_policy', 'Show policy content ▼', 'Hide policy content ▲')" style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block;">Show policy content ▼</a>
+        <a id="link_mediaconch_policy" href="javascript:void(0);" onclick="toggleContent('mediaconch_policy', 'Show policy content ▼', 'Hide policy content ▲')" style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block;">Show policy content ▼</a>
         <div id="mediaconch_policy" class="xml-content" style="display: none;">{mediaconch_policy_content}</div>
         """, ('section-mediaconch-policy', 'MediaConch Policy'))
 
@@ -7047,8 +7080,8 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     if no_qct_parse_files:
         add_section("""
         <h3 id="section-qct-parse-notice">QCT-Parse Analysis</h3>
-        <div style="background-color: #fff3cd; padding: 15px; border: 1px solid #856404; margin: 10px 0; border-radius: 5px;">
-            <p style="margin: 0; color: #856404;"><strong>Information:</strong> QCT-Parse analysis was not performed for this video. Quality control analysis sections are not available in this report.</p>
+        <div style="background-color: var(--report-notice-bg); padding: 15px; border: 1px solid var(--report-notice-ink); margin: 10px 0; border-radius: 5px;">
+            <p style="margin: 0; color: var(--report-notice-ink);"><strong>Information:</strong> QCT-Parse analysis was not performed for this video. Quality control analysis sections are not available in this report.</p>
         </div>
         """, ('section-qct-parse-notice', 'QCT-Parse Analysis'))
 
@@ -7083,12 +7116,12 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         block += CLAMS_METHODOLOGY_HTML
         if bars_comparison_html:
             block += f"""
-            <h4 style="font-size: 16px; margin-top: 16px; color: #4d2b12;">Bars Detection (qct-parse vs CLAMS SSIM)</h4>
+            <h4 style="font-size: 16px; margin-top: 16px; color: var(--report-ink);">Bars Detection (qct-parse vs CLAMS SSIM)</h4>
             {bars_comparison_html}
             """
         if tone_detection_html:
             block += f"""
-            <h4 style="font-size: 16px; margin-top: 16px; color: #4d2b12;">Tone Detection</h4>
+            <h4 style="font-size: 16px; margin-top: 16px; color: var(--report-ink);">Tone Detection</h4>
             {tone_detection_html}
             """
         add_section(block, ('section-clams-detection', 'CLAMS Detection'))
@@ -7133,7 +7166,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
 
     if has_audio_results:
         block = (
-            '<h2 id="section-audio-analysis" style="color: #0a5f1c; '
+            '<h2 id="section-audio-analysis" style="color: var(--report-success); '
             'text-decoration: underline; margin-top: 30px;">'
             'Audio Analysis Results</h2>'
         )
@@ -7244,21 +7277,21 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     if exiftool_output_path:
         add_section(f"""
         <h3 id="section-exiftool">{exif_file_filename}</h3>
-        <a id="link_exiftool" href="javascript:void(0);" onclick="toggleContent('exiftool', 'Show content ▼', 'Hide content ▲')" style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block;">Show content ▼</a>
+        <a id="link_exiftool" href="javascript:void(0);" onclick="toggleContent('exiftool', 'Show content ▼', 'Hide content ▲')" style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block;">Show content ▼</a>
         <div id="exiftool" class="metadata-content" style="display: none;">{exif_file_content}</div>
         """, ('section-exiftool', 'ExifTool Output'))
 
     if mediainfo_output_path:
         add_section(f"""
         <h3 id="section-mediainfo">{mi_file_filename}</h3>
-        <a id="link_mediainfo" href="javascript:void(0);" onclick="toggleContent('mediainfo', 'Show content ▼', 'Hide content ▲')" style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block;">Show content ▼</a>
+        <a id="link_mediainfo" href="javascript:void(0);" onclick="toggleContent('mediainfo', 'Show content ▼', 'Hide content ▲')" style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block;">Show content ▼</a>
         <div id="mediainfo" class="metadata-content" style="display: none;">{mi_file_content}</div>
         """, ('section-mediainfo', 'MediaInfo Output'))
 
     if ffprobe_output_path:
         add_section(f"""
         <h3 id="section-ffprobe">{ffprobe_file_filename}</h3>
-        <a id="link_ffprobe" href="javascript:void(0);" onclick="toggleContent('ffprobe', 'Show content ▼', 'Hide content ▲')" style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block;">Show content ▼</a>
+        <a id="link_ffprobe" href="javascript:void(0);" onclick="toggleContent('ffprobe', 'Show content ▼', 'Hide content ▲')" style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block;">Show content ▼</a>
         <div id="ffprobe" class="metadata-content" style="display: none;">{ffprobe_file_content}</div>
         """, ('section-ffprobe', 'FFprobe Output'))
 
@@ -7268,6 +7301,14 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     # ------------------------------------------------------------------
     # Emit: TOC and body both come from `sections`, in the same order.
     # ------------------------------------------------------------------
+    undefined_tokens = _undefined_style_tokens(
+        ''.join(section.html for section in sections) + _report_head_html(
+            video_id, '', '', '', ''))
+    if undefined_tokens:
+        logger.warning(
+            f"Report markup references undefined palette tokens: {', '.join(undefined_tokens)}"
+        )
+
     dangling = _dangling_toc_anchors(sections)
     if dangling:
         logger.warning(
