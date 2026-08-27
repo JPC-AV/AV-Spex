@@ -28,6 +28,7 @@ Coverage:
 import csv
 import dataclasses
 import re
+import textwrap
 import os
 import subprocess
 from base64 import b64decode
@@ -785,6 +786,103 @@ def test_changing_one_token_changes_every_site():
     assert '--report-ink: #000000;' in recoloured
     # every reference still resolves to the single definition
     assert recoloured.count('var(--report-ink)') == ink_refs
+
+
+# ===========================================================================
+# Section 5d — the three report phases
+#
+# write_html_report is now gather -> build -> assemble/emit. The two extracted
+# phases each return None when cancelled, and the caller must stop rather than
+# writing a partial report.
+# ===========================================================================
+
+def test_report_inputs_fields_match_what_gather_returns(tmp_path):
+    """Every declared field should be populated by the gather phase, not left
+    silently at its default."""
+    inputs = gr._gather_report_inputs(
+        None, str(tmp_path), str(tmp_path), "V1",
+        str(tmp_path / "out.html"), lambda: False, None)
+    assert isinstance(inputs, gr.ReportInputs)
+    assert inputs.artifacts is not None, "artifacts is always discovered"
+
+
+def test_gather_returns_none_when_cancelled(tmp_path):
+    assert gr._gather_report_inputs(
+        None, str(tmp_path), str(tmp_path), "V1",
+        str(tmp_path / "out.html"), lambda: True, None) is None
+
+
+def test_build_returns_none_when_cancelled(tmp_path):
+    inputs = gr._gather_report_inputs(
+        None, str(tmp_path), str(tmp_path), "V1",
+        str(tmp_path / "out.html"), lambda: False, None)
+    assert gr._build_section_html(
+        inputs, "V1", None, str(tmp_path), str(tmp_path), lambda: True, None) is None
+
+
+def test_build_produces_every_declared_piece(tmp_path):
+    """A bare directory still yields a complete ReportPieces — the section list
+    reads all of these, so a missing attribute would be an AttributeError."""
+    inputs = gr._gather_report_inputs(
+        None, str(tmp_path), str(tmp_path), "V1",
+        str(tmp_path / "out.html"), lambda: False, None)
+    pieces = gr._build_section_html(
+        inputs, "V1", None, str(tmp_path), str(tmp_path), lambda: False, None)
+    assert isinstance(pieces, gr.ReportPieces)
+    for field in gr.ReportPieces.__dataclass_fields__:
+        assert hasattr(pieces, field)
+
+
+def test_cancelling_writes_no_report(tmp_path):
+    """The whole point of the None contract: no partial file on disk."""
+    out = tmp_path / "report.html"
+    gr.write_html_report("V1", str(tmp_path), str(tmp_path), str(out),
+                         video_path=None, check_cancelled=lambda: True, signals=None)
+    assert not out.exists()
+
+
+def test_empty_directories_still_produce_a_report(tmp_path):
+    out = tmp_path / "report.html"
+    gr.write_html_report("V1", str(tmp_path), str(tmp_path), str(out),
+                         video_path=None, check_cancelled=lambda: False, signals=None)
+    assert out.exists()
+    html = out.read_text()
+    assert "AV Spex Report" in html
+    assert "V1" in html
+
+
+def test_section_list_only_reads_declared_piece_fields():
+    """A typo like pieces.fixity_htm would raise at render time; catch it
+    statically instead."""
+    import ast, inspect
+    tree = ast.parse(textwrap.dedent(inspect.getsource(gr.write_html_report)))
+    used = {n.attr for n in ast.walk(tree)
+            if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+            and n.value.id == 'pieces'}
+    declared = set(gr.ReportPieces.__dataclass_fields__)
+    assert used, "expected the section list to read from pieces"
+    assert used <= declared, f"undeclared piece fields: {sorted(used - declared)}"
+
+
+def test_section_list_only_reads_declared_input_fields():
+    import ast, inspect
+    tree = ast.parse(textwrap.dedent(inspect.getsource(gr.write_html_report)))
+    used = {n.attr for n in ast.walk(tree)
+            if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+            and n.value.id == 'inputs'}
+    declared = set(gr.ReportInputs.__dataclass_fields__)
+    assert used <= declared, f"undeclared input fields: {sorted(used - declared)}"
+
+
+def test_build_phase_only_reads_declared_input_fields():
+    import ast, inspect
+    tree = ast.parse(textwrap.dedent(inspect.getsource(gr._build_section_html)))
+    used = {n.attr for n in ast.walk(tree)
+            if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+            and n.value.id == 'inputs'}
+    declared = set(gr.ReportInputs.__dataclass_fields__)
+    assert used, "expected the build phase to read from inputs"
+    assert used <= declared, f"undeclared input fields: {sorted(used - declared)}"
 
 
 # ===========================================================================

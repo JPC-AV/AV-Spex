@@ -9,7 +9,7 @@ os.environ["NUMEXPR_MAX_THREADS"] = "11" # troubleshooting goofy numbpy related 
 import csv
 from base64 import b64encode
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 import json
 import re
 import subprocess
@@ -4260,37 +4260,8 @@ def generate_bitplane_html(frame_outputs):
     return html
 
 
-def generate_frame_analysis_html(frame_outputs, video_id):
-    """
-    Generate HTML section for frame analysis results.
-
-    Args:
-        frame_outputs (dict): Dictionary of frame analysis output paths
-        video_id (str): Video identifier
-
-    Returns:
-        str: HTML string for frame analysis section
-    """
-    has_content = (
-        frame_outputs.get('border_visualization') or
-        frame_outputs.get('border_data') or
-        frame_outputs.get('brng_analysis') or
-        frame_outputs.get('signalstats_analysis')
-    )
-    if not has_content:
-        return ""
-
-    html = """
-    <div class="frame-analysis-section" id="section-frame-analysis">
-        <h2 style="color: var(--report-success); text-decoration: underline; margin-top: 30px;">Frame Analysis Results</h2>
-    """
-
-    # Border Detection Section
-    if frame_outputs['border_visualization'] or frame_outputs['border_data']:
-        html += "<h3 id='section-border-detection' style='color: var(--report-gold);'>Border Detection</h3>"
-        
-        # Methodology explanation (collapsible)
-        html += """
+# Static explainer for the Border Detection section.
+BORDER_DETECTION_METHODOLOGY_HTML = """
         <a id="link_border_methodology" href="javascript:void(0);" 
            onclick="toggleContent('border_methodology', 'What is border detection? ▼', 'What is border detection? ▲')" 
            style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
@@ -4327,11 +4298,173 @@ def generate_frame_analysis_html(frame_outputs, video_id):
             </p>
         </div>
         """
-        
+
+
+# Static explainer for the Signalstats section.
+SIGNALSTATS_METHODOLOGY_HTML = """
+        <a id="link_signalstats_methodology" href="javascript:void(0);" 
+           onclick="toggleContent('signalstats_methodology', 'What is signalstats analysis? ▼', 'What is signalstats analysis? ▲')" 
+           style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+           What is signalstats analysis? ▼</a>
+        <div id="signalstats_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px; 
+             margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
+            <p style="margin: 0 0 10px 0;">
+                <strong>Signalstats analysis</strong> evaluates broadcast range compliance across sampled 
+                time periods of the video. It reads the FFmpeg 
+                <code style="background: #eee; padding: 1px 4px; border-radius: 2px;">signalstats</code> 
+                BRNG metric, which counts the number of pixels in each frame that fall outside the 
+                broadcast-legal range (luma &lt; 16 or &gt; 235, chroma &lt; 16 or &gt; 240 for 8-bit video) 
+                and divides by the total pixel count to produce a ratio from 0.0 to 1.0. AV Spex 
+                converts this ratio to a percentage for display.
+            </p>
+            <p style="margin: 0 0 6px 0; font-weight: bold;">Dual-source comparison:</p>
+            <p style="margin: 0 0 6px 0;">
+                When border detection has identified an active picture area, AV Spex runs two parallel 
+                analyses for each period to distinguish border artifacts from actual content violations:
+            </p>
+            <ol style="margin: 4px 0 10px 20px; padding: 0;">
+                <li style="margin-bottom: 4px;"><strong>QCTools (full frame)</strong> — BRNG values parsed 
+                    from the QCTools report for the time range, covering the entire frame including 
+                    borders and blanking areas</li>
+                <li style="margin-bottom: 4px;"><strong>FFprobe (active area only)</strong> — BRNG values 
+                    computed by FFprobe with a crop filter applied to analyze only the detected active 
+                    picture area, excluding borders</li>
+            </ol>
+            <p style="margin: 0 0 10px 0;">
+                Comparing these two results reveals whether violations originate from border/blanking 
+                regions or from the actual picture content. If the full frame shows significantly more 
+                violations (>5%) than the active area, violations are classified as <em>border violations</em>. 
+                If the active area itself shows >10% violations, they are classified as <em>content violations</em> 
+                that may require correction.
+            </p>
+            <p style="margin: 0 0 6px 0; font-weight: bold;">Period selection priority:</p>
+            <ol style="margin: 4px 0 10px 20px; padding: 0;">
+                <li style="margin-bottom: 4px;"><strong>QCTools violation clusters</strong> — periods targeting 
+                    timestamps where QCTools detected the highest concentrations of BRNG activity</li>
+                <li style="margin-bottom: 4px;"><strong>Border detection quality hints</strong> — timestamps 
+                    flagged during border detection as having interesting signal characteristics</li>
+                <li style="margin-bottom: 4px;"><strong>Even distribution</strong> — fallback to evenly 
+                    spaced periods across the video content (after color bars)</li>
+            </ol>
+            <p style="margin: 0; color: #777;">
+                The final diagnosis is based on active area results, which reflect the actual picture 
+                content that would be seen in playback or broadcast.
+            </p>
+        </div>
+        """
+
+
+# Static explainer for the BRNG Violation Analysis section.
+BRNG_METHODOLOGY_HTML = """
+        <a id="link_brng_methodology" href="javascript:void(0);" 
+           onclick="toggleContent('brng_methodology', 'What is BRNG analysis? ▼', 'What is BRNG analysis? ▲')" 
+           style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+           What is BRNG analysis? ▼</a>
+        <div id="brng_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px; 
+             margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
+            <p style="margin: 0 0 10px 0;">
+                <strong>BRNG (Broadcast Range)</strong> measures whether pixel values fall outside the 
+                broadcast-legal range (16–235 for luma, 16–240 for chroma in 8-bit video). Pixels outside 
+                this range may be clipped during broadcast or indicate issues in the source material.
+            </p>
+            <p style="margin: 0 0 10px 0; font-weight: bold;">How violations are detected:</p>
+            <p style="margin: 0 0 6px 0;">
+                AV Spex uses <em>differential detection</em> to identify violations. For each analysis period, 
+                two temporary video segments are created from the active picture area:
+            </p>
+            <ol style="margin: 4px 0 10px 20px; padding: 0;">
+                <li style="margin-bottom: 4px;"><strong>Highlighted version</strong> — rendered with FFmpeg's 
+                    <code style="background: #eee; padding: 1px 4px; border-radius: 2px;">signalstats=out=brng:color=magenta</code>, 
+                    which overlays magenta on out-of-range pixels</li>
+                <li style="margin-bottom: 4px;"><strong>Original version</strong> — rendered without the filter 
+                    (cropped to active area only)</li>
+            </ol>
+            <p style="margin: 0 0 6px 0;">
+                Frames are then compared pixel-by-pixel using three independent detection methods that vote 
+                on whether a pixel is a genuine violation:
+            </p>
+            <ol style="margin: 4px 0 10px 20px; padding: 0;">
+                <li style="margin-bottom: 4px;"><strong>BGR threshold</strong> — checks for magenta color signature 
+                    (high red + blue, low green channel differences)</li>
+                <li style="margin-bottom: 4px;"><strong>Ratio-based</strong> — verifies that red and blue 
+                    channel increases are proportional (characteristic of magenta overlay)</li>
+                <li style="margin-bottom: 4px;"><strong>HSV analysis</strong> — confirms magenta hue range with 
+                    saturation increase in HSV color space</li>
+            </ol>
+            <p style="margin: 0 0 10px 0;">
+                A pixel is classified as a violation only when <strong>at least 2 of 3 methods agree</strong>. 
+                Small isolated pixel clusters (fewer than 10 connected pixels) are filtered out as noise.
+            </p>
+            <p style="margin: 0 0 6px 0; font-weight: bold;">Violation classification:</p>
+            <p style="margin: 0 0 4px 0;">Each frame with detected violations is then classified by spatial pattern:</p>
+            <ul style="margin: 4px 0 10px 16px; padding: 0;">
+                <li style="margin-bottom: 3px;"><strong>Sub-black</strong> — violations concentrated in low-luma 
+                    zones (pixels below broadcast black level)</li>
+                <li style="margin-bottom: 3px;"><strong>Highlight clipping</strong> — violations in high-luma 
+                    zones (pixels above broadcast white level)</li>
+                <li style="margin-bottom: 3px;"><strong>Edge artifacts</strong> — violations concentrated within 
+                    15px of frame edges, suggesting border/blanking issues</li>
+                <li style="margin-bottom: 3px;"><strong>Linear blanking patterns</strong> — edge violations 
+                    forming continuous horizontal or vertical lines</li>
+                <li style="margin-bottom: 3px;"><strong>General broadcast range violations</strong> — violations 
+                    that don't match a specific spatial pattern</li>
+            </ul>
+            <p style="margin: 0 0 6px 0; font-weight: bold;">How frames are sampled:</p>
+            <p style="margin: 0 0 6px 0;">
+                Each analysis period reports a sampling summary in the format:<br>
+                <code style="background: #eee; padding: 1px 4px; border-radius: 2px;">QCTools targeted N frames → M mapped to period → T total samples analyzed</code>
+            </p>
+            <ul style="margin: 4px 0 10px 16px; padding: 0;">
+                <li style="margin-bottom: 3px;"><strong>QCTools targeted</strong> — the number of BRNG violations 
+                    found in the initial scan of the full QCTools report (capped at 100). These are the frames 
+                    QCTools flagged as having out-of-range pixels anywhere in the video.</li>
+                <li style="margin-bottom: 3px;"><strong>Mapped to period</strong> — how many of those violations 
+                    have timestamps that fall within this specific analysis period's time window. Violations 
+                    from other parts of the video are not relevant to this period.</li>
+                <li style="margin-bottom: 3px;"><strong>Total samples analyzed</strong> — the actual number of 
+                    frames examined by the differential detector. The sample count adapts based on signalstats 
+                    findings for each period: periods with significant active-area violations receive denser 
+                    sampling (~200 frames) while periods with negligible active-area BRNG use lighter sampling 
+                    (~30 frames). When no upstream data is available, the default behavior targets ~50–100 frames 
+                    per period.</li>
+            </ul>
+            <p style="margin: 0 0 6px 0; font-weight: bold;">Adaptive detection:</p>
+            <p style="margin: 0 0 10px 0;">
+                When signalstats analysis is available, BRNG detection adapts per period based on the 
+                signalstats diagnosis. Periods diagnosed as <em>border-dominated</em> or <em>minimal</em> 
+                use stricter detection thresholds (requiring stronger evidence to classify a pixel as a 
+                violation), reducing false positives in regions where actual content violations are unlikely. 
+                Periods with <em>content violations</em> use standard sensitivity. When head switching 
+                artifacts were detected during border detection, the bottom-edge analysis zone is 
+                automatically widened to classify head switching noise as edge artifacts rather than 
+                content violations.
+            </p>
+            <p style="margin: 0; color: #777;">
+                Because the differential detector compares two decoded video frames and runs multi-method 
+                computer vision analysis on every sample, this targeted approach keeps processing time 
+                manageable while concentrating analysis on the frames most likely to contain violations.
+            </p>
+        </div>
+        """
+
+
+def _render_frame_border_html(frame_outputs) -> str:
+    """Border Detection: the detected active picture area, the crop it implies,
+    and the before/after visualisation.
+
+    Returns an empty string when this section has no inputs.
+    """
+    html = ""
+    if frame_outputs['border_visualization'] or frame_outputs['border_data']:
+        html += "<h3 id='section-border-detection' style='color: var(--report-gold);'>Border Detection</h3>"
+
+        # Methodology explanation (collapsible)
+        html += BORDER_DETECTION_METHODOLOGY_HTML
+
         # Determine border data source: prefer enhanced JSON, fall back to standalone file
         border_data = None
         enhanced_data = None
-        
+
         # Try enhanced JSON first (has more complete data)
         if frame_outputs.get('enhanced_frame_analysis'):
             try:
@@ -4339,7 +4472,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     enhanced_data = json.load(f)
             except Exception:
                 pass
-        
+
         # Try standalone border_data.json
         if frame_outputs['border_data']:
             try:
@@ -4347,25 +4480,25 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     border_data = json.load(f)
             except Exception as e:
                 logger.error(f"Error reading border data: {e}")
-        
+
         # Determine initial and final border data
         initial_borders = frame_outputs.get('initial_borders') or (enhanced_data or {}).get('initial_borders')
         final_borders = frame_outputs.get('final_borders') or (enhanced_data or {}).get('final_borders')
         refinement_iterations = frame_outputs.get('refinement_iterations', 0) or (enhanced_data or {}).get('refinement_iterations', 0)
         refinement_history = frame_outputs.get('refinement_history', []) or (enhanced_data or {}).get('refinement_history', [])
-        
+
         # Use the best available border info for display
         display_borders = final_borders or initial_borders or border_data
-        
+
         if display_borders:
             # Display detection method
             detection_method = display_borders.get('detection_method', 'unknown')
             method_label = "Simple (fixed borders)" if detection_method.startswith('simple') else "Sophisticated (quality-based detection)"
             if 'refined' in detection_method:
                 method_label += " with iterative refinement"
-            
+
             html += f"<p><strong>Method:</strong> {method_label}</p>"
-            
+
             # Active area display
             active_area = display_borders.get('active_area')
             if active_area:
@@ -4373,7 +4506,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     x, y, w, h = active_area
                 else:
                     x, y, w, h = 0, 0, 0, 0
-                
+
                 # Get video dimensions from border_data or enhanced data
                 video_width, video_height = 0, 0
                 if border_data and border_data.get('video_properties'):
@@ -4385,7 +4518,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     if isinstance(init_area, (list, tuple)) and len(init_area) == 4:
                         # Use border_regions if available
                         pass
-                
+
                 # Build active area HTML
                 active_area_html = ""
                 if video_width > 0 and video_height > 0:
@@ -4457,7 +4590,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     {hs_html}
                 </div>
                 """
-        
+
         # Display initial border visualization image
         if frame_outputs['border_visualization']:
             viz_label = "Initial border detection" if refinement_iterations > 0 else "Border detection"
@@ -4474,7 +4607,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                 """
             except Exception as e:
                 logger.warning(f"Could not embed border visualization: {e}")
-        
+
         # === Border Refinement Section ===
         if refinement_iterations and refinement_iterations > 0:
             html += f"""
@@ -4488,18 +4621,18 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     automatically expanded and analysis was re-run.
                 </p>
             """
-            
+
             # Show initial → final comparison
             if initial_borders and final_borders:
                 init_area = initial_borders.get('active_area', [0,0,0,0])
                 final_area = final_borders.get('active_area', [0,0,0,0])
-                
+
                 if isinstance(init_area, (list, tuple)) and len(init_area) == 4:
                     init_w, init_h = init_area[2], init_area[3]
                     final_w, final_h = final_area[2], final_area[3]
                     width_change = final_w - init_w
                     height_change = final_h - init_h
-                    
+
                     html += f"""
                 <table style="border-collapse: collapse; width: 100%; font-size: 13px; margin-bottom: 10px;">
                     <tr style="background-color: rgba(255,255,255,0.5);">
@@ -4532,9 +4665,9 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                         <td style="padding: 4px 10px;">{final_borders_str}</td>
                         <td style="padding: 4px 10px;"></td>
                     </tr>"""
-                    
+
                     html += "</table>"
-            
+
             # Show per-iteration details
             if refinement_history:
                 for iteration in refinement_history:
@@ -4544,10 +4677,10 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     violations_before = iteration.get('violations_before', 0)
                     violations_after = iteration.get('violations_after', 0)
                     edge_pct = iteration.get('edge_violation_pct', 0)
-                    
+
                     violation_delta = violations_after - violations_before
                     violation_delta_str = f"{violation_delta:+d}" if violation_delta != 0 else "no change"
-                    
+
                     if isinstance(iter_area, (list, tuple)) and len(iter_area) == 4:
                         html += f"""
                 <div style="background-color: rgba(255,255,255,0.4); padding: 6px 10px; margin: 6px 0; border-radius: 3px; font-size: 12px;">
@@ -4557,12 +4690,12 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     Violation frames: {violations_before} → {violations_after} ({violation_delta_str}) — 
                     Edge violations: {edge_pct:.1f}%
                 </div>"""
-            
+
             html += "</div>"  # Close refinement container
-            
+
             # Collect all refinement thumbnails for horizontal display
             refinement_thumbs = []
-            
+
             # Add each refinement iteration visualization
             refinement_vizs = frame_outputs.get('refinement_visualizations', [])
             if refinement_vizs:
@@ -4573,7 +4706,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                         refinement_thumbs.append((f'Refinement iteration {idx}', encoded_img))
                     except Exception as e:
                         logger.warning(f"Could not embed refinement visualization {viz_path}: {e}")
-            
+
             # Add before/after comparison
             comparison_path = frame_outputs.get('refinement_comparison')
             if comparison_path:
@@ -4583,14 +4716,14 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     refinement_thumbs.append(('Initial vs. final comparison', encoded_img))
                 except Exception as e:
                     logger.warning(f"Could not embed refinement comparison: {e}")
-            
+
             # Render horizontal thumbnail strip
             if refinement_thumbs:
                 html += """
                 <div style="margin: 15px 0;">
                     <p style="font-size: 13px; color: #666; margin-bottom: 8px;"><em>Border refinement visualizations</em> <span style="font-size: 11px;">(click to enlarge)</span></p>
                     <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-start;">"""
-                
+
                 for caption, encoded_img in refinement_thumbs:
                     html += f"""
                         <div style="flex: 1 1 0; min-width: 180px; max-width: {max(100 // len(refinement_thumbs), 20)}%; text-align: center;">
@@ -4602,68 +4735,28 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                                  alt="{caption}" />
                             <p style="font-size: 11px; color: #888; margin: 4px 0 0 0;">{caption}</p>
                         </div>"""
-                
+
                 html += """
                     </div>
                 </div>"""
-    
+
     # Signalstats Analysis Section
+    return html
+
+
+def _render_frame_signalstats_html(frame_outputs) -> str:
+    """Signalstats: per-period luma/chroma statistics, the derived diagnosis, and
+    the example frames behind it.
+
+    Returns an empty string when this section has no inputs.
+    """
+    html = ""
     if frame_outputs['signalstats_analysis']:
         html += "<h3 id='section-signalstats' style='color: var(--report-gold);'>Signalstats Analysis</h3>"
-        
+
         # Methodology explanation (collapsible)
-        html += """
-        <a id="link_signalstats_methodology" href="javascript:void(0);" 
-           onclick="toggleContent('signalstats_methodology', 'What is signalstats analysis? ▼', 'What is signalstats analysis? ▲')" 
-           style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
-           What is signalstats analysis? ▼</a>
-        <div id="signalstats_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px; 
-             margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
-            <p style="margin: 0 0 10px 0;">
-                <strong>Signalstats analysis</strong> evaluates broadcast range compliance across sampled 
-                time periods of the video. It reads the FFmpeg 
-                <code style="background: #eee; padding: 1px 4px; border-radius: 2px;">signalstats</code> 
-                BRNG metric, which counts the number of pixels in each frame that fall outside the 
-                broadcast-legal range (luma &lt; 16 or &gt; 235, chroma &lt; 16 or &gt; 240 for 8-bit video) 
-                and divides by the total pixel count to produce a ratio from 0.0 to 1.0. AV Spex 
-                converts this ratio to a percentage for display.
-            </p>
-            <p style="margin: 0 0 6px 0; font-weight: bold;">Dual-source comparison:</p>
-            <p style="margin: 0 0 6px 0;">
-                When border detection has identified an active picture area, AV Spex runs two parallel 
-                analyses for each period to distinguish border artifacts from actual content violations:
-            </p>
-            <ol style="margin: 4px 0 10px 20px; padding: 0;">
-                <li style="margin-bottom: 4px;"><strong>QCTools (full frame)</strong> — BRNG values parsed 
-                    from the QCTools report for the time range, covering the entire frame including 
-                    borders and blanking areas</li>
-                <li style="margin-bottom: 4px;"><strong>FFprobe (active area only)</strong> — BRNG values 
-                    computed by FFprobe with a crop filter applied to analyze only the detected active 
-                    picture area, excluding borders</li>
-            </ol>
-            <p style="margin: 0 0 10px 0;">
-                Comparing these two results reveals whether violations originate from border/blanking 
-                regions or from the actual picture content. If the full frame shows significantly more 
-                violations (>5%) than the active area, violations are classified as <em>border violations</em>. 
-                If the active area itself shows >10% violations, they are classified as <em>content violations</em> 
-                that may require correction.
-            </p>
-            <p style="margin: 0 0 6px 0; font-weight: bold;">Period selection priority:</p>
-            <ol style="margin: 4px 0 10px 20px; padding: 0;">
-                <li style="margin-bottom: 4px;"><strong>QCTools violation clusters</strong> — periods targeting 
-                    timestamps where QCTools detected the highest concentrations of BRNG activity</li>
-                <li style="margin-bottom: 4px;"><strong>Border detection quality hints</strong> — timestamps 
-                    flagged during border detection as having interesting signal characteristics</li>
-                <li style="margin-bottom: 4px;"><strong>Even distribution</strong> — fallback to evenly 
-                    spaced periods across the video content (after color bars)</li>
-            </ol>
-            <p style="margin: 0; color: #777;">
-                The final diagnosis is based on active area results, which reflect the actual picture 
-                content that would be seen in playback or broadcast.
-            </p>
-        </div>
-        """
-        
+        html += SIGNALSTATS_METHODOLOGY_HTML
+
         try:
             # Handle both dict (from enhanced_frame_analysis.json) and file path (legacy)
             if isinstance(frame_outputs['signalstats_analysis'], dict):
@@ -4671,7 +4764,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
             else:
                 with open(frame_outputs['signalstats_analysis'], 'r') as f:
                     signalstats_data = json.load(f)
-            
+
             diagnosis = signalstats_data.get('diagnosis', 'Analysis complete')
 
             # Determine assessment styling from the severity field when present;
@@ -4709,20 +4802,20 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                 assessment_bg = '#f5e9e3'
                 assessment_border = '#bf971b'
                 assessment_icon = 'ℹ️'
-            
+
             html += f"""
             <div style="background-color: {assessment_bg}; padding: 12px 16px; margin: 10px 0; 
                         border-left: 4px solid {assessment_border}; border-radius: 0 4px 4px 0;">
                 <p style="margin: 0; font-size: 14px;"><strong>{assessment_icon} Diagnosis:</strong> {diagnosis}</p>
             </div>
             """
-            
+
             # Overall results
             violation_pct = signalstats_data.get('violation_percentage')
             max_brng = signalstats_data.get('max_brng')
             avg_brng = signalstats_data.get('avg_brng')
             used_qctools = signalstats_data.get('used_qctools', False)
-            
+
             if violation_pct is not None or max_brng is not None:
                 # Label the heading with the region the stats were measured on
                 # ('' for legacy results that didn't record it)
@@ -4815,7 +4908,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     <p style="font-size: 11px; color: #9a8a7d; margin: 8px 2px 0;">Data source: {source_text}</p>
                 </div>
                 """
-            
+
             # Display results for active area (legacy format)
             if signalstats_data.get('results', {}).get('active_area'):
                 active_area = signalstats_data['results']['active_area']
@@ -4838,11 +4931,11 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     </table>
                 </div>
                 """
-            
+
             # Per-period comparison cards
             comparison_results = signalstats_data.get('comparison_results', [])
             analysis_periods = signalstats_data.get('analysis_periods', [])
-            
+
             if comparison_results:
                 # Build time range display
                 all_starts = []
@@ -4852,28 +4945,28 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     if tr and len(tr) >= 2:
                         all_starts.append(tr[0])
                         all_ends.append(tr[1])
-                
+
                 coverage_label = ""
                 if all_starts and all_ends:
                     coverage_label = f" ({_seconds_to_display(min(all_starts))} – {_seconds_to_display(max(all_ends))})"
-                
+
                 html += f"""
                 <div style="margin: 16px 0;">
                     <p style="font-weight: bold; margin-bottom: 8px; color: var(--report-ink);">
                         Period Comparison: {len(comparison_results)} periods{coverage_label}
                     </p>
                 """
-                
+
                 for comp in comparison_results:
                     period_num = comp.get('period', '?')
                     time_range = comp.get('time_range', [0, 0])
                     start_display = _seconds_to_display(time_range[0]) if len(time_range) >= 1 else "?"
                     end_display = _seconds_to_display(time_range[1]) if len(time_range) >= 2 else "?"
-                    
+
                     qc_data = comp.get('qctools_full_frame', {})
                     ff_data = comp.get('ffprobe_active_area', {})
                     period_diag = comp.get('diagnosis', '')
-                    
+
                     # Diagnosis badge
                     if period_diag == 'border_violations':
                         diag_label = 'Border violations'
@@ -4891,7 +4984,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                         diag_label = ''
                         diag_color = ''
                         diag_bg = ''
-                    
+
                     html += f"""
                     <div style="background-color: var(--report-paper); padding: 10px 14px; margin: 6px 0; 
                                 border-radius: 4px; border: 1px solid var(--report-border-soft);">
@@ -4900,15 +4993,15 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                                 Period {period_num}: {start_display} – {end_display}
                             </span>
                     """
-                    
+
                     if diag_label:
                         html += f"""
                             <span style="background: {diag_bg}; color: {diag_color}; padding: 2px 8px; 
                                         border-radius: 3px; font-size: 12px; font-weight: bold;">{diag_label}</span>
                         """
-                    
+
                     html += "</div>"
-                    
+
                     # Comparison bars
                     if qc_data or ff_data:
                         qc_pct = qc_data.get('violations_pct', 0)
@@ -4919,10 +5012,10 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                         ff_violations = ff_data.get('frames_with_violations', 0)
                         qc_max = qc_data.get('max_brng', 0)
                         ff_max = ff_data.get('max_brng', 0)
-                        
+
                         # Scale bars to the larger value
                         max_pct = max(qc_pct, ff_pct, 0.1)
-                        
+
                         if qc_data:
                             qc_bar_width = (qc_pct / max_pct * 100) if max_pct > 0 else 0
                             qc_bar_color = '#bf971b' if qc_pct > 10 else '#607d8b'
@@ -4938,7 +5031,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                                 </div>
                             </div>
                             """
-                        
+
                         if ff_data:
                             ff_bar_width = (ff_pct / max_pct * 100) if max_pct > 0 else 0
                             ff_bar_color = '#d32f2f' if ff_pct > 10 else '#378d6a'
@@ -4954,7 +5047,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                                 </div>
                             </div>
                             """
-                        
+
                         # Show delta if both sources present
                         if qc_data and ff_data:
                             delta = qc_pct - ff_pct
@@ -4965,15 +5058,15 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                                     → {delta_label}
                                 </div>
                                 """
-                    
+
                     html += "</div>"
-                
+
                 html += "</div>"
-            
+
             elif analysis_periods:
                 # Fallback: display analysis periods without comparison data
                 periods = analysis_periods
-                
+
                 # Build time range display
                 all_starts = []
                 all_ends = []
@@ -4986,18 +5079,18 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                         d = period.get('duration', 60)
                         all_starts.append(s)
                         all_ends.append(s + d)
-                
+
                 coverage_label = ""
                 if all_starts and all_ends:
                     coverage_label = f" ({_seconds_to_display(min(all_starts))} – {_seconds_to_display(max(all_ends))})"
-                
+
                 html += f"""
                 <div style="margin: 16px 0;">
                     <p style="font-weight: bold; margin-bottom: 8px; color: var(--report-ink);">
                         Analysis Periods: {len(periods)} periods{coverage_label}
                     </p>
                 """
-                
+
                 for i, period in enumerate(periods[:5]):
                     if isinstance(period, (list, tuple)) and len(period) >= 2:
                         start, duration = period[0], period[1]
@@ -5006,10 +5099,10 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                         duration = period.get('duration', 60)
                     else:
                         continue
-                    
+
                     start_display = _seconds_to_display(start)
                     end_display = _seconds_to_display(start + duration)
-                    
+
                     html += f"""
                     <div style="background-color: var(--report-paper); padding: 8px 14px; margin: 4px 0; 
                                 border-radius: 4px; border: 1px solid var(--report-border-soft); font-size: 13px;">
@@ -5017,109 +5110,29 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                         {start_display} – {end_display} ({duration}s duration)
                     </div>
                     """
-                
+
                 html += "</div>"
-                
+
         except Exception as e:
             logger.error(f"Error reading signalstats analysis: {e}")
-    
+
     # BRNG Analysis Section
+    return html
+
+
+def _render_frame_brng_html(frame_outputs) -> str:
+    """BRNG: broadcast-range violation counts per analysis period, with the
+    severity assessment and recommendations.
+
+    Returns an empty string when this section has no inputs.
+    """
+    html = ""
     if frame_outputs['brng_analysis']:
         html += "<h3 id='section-brng-analysis' style='color: var(--report-gold);'>BRNG Violation Analysis</h3>"
-        
+
         # Methodology explanation (collapsible)
-        html += """
-        <a id="link_brng_methodology" href="javascript:void(0);" 
-           onclick="toggleContent('brng_methodology', 'What is BRNG analysis? ▼', 'What is BRNG analysis? ▲')" 
-           style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
-           What is BRNG analysis? ▼</a>
-        <div id="brng_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px; 
-             margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
-            <p style="margin: 0 0 10px 0;">
-                <strong>BRNG (Broadcast Range)</strong> measures whether pixel values fall outside the 
-                broadcast-legal range (16–235 for luma, 16–240 for chroma in 8-bit video). Pixels outside 
-                this range may be clipped during broadcast or indicate issues in the source material.
-            </p>
-            <p style="margin: 0 0 10px 0; font-weight: bold;">How violations are detected:</p>
-            <p style="margin: 0 0 6px 0;">
-                AV Spex uses <em>differential detection</em> to identify violations. For each analysis period, 
-                two temporary video segments are created from the active picture area:
-            </p>
-            <ol style="margin: 4px 0 10px 20px; padding: 0;">
-                <li style="margin-bottom: 4px;"><strong>Highlighted version</strong> — rendered with FFmpeg's 
-                    <code style="background: #eee; padding: 1px 4px; border-radius: 2px;">signalstats=out=brng:color=magenta</code>, 
-                    which overlays magenta on out-of-range pixels</li>
-                <li style="margin-bottom: 4px;"><strong>Original version</strong> — rendered without the filter 
-                    (cropped to active area only)</li>
-            </ol>
-            <p style="margin: 0 0 6px 0;">
-                Frames are then compared pixel-by-pixel using three independent detection methods that vote 
-                on whether a pixel is a genuine violation:
-            </p>
-            <ol style="margin: 4px 0 10px 20px; padding: 0;">
-                <li style="margin-bottom: 4px;"><strong>BGR threshold</strong> — checks for magenta color signature 
-                    (high red + blue, low green channel differences)</li>
-                <li style="margin-bottom: 4px;"><strong>Ratio-based</strong> — verifies that red and blue 
-                    channel increases are proportional (characteristic of magenta overlay)</li>
-                <li style="margin-bottom: 4px;"><strong>HSV analysis</strong> — confirms magenta hue range with 
-                    saturation increase in HSV color space</li>
-            </ol>
-            <p style="margin: 0 0 10px 0;">
-                A pixel is classified as a violation only when <strong>at least 2 of 3 methods agree</strong>. 
-                Small isolated pixel clusters (fewer than 10 connected pixels) are filtered out as noise.
-            </p>
-            <p style="margin: 0 0 6px 0; font-weight: bold;">Violation classification:</p>
-            <p style="margin: 0 0 4px 0;">Each frame with detected violations is then classified by spatial pattern:</p>
-            <ul style="margin: 4px 0 10px 16px; padding: 0;">
-                <li style="margin-bottom: 3px;"><strong>Sub-black</strong> — violations concentrated in low-luma 
-                    zones (pixels below broadcast black level)</li>
-                <li style="margin-bottom: 3px;"><strong>Highlight clipping</strong> — violations in high-luma 
-                    zones (pixels above broadcast white level)</li>
-                <li style="margin-bottom: 3px;"><strong>Edge artifacts</strong> — violations concentrated within 
-                    15px of frame edges, suggesting border/blanking issues</li>
-                <li style="margin-bottom: 3px;"><strong>Linear blanking patterns</strong> — edge violations 
-                    forming continuous horizontal or vertical lines</li>
-                <li style="margin-bottom: 3px;"><strong>General broadcast range violations</strong> — violations 
-                    that don't match a specific spatial pattern</li>
-            </ul>
-            <p style="margin: 0 0 6px 0; font-weight: bold;">How frames are sampled:</p>
-            <p style="margin: 0 0 6px 0;">
-                Each analysis period reports a sampling summary in the format:<br>
-                <code style="background: #eee; padding: 1px 4px; border-radius: 2px;">QCTools targeted N frames → M mapped to period → T total samples analyzed</code>
-            </p>
-            <ul style="margin: 4px 0 10px 16px; padding: 0;">
-                <li style="margin-bottom: 3px;"><strong>QCTools targeted</strong> — the number of BRNG violations 
-                    found in the initial scan of the full QCTools report (capped at 100). These are the frames 
-                    QCTools flagged as having out-of-range pixels anywhere in the video.</li>
-                <li style="margin-bottom: 3px;"><strong>Mapped to period</strong> — how many of those violations 
-                    have timestamps that fall within this specific analysis period's time window. Violations 
-                    from other parts of the video are not relevant to this period.</li>
-                <li style="margin-bottom: 3px;"><strong>Total samples analyzed</strong> — the actual number of 
-                    frames examined by the differential detector. The sample count adapts based on signalstats 
-                    findings for each period: periods with significant active-area violations receive denser 
-                    sampling (~200 frames) while periods with negligible active-area BRNG use lighter sampling 
-                    (~30 frames). When no upstream data is available, the default behavior targets ~50–100 frames 
-                    per period.</li>
-            </ul>
-            <p style="margin: 0 0 6px 0; font-weight: bold;">Adaptive detection:</p>
-            <p style="margin: 0 0 10px 0;">
-                When signalstats analysis is available, BRNG detection adapts per period based on the 
-                signalstats diagnosis. Periods diagnosed as <em>border-dominated</em> or <em>minimal</em> 
-                use stricter detection thresholds (requiring stronger evidence to classify a pixel as a 
-                violation), reducing false positives in regions where actual content violations are unlikely. 
-                Periods with <em>content violations</em> use standard sensitivity. When head switching 
-                artifacts were detected during border detection, the bottom-edge analysis zone is 
-                automatically widened to classify head switching noise as edge artifacts rather than 
-                content violations.
-            </p>
-            <p style="margin: 0; color: #777;">
-                Because the differential detector compares two decoded video frames and runs multi-method 
-                computer vision analysis on every sample, this targeted approach keeps processing time 
-                manageable while concentrating analysis on the frames most likely to contain violations.
-            </p>
-        </div>
-        """
-        
+        html += BRNG_METHODOLOGY_HTML
+
         try:
             # Handle both file path (string) and dict (from enhanced JSON)
             if isinstance(frame_outputs['brng_analysis'], str):
@@ -5127,23 +5140,23 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     brng_data = json.load(f)
             else:
                 brng_data = frame_outputs['brng_analysis']
-            
+
             # Get actionable report
             report = brng_data.get('actionable_report', {})
             aggregate = brng_data.get('aggregate_patterns', {})
             violations = brng_data.get('violations', [])
             period_summaries = brng_data.get('period_summaries', [])
             analysis_periods = brng_data.get('analysis_periods', [])
-            
+
             # Overall assessment banner
             assessment = report.get('overall_assessment', 'Analysis complete')
             stats = report.get('summary_statistics', {})
-            
+
             # Determine assessment styling
             edge_pct = aggregate.get('edge_violation_percentage', 0)
             avg_violation = stats.get('average_violation_percentage', 0)
             max_violation = stats.get('max_violation_percentage', 0)
-            
+
             if avg_violation >= 10:
                 assessment_bg = '#ffbaba'
                 assessment_border = '#d32f2f'
@@ -5160,7 +5173,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                 assessment_bg = '#d2ffed'
                 assessment_border = '#2e7d32'
                 assessment_icon = '✅'
-            
+
             html += f"""
             <div style="background-color: {assessment_bg}; padding: 12px 16px; margin: 10px 0;
                         border-left: 4px solid {assessment_border}; border-radius: 0 4px 4px 0;">
@@ -5211,7 +5224,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                 time_range_start = min(all_starts) if all_starts else 0
                 time_range_end = max(all_ends) if all_ends else 0
                 total_violations_across = sum(p.get('violations_found', 0) for p in period_summaries)
-                
+
                 html += f"""
                 <div style="margin: 16px 0;">
                     <p style="font-weight: bold; margin-bottom: 8px; color: var(--report-ink);">
@@ -5219,7 +5232,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                         ({_seconds_to_display(time_range_start)} – {_seconds_to_display(time_range_end)})
                     </p>
                 """
-                
+
                 for ps in period_summaries:
                     p_num = ps.get('period_num', '?')
                     p_start = ps.get('start_time', 0)
@@ -5232,11 +5245,11 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     ss_diagnosis = ps.get('signalstats_diagnosis', '')
                     sensitivity_used = ps.get('sensitivity_used', '')
                     ss_active_pct = ps.get('signalstats_active_area_pct', None)
-                    
+
                     # Bar width as proportion of violations found vs frames checked
                     bar_pct = (found / checked * 100) if checked > 0 else 0
                     bar_color = '#d32f2f' if bar_pct > 50 else '#bf971b' if bar_pct > 20 else '#1976d2'
-                    
+
                     html += f"""
                     <div style="background-color: var(--report-paper); padding: 10px 14px; margin: 6px 0; 
                                 border-radius: 4px; border: 1px solid var(--report-border-soft);">
@@ -5246,7 +5259,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                             </span>
                             <span style="display: flex; align-items: center; gap: 6px;">
                     """
-                    
+
                     # Signalstats diagnosis badge
                     if ss_diagnosis:
                         diag_labels = {
@@ -5261,7 +5274,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                                             border-radius: 3px; font-size: 11px; font-weight: bold;"
                                       title="Signalstats diagnosis for this period">{label}</span>
                             """
-                    
+
                     html += f"""
                                 <span style="font-size: 13px; color: #666;">
                                     {found} violation{'s' if found != 1 else ''} / {checked} frames checked
@@ -5276,7 +5289,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                         <div style="font-size: 12px; color: #777;">
                             QCTools targeted {qct_targeted} frames → {frames_mapped} mapped to period → {total_samples} total samples analyzed
                     """
-                    
+
                     # Show sensitivity and signalstats context on a second line if available
                     context_parts = []
                     if sensitivity_used and sensitivity_used != 'normal':
@@ -5287,14 +5300,14 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                         html += f"""
                             <br>{'  ·  '.join(context_parts)}
                         """
-                    
+
                     html += """
                         </div>
                     </div>
                     """
-                
+
                 html += "</div>"
-            
+
             elif analysis_periods:
                 # Fall back to showing period ranges without per-period stats
                 time_range_start = min(p[0] for p in analysis_periods)
@@ -5305,7 +5318,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     {_seconds_to_display(time_range_start)} – {_seconds_to_display(time_range_end)}
                 </p>
                 """
-            
+
             # Flex wrapper so "Violation Types Detected" and "Violation
             # Statistics" render side-by-side.
             viol_flex_open = bool(violations) or bool(stats or aggregate)
@@ -5319,7 +5332,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
             if violations:
                 diagnostic_counts = {}
                 edge_artifact_edges = set()
-                
+
                 for v in violations:
                     diags = v.get('diagnostics', [])
                     if diags:
@@ -5334,11 +5347,11 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                                 continue
                             else:
                                 diagnostic_counts[diag] = diagnostic_counts.get(diag, 0) + 1
-                
+
                 if diagnostic_counts:
                     total_v = len(violations)
                     refinement_iters = frame_outputs.get('refinement_iterations', 0)
-                    
+
                     # Build initial-run diagnostics for comparison if refinement occurred
                     initial_diag_counts = {}
                     if refinement_iters > 0 and frame_outputs.get('initial_brng_analysis'):
@@ -5354,12 +5367,12 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     <div style="flex: 1 1 320px; min-width: 0;">
                         <p style="font-weight: bold; margin-bottom: 8px; color: var(--report-ink);">Violation Types Detected</p>
                     """
-                    
+
                     # Sort by count (descending)
                     priority_order = ["Sub-black detected", "Highlight clipping", "Edge artifacts", 
                                      "Linear blanking patterns",
                                      "General broadcast range violations"]
-                    
+
                     sorted_diags = []
                     for diag_type in priority_order:
                         if diag_type in diagnostic_counts:
@@ -5367,7 +5380,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     for diag_type, count in diagnostic_counts.items():
                         if diag_type not in priority_order:
                             sorted_diags.append((diag_type, count))
-                    
+
                     # Type-specific colors
                     type_colors = {
                         "Sub-black detected": "#5c6bc0",
@@ -5379,11 +5392,11 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                         "Border detection likely missed blanking": "#d32f2f",
                         "Moderate blanking detected": "#f57c00"
                     }
-                    
+
                     for diag_type, count in sorted_diags:
                         pct = (count / total_v) * 100
                         bar_color = type_colors.get(diag_type, '#90a4ae')
-                        
+
                         # Show before → after if refinement happened
                         initial_count = initial_diag_counts.get(diag_type)
                         count_display = f"{count} frames ({pct:.1f}%)"
@@ -5395,12 +5408,12 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                                 f'{initial_count} ({initial_pct:.1f}%)</span>'
                                 f' → {count} frames ({pct:.1f}%)'
                             )
-                        
+
                         # Build label
                         label = diag_type
                         if diag_type == "Edge artifacts" and edge_artifact_edges:
                             label = f"Edge artifacts ({', '.join(sorted(edge_artifact_edges))})"
-                        
+
                         html += f"""
                         <div style="margin: 4px 0;">
                             <div style="display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 2px;">
@@ -5413,7 +5426,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                             </div>
                         </div>
                         """
-                    
+
                     # High edge percentage warning
                     if edge_pct > 50:
                         html += f"""
@@ -5422,20 +5435,20 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                             ⚠ High edge percentage ({edge_pct:.1f}%) suggests border detection may need adjustment
                         </div>
                         """
-                    
+
                     html += "</div>"
-            
+
             # ── Violation Statistics ──
             if stats or aggregate:
                 continuous_pct = aggregate.get('continuous_edge_percentage', 0)
                 linear_pct = aggregate.get('linear_pattern_percentage', 0)
-                
+
                 html += """
                 <div style="flex: 1 1 320px; min-width: 0;">
                     <p style="font-weight: bold; margin-bottom: 8px; color: var(--report-ink);">Violation Statistics</p>
                     <table style="border-collapse: collapse; width: auto; margin: 0;">
                 """
-                
+
                 stat_rows = [
                     ("Frames with violations", f"{stats.get('total_violations', 0)}"),
                     ("Average BRNG", f"{avg_violation:.2f}%"),
@@ -5443,14 +5456,14 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     ("Edge violations (any)", f"{edge_pct:.1f}% of analyzed frames"),
                     ("Edge violations (solid line)", f"{continuous_pct:.1f}% of analyzed frames"),
                 ]
-                
+
                 if linear_pct > 0:
                     stat_rows.append(("Linear patterns", f"{linear_pct:.1f}% of analyzed frames"))
-                
+
                 # Add note about scattered vs solid edges
                 if continuous_pct == 0 and edge_pct > 95:
                     stat_rows.append(("", "→ Violations are scattered rather than forming a solid line"))
-                
+
                 for label, value in stat_rows:
                     if label:
                         html += f"""
@@ -5466,7 +5479,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                             <td colspan="2" style="padding: 4px 0; font-size: 12px; color: #888; border: none; font-style: italic;">{value}</td>
                         </tr>
                         """
-                
+
                 html += """
                     </table>
                 </div>
@@ -5484,7 +5497,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     Skipped first {skip_info['total_skipped_seconds']:.1f} seconds (test patterns/color bars)</p>
                 </div>
                 """
-            
+
             # ── Recommendations ──
             if report.get('recommendations'):
                 html += "<div style='margin: 16px 0;'><p style='font-weight: bold; margin-bottom: 8px; color: var(--report-ink);'>Recommendations</p>"
@@ -5499,7 +5512,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     else:
                         rec_bg = '#e8f4fd'
                         rec_border = '#1976d2'
-                    
+
                     html += f"""
                     <div style="background-color: {rec_bg}; padding: 8px 12px; margin: 4px 0; 
                                 border-left: 3px solid {rec_border}; border-radius: 0 4px 4px 0; font-size: 13px;">
@@ -5509,11 +5522,20 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                         html += f"<br><span style='color: #555;'>{rec['description']}</span>"
                     html += "</div>"
                 html += "</div>"
-                
+
         except Exception as e:
             logger.error(f"Error reading BRNG analysis: {e}")
-    
+
     # BRNG Diagnostic Thumbnails
+    return html
+
+
+def _render_frame_thumbs_html(frame_outputs) -> str:
+    """BRNG thumbnails: the sampled frames with out-of-range pixels highlighted.
+
+    Returns an empty string when this section has no inputs.
+    """
+    html = ""
     if frame_outputs['brng_thumbnails']:
         # Try to get violations data for thumbnail metadata
         thumb_violations_data = []
@@ -5528,9 +5550,9 @@ def generate_frame_analysis_html(frame_outputs, video_id):
             thumb_violations_data = _brng_data.get('violations', [])
         except Exception:
             pass
-        
+
         num_thumbs = len(frame_outputs['brng_thumbnails'])
-        
+
         html += f"""
         <h3 style='color: var(--report-gold);'>BRNG Diagnostic Thumbnails</h3>
         <a id="link_brng_thumb_info" href="javascript:void(0);" 
@@ -5558,10 +5580,10 @@ def generate_frame_analysis_html(frame_outputs, video_id):
         </div>
         <div style="display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0;">
         """
-        
+
         # Sort thumbnails by filename (which includes timecode)
         sorted_thumbs = sorted(frame_outputs['brng_thumbnails'])
-        
+
         for thumb_idx, thumb_path in enumerate(sorted_thumbs[:6]):  # Limit to 6 thumbnails in report
             # Extract timecode from filename if possible
             filename = os.path.basename(thumb_path)
@@ -5575,7 +5597,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     timestamp_seconds = float(timecode.replace('s', ''))
                 except (ValueError, AttributeError):
                     pass
-            
+
             # Try to find matching violation data for this thumbnail
             thumb_score = None
             thumb_diags = None
@@ -5588,20 +5610,20 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                         thumb_brng_pct = v.get('violation_percentage')
                         thumb_diags = v.get('diagnostics', [])
                         break
-            
+
             with open(thumb_path, "rb") as img_file:
                 encoded_thumb = b64encode(img_file.read()).decode()
-            
+
             # Build caption
             caption_parts = [f"Frame at {timecode}"]
             if thumb_score is not None:
                 caption_parts.append(f"score: {thumb_score:.4f}")
             if thumb_brng_pct is not None:
                 caption_parts.append(f"BRNG: {thumb_brng_pct:.2f}%")
-            
+
             caption_line1 = caption_parts[0]
             caption_line2 = ", ".join(caption_parts[1:]) if len(caption_parts) > 1 else ""
-            
+
             # Diagnostic badge
             diag_html = ""
             if thumb_diags:
@@ -5611,7 +5633,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     for dl in diag_labels:
                         badges += f'<span style="display: inline-block; background: #e8ddd5; padding: 1px 6px; border-radius: 3px; font-size: 11px; margin: 1px 2px;">{dl}</span>'
                     diag_html = f'<div style="margin-top: 3px;">{badges}</div>'
-            
+
             html += f"""
             <div style="text-align: center; margin: 5px;">
                 <img src="data:image/jpeg;base64,{encoded_thumb}"
@@ -5624,12 +5646,49 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                 html += f'<p style="font-size: 11px; margin: 1px 0 0 0; color: #777;">{caption_line2}</p>'
             html += diag_html
             html += "</div>"
-        
+
         html += "</div>"
-        
+
         if num_thumbs > 6:
             html += f"<p style='font-style: italic; font-size: 13px;'>Showing 6 of {num_thumbs} diagnostic thumbnails</p>"
-    
+
+    return html
+
+
+def generate_frame_analysis_html(frame_outputs, video_id):
+    """
+    Generate HTML section for frame analysis results.
+
+    Args:
+        frame_outputs (dict): Dictionary of frame analysis output paths
+        video_id (str): Video identifier
+
+    Returns:
+        str: HTML string for frame analysis section
+    """
+    has_content = (
+        frame_outputs.get('border_visualization') or
+        frame_outputs.get('border_data') or
+        frame_outputs.get('brng_analysis') or
+        frame_outputs.get('signalstats_analysis')
+    )
+    if not has_content:
+        return ""
+
+    html = """
+    <div class="frame-analysis-section" id="section-frame-analysis">
+        <h2 style="color: var(--report-success); text-decoration: underline; margin-top: 30px;">Frame Analysis Results</h2>
+    """
+
+    # Border Detection Section
+    html += _render_frame_border_html(frame_outputs)
+    html += _render_frame_signalstats_html(frame_outputs)
+    html += _render_frame_brng_html(frame_outputs)
+    html += _render_frame_thumbs_html(frame_outputs)
+
+    # Closes the frame-analysis-section wrapper opened above. This used to sit
+    # at the end of the thumbnails block, which made that renderer emit a
+    # stray </div> even when it had nothing to draw.
     html += "</div>"
     return html
 
@@ -6607,8 +6666,84 @@ def generate_final_report(video_id, source_directory, report_directory, destinat
         return None
 
 
-def write_html_report(video_id, report_directory, destination_directory, html_report_path, video_path=None, check_cancelled=None, signals=None):
+@dataclass
+class ReportInputs:
+    """Everything the report discovers on disk before any markup is built.
 
+    Produced by _gather_report_inputs(); consumed by _build_section_html()
+    and, for a few paths, by the section list itself."""
+    artifacts: Any = None
+    colorbars_peaks: Any = None
+    eval_video_duration: Any = None
+    eval_video_fps: Any = None
+    exiftool_output_path: Any = None
+    ffprobe_output_path: Any = None
+    fixity_sidecar: Any = None
+    fixity_summary_json: Any = None
+    frame_outputs: Any = None
+    mediaconch_csv: Any = None
+    mediaconch_policy_content: Any = None
+    mediaconch_policy_name: Any = None
+    mediainfo_output_path: Any = None
+
+
+@dataclass
+class ReportPieces:
+    """Rendered fragments and page assets that the section list assembles.
+
+    Produced by _build_section_html(). Each field is either a markup string
+    or a small value the section list needs in order to lay the page out."""
+    audible_timecode_html: Any = None
+    audio_clipping_html: Any = None
+    audio_dropout_html: Any = None
+    bars_comparison_html: Any = None
+    bitplane_html: Any = None
+    channel_imbalance_html: Any = None
+    chroma_phase_html: Any = None
+    clamped_levels_html: Any = None
+    color_strip_divider: Any = None
+    color_strip_init_script: Any = None
+    color_strip_store: Any = None
+    colorbars_box_only: Any = None
+    colorbars_eval_html: Any = None
+    colorbars_html: Any = None
+    colorbars_timeline_html: Any = None
+    content_summary_html_list: Any = None
+    diff_csv_html: Any = None
+    difference_csv_filename: Any = None
+    dropped_sample_html: Any = None
+    duplicate_frame_html: Any = None
+    exif_file_content: Any = None
+    exif_file_filename: Any = None
+    ffprobe_file_content: Any = None
+    ffprobe_file_filename: Any = None
+    fixity_html: Any = None
+    frame_analysis_html: Any = None
+    identical_channels_html: Any = None
+    logo_image_path: Any = None
+    mc_csv_html: Any = None
+    mediaconch_csv_filename: Any = None
+    mi_file_content: Any = None
+    mi_file_filename: Any = None
+    mkvalidator_html: Any = None
+    no_qct_parse_files: Any = None
+    profile_summary_html: Any = None
+    smpte_reference: Any = None
+    tags_summary_html: Any = None
+    tone_detection_html: Any = None
+    tone_leak_html: Any = None
+    waveform_divider: Any = None
+    waveform_init_script: Any = None
+    waveform_store: Any = None
+    windowed_colorbars_html_list: Any = None
+
+
+def _gather_report_inputs(video_path, report_directory, destination_directory,
+                          video_id, html_report_path, check_cancelled, signals):
+    """Locate the report's inputs and generate its failure thumbnails.
+
+    Returns None when processing was cancelled part-way.
+    """
     if signals:
         signals.report_progress.emit(0)
 
@@ -6616,12 +6751,12 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
 
     if check_cancelled():
         return
-    
+
     # Create thumbPath if it doesn't exist
     thumbPath = os.path.join(report_directory, "ThumbExports")
     if not os.path.exists(thumbPath):
         os.makedirs(thumbPath)
-    
+
     # Collect all thumbnail tasks across all failure types, then generate with progress
     generated_thumbs = {}
     thumbnail_tasks = []
@@ -6690,7 +6825,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
 
     if check_cancelled():
         return
-    
+
     # Modified to get MediaConch policy content
     (exiftool_output_path, mediainfo_output_path, ffprobe_output_path,
      mediaconch_csv, fixity_sidecar, fixity_summary_json,
@@ -6709,36 +6844,58 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         destination_directory,
         video_id
     )
-    
-    # Generate frame analysis HTML section
-    frame_analysis_html = generate_frame_analysis_html(frame_outputs, video_id) if frame_outputs else ""
+    return ReportInputs(
+        artifacts=artifacts,
+        colorbars_peaks=colorbars_peaks,
+        eval_video_duration=eval_video_duration,
+        eval_video_fps=eval_video_fps,
+        exiftool_output_path=exiftool_output_path,
+        ffprobe_output_path=ffprobe_output_path,
+        fixity_sidecar=fixity_sidecar,
+        fixity_summary_json=fixity_summary_json,
+        frame_outputs=frame_outputs,
+        mediaconch_csv=mediaconch_csv,
+        mediaconch_policy_content=mediaconch_policy_content,
+        mediaconch_policy_name=mediaconch_policy_name,
+        mediainfo_output_path=mediainfo_output_path,
+    )
+
+
+def _build_section_html(inputs, video_id, video_path, report_directory,
+                        destination_directory, check_cancelled, signals):
+    """Turn the gathered inputs into rendered markup and page assets.
+
+    Returns None when processing was cancelled part-way.
+    """
+
+    frame_analysis_html = generate_frame_analysis_html(inputs.frame_outputs, video_id) if inputs.frame_outputs else ""
 
     # Initialize and create html from 
-    mc_csv_html, mediaconch_csv_filename = prepare_file_section(mediaconch_csv, lambda path: csv_to_html_table(path, style_mismatched=False, mismatch_color="#ffbaba", match_color="#d2ffed", check_fail=True))
-    diff_csv_html, difference_csv_filename = prepare_file_section(artifacts.difference_csv, lambda path: csv_to_html_table(path, style_mismatched=True, mismatch_color="#ffbaba", match_color="#d2ffed", check_fail=False))
-    exif_file_content, exif_file_filename = prepare_file_section(exiftool_output_path)
-    mi_file_content, mi_file_filename = prepare_file_section(mediainfo_output_path)
-    ffprobe_file_content, ffprobe_file_filename = prepare_file_section(ffprobe_output_path)
-    fixity_file_content, fixity_file_filename = prepare_file_section(fixity_sidecar)
-    fixity_html = make_fixity_section_html(fixity_summary_json, fixity_file_content)
+    mc_csv_html, mediaconch_csv_filename = prepare_file_section(inputs.mediaconch_csv, lambda path: csv_to_html_table(path, style_mismatched=False, mismatch_color="#ffbaba", match_color="#d2ffed", check_fail=True))
+    diff_csv_html, difference_csv_filename = prepare_file_section(inputs.artifacts.difference_csv, lambda path: csv_to_html_table(path, style_mismatched=True, mismatch_color="#ffbaba", match_color="#d2ffed", check_fail=False))
+    exif_file_content, exif_file_filename = prepare_file_section(inputs.exiftool_output_path)
+    mi_file_content, mi_file_filename = prepare_file_section(inputs.mediainfo_output_path)
+    ffprobe_file_content, ffprobe_file_filename = prepare_file_section(inputs.ffprobe_output_path)
+    fixity_file_content, fixity_file_filename = prepare_file_section(inputs.fixity_sidecar)
+    fixity_html = make_fixity_section_html(inputs.fixity_summary_json, fixity_file_content)
 
     # Get qct-parse thumbs if they exists
     thumbs_dict = find_qct_thumbs(report_directory)
 
-    if artifacts.profile_fails_csv:
-        profile_fails_csv_path = os.path.join(report_directory, artifacts.profile_fails_csv)
+    if inputs.artifacts.profile_fails_csv:
+        profile_fails_csv_path = os.path.join(report_directory, inputs.artifacts.profile_fails_csv)
         failureInfoSummary_profile = summarize_failures(profile_fails_csv_path)
     else:
         failureInfoSummary_profile = None
 
-    if artifacts.tag_fails_csv:
-        tag_fails_csv_path = os.path.join(report_directory, artifacts.tag_fails_csv)
+    if inputs.artifacts.tag_fails_csv:
+        tag_fails_csv_path = os.path.join(report_directory, inputs.artifacts.tag_fails_csv)
         failureInfoSummary_tags = summarize_failures(tag_fails_csv_path)
     else:
         failureInfoSummary_tags = None
 
-    if artifacts.colorbars_eval_fails_csv:
-        colorbars_eval_fails_csv_path = os.path.join(report_directory, artifacts.colorbars_eval_fails_csv)
+    if inputs.artifacts.colorbars_eval_fails_csv:
+        colorbars_eval_fails_csv_path = os.path.join(report_directory, inputs.artifacts.colorbars_eval_fails_csv)
         failureInfoSummary_colorbars = summarize_failures(colorbars_eval_fails_csv_path)
     else:
         failureInfoSummary_colorbars = None
@@ -6749,7 +6906,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     # Detected bars runs (head + additional). These are the regions the bars
     # evaluation skips, so the timeline shades them; the windowed graphs below
     # reuse the same parse for their timecode labels.
-    qct_duration_runs = _parse_bars_durations_csv(artifacts.qctools_colorbars_duration_output)
+    qct_duration_runs = _parse_bars_durations_csv(inputs.artifacts.qctools_colorbars_duration_output)
     bars_regions = [(bars_start, bars_end) for _, bars_start, bars_end in qct_duration_runs]
 
     # Create graphs for all existing csv files (existing code...)
@@ -6757,17 +6914,17 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     # so it stays a separate variable rather than being folded into
     # colorbars_eval_html.
     colorbars_timeline_html = None
-    if artifacts.qctools_bars_eval_check_output and failureInfoSummary_colorbars:
+    if inputs.artifacts.qctools_bars_eval_check_output and failureInfoSummary_colorbars:
         # Pies summarize the per-tag failure share; the timeline below them
         # carries the failure specifics (distribution + peak thumbnails)
-        colorbars_eval_html = make_profile_piecharts(artifacts.qctools_bars_eval_check_output, thumbs_dict, failureInfoSummary_colorbars, video_id, failure_csv_path=colorbars_eval_fails_csv_path, check_cancelled=check_cancelled, failure_details=False)
+        colorbars_eval_html = make_profile_piecharts(inputs.artifacts.qctools_bars_eval_check_output, thumbs_dict, failureInfoSummary_colorbars, video_id, failure_csv_path=colorbars_eval_fails_csv_path, check_cancelled=check_cancelled, failure_details=False)
         colorbars_timeline_html = make_eval_bars_timeline_html(
-            colorbars_eval_fails_csv_path, video_id, peaks=colorbars_peaks,
-            video_duration=eval_video_duration, frame_rate=eval_video_fps,
-            analysis_periods=get_frame_analysis_periods(frame_outputs),
-            black_segments=get_frame_analysis_black_segments(frame_outputs),
+            colorbars_eval_fails_csv_path, video_id, peaks=inputs.colorbars_peaks,
+            video_duration=inputs.eval_video_duration, frame_rate=inputs.eval_video_fps,
+            analysis_periods=get_frame_analysis_periods(inputs.frame_outputs),
+            black_segments=get_frame_analysis_black_segments(inputs.frame_outputs),
             bars_regions=bars_regions)
-    elif artifacts.qctools_bars_eval_check_output and failureInfoSummary_colorbars is None:
+    elif inputs.artifacts.qctools_bars_eval_check_output and failureInfoSummary_colorbars is None:
        color_bars_segment = f"""
         <div style="display: flex; flex-direction: column; align-items: start; background-color: var(--report-paper); padding: 10px;"> 
             <p><b>All QCTools values of the video file are within the median values of the color bars.</b></p>
@@ -6798,9 +6955,9 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
                 """
     smpte_reference = False
     colorbars_box_only = False
-    if artifacts.colorbars_values_output:
+    if inputs.artifacts.colorbars_values_output:
         try:
-            with open(artifacts.colorbars_values_output, 'r') as f:
+            with open(inputs.artifacts.colorbars_values_output, 'r') as f:
                 first_line = f.readline().strip()
             if first_line == "SMPTE_FALLBACK":
                 smpte_reference = True
@@ -6816,7 +6973,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
                 colorbars_html = smpte_selected_box
             else:
                 # Real detected-vs-SMPTE comparison CSV -> render the graph.
-                graph_html = make_color_bars_graphs(video_id, artifacts.qctools_colorbars_duration_output, artifacts.colorbars_values_output, thumbs_dict)
+                graph_html = make_color_bars_graphs(video_id, inputs.artifacts.qctools_colorbars_duration_output, inputs.artifacts.colorbars_values_output, thumbs_dict)
                 evaluate_reference = config_mgr.get_config('checks', ChecksConfig).tools.qct_parse.evaluateBarsReference
                 if evaluate_reference == 'smpte':
                     # SMPTE was the evaluation reference but bars were detected:
@@ -6845,13 +7002,13 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         windowed_duration_lookup[label] = f"{_fmt(start_s)} - {_fmt(end_s)}"
 
     windowed_colorbars_html_list = []
-    for wv_path in sorted(artifacts.windowed_colorbars_values):
+    for wv_path in sorted(inputs.artifacts.windowed_colorbars_values):
         try:
             region_name = os.path.basename(wv_path).replace("qct-parse_colorbars_values_", "").replace(".csv", "")
             dur_str = windowed_duration_lookup.get(region_name)
             idx_str = region_name.replace("additional-", "")
             wv_html = make_color_bars_graphs(
-                video_id, artifacts.qctools_colorbars_duration_output, wv_path, thumbs_dict,
+                video_id, inputs.artifacts.qctools_colorbars_duration_output, wv_path, thumbs_dict,
                 duration_override=dur_str,
                 bars_label=f'{video_id} Additional Bars',
                 thumb_profile_filter=f'additional_bars_{idx_str}',
@@ -6861,60 +7018,60 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         except Exception as e:
             logger.error(f"Error rendering windowed bars graph for {wv_path}: {e}")
 
-    if artifacts.qctools_profile_check_output and failureInfoSummary_profile:
-        profile_summary_html = make_profile_piecharts(artifacts.qctools_profile_check_output, thumbs_dict, failureInfoSummary_profile, video_id, failure_csv_path=profile_fails_csv_path, check_cancelled=check_cancelled)
+    if inputs.artifacts.qctools_profile_check_output and failureInfoSummary_profile:
+        profile_summary_html = make_profile_piecharts(inputs.artifacts.qctools_profile_check_output, thumbs_dict, failureInfoSummary_profile, video_id, failure_csv_path=profile_fails_csv_path, check_cancelled=check_cancelled)
     else:
         profile_summary_html = None
 
-    if artifacts.qctools_content_check_outputs:
+    if inputs.artifacts.qctools_content_check_outputs:
         content_summary_html_list = []
-        for output_csv in artifacts.qctools_content_check_outputs:
+        for output_csv in inputs.artifacts.qctools_content_check_outputs:
             content_summary_html = make_content_summary_html(output_csv, thumbs_dict, paper_bgcolor='#f5e9e3')
             content_summary_html_list.append(content_summary_html)
     else:
         content_summary_html_list = None
 
-    if artifacts.tags_check_output and failureInfoSummary_tags:
-        tags_summary_html = make_profile_piecharts(artifacts.tags_check_output, thumbs_dict, failureInfoSummary_tags, video_id, failure_csv_path=tag_fails_csv_path, check_cancelled=check_cancelled)
+    if inputs.artifacts.tags_check_output and failureInfoSummary_tags:
+        tags_summary_html = make_profile_piecharts(inputs.artifacts.tags_check_output, thumbs_dict, failureInfoSummary_tags, video_id, failure_csv_path=tag_fails_csv_path, check_cancelled=check_cancelled)
     else:
         tags_summary_html = None
 
     # Side-by-side comparison of qct-parse and CLAMS bars detectors. None
     # unless at least one of the two CSVs is present.
     bars_comparison_html = make_bars_detection_comparison_html(
-        artifacts.qctools_colorbars_duration_output,
-        artifacts.clams_bars_durations_csv,
-    ) if artifacts.clams_bars_durations_csv else None
+        inputs.artifacts.qctools_colorbars_duration_output,
+        inputs.artifacts.clams_bars_durations_csv,
+    ) if inputs.artifacts.clams_bars_durations_csv else None
 
     # CLAMS tone detection results.
-    tone_detection_html = make_tone_detection_html(artifacts.clams_tone_durations_csv)
-    mkvalidator_html = make_mkvalidator_html(artifacts.mkvalidator_summary_path, artifacts.mkvalidator_clusters_csv, video_path)
+    tone_detection_html = make_tone_detection_html(inputs.artifacts.clams_tone_durations_csv)
+    mkvalidator_html = make_mkvalidator_html(inputs.artifacts.mkvalidator_summary_path, inputs.artifacts.mkvalidator_clusters_csv, video_path)
 
-    audio_clipping_html = make_audio_clipping_html(artifacts.audio_clipping_csv) if artifacts.audio_clipping_csv else None
-    channel_imbalance_html = make_channel_imbalance_html(artifacts.channel_imbalance_csv) if artifacts.channel_imbalance_csv else None
-    identical_channels_html = make_identical_channels_html(artifacts.identical_channels_csv) if artifacts.identical_channels_csv else None
-    audible_timecode_html = make_audible_timecode_html(artifacts.audible_timecode_csv) if artifacts.audible_timecode_csv else None
-    audio_dropout_html = make_audio_dropout_html(artifacts.audio_dropout_csv) if artifacts.audio_dropout_csv else None
-    clamped_levels_html = make_clamped_levels_html(artifacts.clamped_levels_csv, artifacts.clamped_traces_csv) if artifacts.clamped_levels_csv else None
-    chroma_phase_html = make_chroma_phase_html(artifacts.chroma_phase_summary_csv, artifacts.chroma_phase_events_csv) if artifacts.chroma_phase_summary_csv else None
-    tone_leak_html = make_tone_leak_html(artifacts.tone_leak_summary_csv, artifacts.tone_leak_events_csv) if artifacts.tone_leak_summary_csv else None
-    dropped_sample_html = generate_dropped_sample_html(frame_outputs) if frame_outputs else ""
-    duplicate_frame_html = generate_duplicate_frame_html(frame_outputs) if frame_outputs else ""
-    bitplane_html = generate_bitplane_html(frame_outputs) if frame_outputs else ""
+    audio_clipping_html = make_audio_clipping_html(inputs.artifacts.audio_clipping_csv) if inputs.artifacts.audio_clipping_csv else None
+    channel_imbalance_html = make_channel_imbalance_html(inputs.artifacts.channel_imbalance_csv) if inputs.artifacts.channel_imbalance_csv else None
+    identical_channels_html = make_identical_channels_html(inputs.artifacts.identical_channels_csv) if inputs.artifacts.identical_channels_csv else None
+    audible_timecode_html = make_audible_timecode_html(inputs.artifacts.audible_timecode_csv) if inputs.artifacts.audible_timecode_csv else None
+    audio_dropout_html = make_audio_dropout_html(inputs.artifacts.audio_dropout_csv) if inputs.artifacts.audio_dropout_csv else None
+    clamped_levels_html = make_clamped_levels_html(inputs.artifacts.clamped_levels_csv, inputs.artifacts.clamped_traces_csv) if inputs.artifacts.clamped_levels_csv else None
+    chroma_phase_html = make_chroma_phase_html(inputs.artifacts.chroma_phase_summary_csv, inputs.artifacts.chroma_phase_events_csv) if inputs.artifacts.chroma_phase_summary_csv else None
+    tone_leak_html = make_tone_leak_html(inputs.artifacts.tone_leak_summary_csv, inputs.artifacts.tone_leak_events_csv) if inputs.artifacts.tone_leak_summary_csv else None
+    dropped_sample_html = generate_dropped_sample_html(inputs.frame_outputs) if inputs.frame_outputs else ""
+    duplicate_frame_html = generate_duplicate_frame_html(inputs.frame_outputs) if inputs.frame_outputs else ""
+    bitplane_html = generate_bitplane_html(inputs.frame_outputs) if inputs.frame_outputs else ""
 
     existing_thumbs = find_qct_thumbs(report_directory)
     no_qct_parse_files = (
-        not artifacts.profile_fails_csv and
-        not artifacts.tag_fails_csv and
-        not artifacts.colorbars_eval_fails_csv and
-        not artifacts.audio_clipping_csv and
-        not artifacts.channel_imbalance_csv and
-        not artifacts.identical_channels_csv and
-        not artifacts.audible_timecode_csv and
-        not artifacts.audio_dropout_csv and
-        not artifacts.clamped_levels_csv and
-        not artifacts.chroma_phase_summary_csv and
-        not artifacts.tone_leak_summary_csv and
+        not inputs.artifacts.profile_fails_csv and
+        not inputs.artifacts.tag_fails_csv and
+        not inputs.artifacts.colorbars_eval_fails_csv and
+        not inputs.artifacts.audio_clipping_csv and
+        not inputs.artifacts.channel_imbalance_csv and
+        not inputs.artifacts.identical_channels_csv and
+        not inputs.artifacts.audible_timecode_csv and
+        not inputs.artifacts.audio_dropout_csv and
+        not inputs.artifacts.clamped_levels_csv and
+        not inputs.artifacts.chroma_phase_summary_csv and
+        not inputs.artifacts.tone_leak_summary_csv and
         not existing_thumbs
     )
 
@@ -6932,7 +7089,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         color_strip_b64 = generate_color_strip_base64(video_path, signals=signals, progress_start=22, progress_end=25)
     if signals:
         signals.report_progress.emit(25)
- 
+
     if color_strip_b64:
         # Store the data URI once in a hidden element, reference it via JS
         color_strip_src = f"data:image/jpeg;base64,{color_strip_b64}"
@@ -6974,14 +7131,14 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
             f'<img class="waveform-data-store" src="data:image/jpeg;base64,{waveform_b64}" '
             f'style="display: none;">'
         )
-        
+
         # Divider: The placeholder that will be cloned by the script
         waveform_divider = (
             '<div style="margin: 20px 0; text-align: center;">'
             '<img class="waveform-clone" style="width: 100%; height: auto; border: 1px solid var(--report-accent);">'
             '</div>'
         )
-        
+
         # JavaScript: Finds all clones and populates them with the source data
         waveform_init_script = """
         <script>
@@ -6999,6 +7156,65 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         waveform_store = f'<img src="{eq_image_path}" alt="AV Spex Logo" style="width: 10%; display: none;">'
         waveform_divider = f'<div style="text-align: center;"><img src="{eq_image_path}" style="width: 10%;"></div>'
         waveform_init_script = ""
+    return ReportPieces(
+        audible_timecode_html=audible_timecode_html,
+        audio_clipping_html=audio_clipping_html,
+        audio_dropout_html=audio_dropout_html,
+        bars_comparison_html=bars_comparison_html,
+        bitplane_html=bitplane_html,
+        channel_imbalance_html=channel_imbalance_html,
+        chroma_phase_html=chroma_phase_html,
+        clamped_levels_html=clamped_levels_html,
+        color_strip_divider=color_strip_divider,
+        color_strip_init_script=color_strip_init_script,
+        color_strip_store=color_strip_store,
+        colorbars_box_only=colorbars_box_only,
+        colorbars_eval_html=colorbars_eval_html,
+        colorbars_html=colorbars_html,
+        colorbars_timeline_html=colorbars_timeline_html,
+        content_summary_html_list=content_summary_html_list,
+        diff_csv_html=diff_csv_html,
+        difference_csv_filename=difference_csv_filename,
+        dropped_sample_html=dropped_sample_html,
+        duplicate_frame_html=duplicate_frame_html,
+        exif_file_content=exif_file_content,
+        exif_file_filename=exif_file_filename,
+        ffprobe_file_content=ffprobe_file_content,
+        ffprobe_file_filename=ffprobe_file_filename,
+        fixity_html=fixity_html,
+        frame_analysis_html=frame_analysis_html,
+        identical_channels_html=identical_channels_html,
+        logo_image_path=logo_image_path,
+        mc_csv_html=mc_csv_html,
+        mediaconch_csv_filename=mediaconch_csv_filename,
+        mi_file_content=mi_file_content,
+        mi_file_filename=mi_file_filename,
+        mkvalidator_html=mkvalidator_html,
+        no_qct_parse_files=no_qct_parse_files,
+        profile_summary_html=profile_summary_html,
+        smpte_reference=smpte_reference,
+        tags_summary_html=tags_summary_html,
+        tone_detection_html=tone_detection_html,
+        tone_leak_html=tone_leak_html,
+        waveform_divider=waveform_divider,
+        waveform_init_script=waveform_init_script,
+        waveform_store=waveform_store,
+        windowed_colorbars_html_list=windowed_colorbars_html_list,
+    )
+
+
+def write_html_report(video_id, report_directory, destination_directory, html_report_path, video_path=None, check_cancelled=None, signals=None):
+
+    inputs = _gather_report_inputs(video_path, report_directory, destination_directory,
+                                   video_id, html_report_path, check_cancelled, signals)
+    if inputs is None:
+        return
+    
+    # Generate frame analysis HTML section
+    pieces = _build_section_html(inputs, video_id, video_path, report_directory,
+                                 destination_directory, check_cancelled, signals)
+    if pieces is None:
+        return
 
     # ------------------------------------------------------------------
     # Section assembly
@@ -7019,36 +7235,36 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         if html:
             sections.append(ReportSection(html=html, toc=tuple(toc_entries)))
 
-    if fixity_html:
+    if pieces.fixity_html:
         add_section(f"""
         <h3 id="section-fixity">Fixity</h3>
-        {fixity_html}
+        {pieces.fixity_html}
         """, ('section-fixity', 'Fixity'))
 
-    if mediaconch_csv:
+    if inputs.mediaconch_csv:
         add_section(f"""
-        <h3 id="section-mediaconch-csv">{mediaconch_csv_filename}</h3>
-        {mc_csv_html}
+        <h3 id="section-mediaconch-csv">{pieces.mediaconch_csv_filename}</h3>
+        {pieces.mc_csv_html}
         """, ('section-mediaconch-csv', 'MediaConch CSV'))
 
     # MediaConch policy is collapsible
-    if mediaconch_policy_content and mediaconch_policy_name:
+    if inputs.mediaconch_policy_content and inputs.mediaconch_policy_name:
         add_section(f"""
-        <h3 id="section-mediaconch-policy">MediaConch Policy File: {mediaconch_policy_name}</h3>
+        <h3 id="section-mediaconch-policy">MediaConch Policy File: {inputs.mediaconch_policy_name}</h3>
         <a id="link_mediaconch_policy" href="javascript:void(0);" onclick="toggleContent('mediaconch_policy', 'Show policy content ▼', 'Hide policy content ▲')" style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block;">Show policy content ▼</a>
-        <div id="mediaconch_policy" class="xml-content" style="display: none;">{mediaconch_policy_content}</div>
+        <div id="mediaconch_policy" class="xml-content" style="display: none;">{inputs.mediaconch_policy_content}</div>
         """, ('section-mediaconch-policy', 'MediaConch Policy'))
 
-    if mkvalidator_html:
+    if pieces.mkvalidator_html:
         add_section(f"""
         <h3 id="section-mkvalidator">mkvalidator</h3>
-        {mkvalidator_html}
+        {pieces.mkvalidator_html}
         """, ('section-mkvalidator', 'mkvalidator'))
 
     # Frame analysis brings its own headings, so it is passed through whole and
     # its TOC entries are read back out of the markup — only the subsections
     # that actually rendered are listed, falling back to the section heading.
-    if frame_analysis_html:
+    if pieces.frame_analysis_html:
         frame_subsections = [
             ('section-border-detection', 'Border Detection'),
             ('section-signalstats', 'Signalstats Analysis'),
@@ -7056,40 +7272,40 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         ]
         rendered = [
             (anchor, label) for anchor, label in frame_subsections
-            if f"id='{anchor}'" in frame_analysis_html
+            if f"id='{anchor}'" in pieces.frame_analysis_html
         ]
-        add_section(frame_analysis_html,
+        add_section(pieces.frame_analysis_html,
                     *(rendered or [('section-frame-analysis', 'Frame Analysis Results')]))
 
     # Bitplane check and duplicate frame detection render side-by-side so
     # each fills the vertical space of the taller section.
-    if bitplane_html or duplicate_frame_html:
+    if pieces.bitplane_html or pieces.duplicate_frame_html:
         block = (
             '<div style="display: flex; flex-wrap: wrap; gap: 24px; '
             'align-items: flex-start; margin-top: 20px;">'
         )
         block_toc = []
-        if bitplane_html:
+        if pieces.bitplane_html:
             block += (
                 '<div id="section-bitplane" style="flex: 1 1 380px; min-width: 0;">'
-                f'{bitplane_html}</div>'
+                f'{pieces.bitplane_html}</div>'
             )
             block_toc.append(('section-bitplane', 'Bitplane Check'))
-        if duplicate_frame_html:
+        if pieces.duplicate_frame_html:
             block += (
                 '<div id="section-duplicate-frame" '
                 'style="flex: 2 1 600px; min-width: 0; overflow-x: auto;">'
-                f'{duplicate_frame_html}</div>'
+                f'{pieces.duplicate_frame_html}</div>'
             )
             block_toc.append(('section-duplicate-frame', 'Duplicate Frame Detection'))
         block += '</div>'
         add_section(block, *block_toc)
 
     # Divider closing out the frame-analysis group. Carries no TOC entry.
-    if frame_analysis_html or bitplane_html or duplicate_frame_html:
-        add_section(color_strip_divider)
+    if pieces.frame_analysis_html or pieces.bitplane_html or pieces.duplicate_frame_html:
+        add_section(pieces.color_strip_divider)
 
-    if no_qct_parse_files:
+    if pieces.no_qct_parse_files:
         add_section("""
         <h3 id="section-qct-parse-notice">QCT-Parse Analysis</h3>
         <div style="background-color: var(--report-notice-bg); padding: 15px; border: 1px solid var(--report-notice-ink); margin: 10px 0; border-radius: 5px;">
@@ -7099,21 +7315,21 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
 
     # Head bars graph plus one graph per additional (mid-file) bars region,
     # laid out in a single wrapping flex row.
-    if colorbars_html or windowed_colorbars_html_list:
+    if pieces.colorbars_html or pieces.windowed_colorbars_html_list:
         block = '<div style="display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start;">'
         block_toc = []
-        if colorbars_html:
-            if colorbars_box_only:
+        if pieces.colorbars_html:
+            if pieces.colorbars_box_only:
                 colorbars_header = "Color Bars Detection"
             else:
                 colorbars_header = f"SMPTE Colorbars vs {video_id} Colorbars"
             block += f"""
             <div id="section-colorbars" style="flex: 1 1 720px; max-width: 100%; min-width: 0; overflow: hidden;">
                 <h3>{colorbars_header}</h3>
-                {colorbars_html}
+                {pieces.colorbars_html}
             </div>"""
             block_toc.append(('section-colorbars', 'Color Bars Detection'))
-        for region_name, wv_html in windowed_colorbars_html_list:
+        for region_name, wv_html in pieces.windowed_colorbars_html_list:
             block += f"""
             <div id="section-colorbars-{region_name}" style="flex: 1 1 720px; max-width: 100%; min-width: 0; overflow: hidden;">
                 <h3>SMPTE Colorbars vs Additional {video_id} Colorbars</h3>
@@ -7123,57 +7339,57 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         block += '</div>'
         add_section(block, *block_toc)
 
-    if bars_comparison_html or tone_detection_html:
+    if pieces.bars_comparison_html or pieces.tone_detection_html:
         block = '<h3 id="section-clams-detection">CLAMS Detection</h3>'
         block += CLAMS_METHODOLOGY_HTML
-        if bars_comparison_html:
+        if pieces.bars_comparison_html:
             block += f"""
             <h4 style="font-size: 16px; margin-top: 16px; color: var(--report-ink);">Bars Detection (qct-parse vs CLAMS SSIM)</h4>
-            {bars_comparison_html}
+            {pieces.bars_comparison_html}
             """
-        if tone_detection_html:
+        if pieces.tone_detection_html:
             block += f"""
             <h4 style="font-size: 16px; margin-top: 16px; color: var(--report-ink);">Tone Detection</h4>
-            {tone_detection_html}
+            {pieces.tone_detection_html}
             """
         add_section(block, ('section-clams-detection', 'CLAMS Detection'))
 
-    if colorbars_eval_html:
-        if smpte_reference:
+    if pieces.colorbars_eval_html:
+        if pieces.smpte_reference:
             eval_header = "Values relative to SMPTE colorbar's thresholds"
         else:
             eval_header = "Values relative to colorbar's thresholds"
         add_section(f"""
         <h3 id="section-colorbars-eval">{eval_header}</h3>
-        {colorbars_eval_html}
+        {pieces.colorbars_eval_html}
         """, ('section-colorbars-eval', 'Colorbars Threshold Evaluation'))
 
-    if colorbars_timeline_html:
+    if pieces.colorbars_timeline_html:
         add_section(f"""
         <h3 id="section-timeline">Timeline of Signal Distribution</h3>
-        {colorbars_timeline_html}
+        {pieces.colorbars_timeline_html}
         """, ('section-timeline', 'Timeline of Signal Distribution'))
 
-    if clamped_levels_html:
+    if pieces.clamped_levels_html:
         add_section(f"""
         <h3 id="section-clamped-levels">Clamped Levels Detection</h3>
-        {clamped_levels_html}
+        {pieces.clamped_levels_html}
         """, ('section-clamped-levels', 'Clamped Levels Detection'))
 
-    if chroma_phase_html:
+    if pieces.chroma_phase_html:
         add_section(f"""
         <h3 id="section-chroma-phase">Chroma Phase Detection</h3>
-        {chroma_phase_html}
+        {pieces.chroma_phase_html}
         """, ('section-chroma-phase', 'Chroma Phase Detection'))
 
     # Audio results render as one banner-led group: the per-channel
     # comparisons two-up, then timecode/dropout two-up, then tone leak full
     # width, bracketed by waveform dividers. One TOC entry covers the group.
     has_audio_results = bool(
-        audio_clipping_html or channel_imbalance_html
-        or identical_channels_html
-        or audible_timecode_html or audio_dropout_html
-        or tone_leak_html
+        pieces.audio_clipping_html or pieces.channel_imbalance_html
+        or pieces.identical_channels_html
+        or pieces.audible_timecode_html or pieces.audio_dropout_html
+        or pieces.tone_leak_html
     )
 
     if has_audio_results:
@@ -7182,98 +7398,98 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
             'text-decoration: underline; margin-top: 30px;">'
             'Audio Analysis Results</h2>'
         )
-        block += waveform_divider
+        block += pieces.waveform_divider
 
-        if audio_clipping_html or channel_imbalance_html or identical_channels_html:
+        if pieces.audio_clipping_html or pieces.channel_imbalance_html or pieces.identical_channels_html:
             block += (
                 '<div style="display: flex; flex-wrap: wrap; gap: 24px; '
                 'align-items: flex-start; margin: 16px 0;">'
             )
-            if audio_clipping_html:
+            if pieces.audio_clipping_html:
                 block += f"""
                 <div style="flex: 1 1 420px; min-width: 0;">
                     <h3>Audio Clipping Detection</h3>
-                    {audio_clipping_html}
+                    {pieces.audio_clipping_html}
                 </div>
                 """
-            if channel_imbalance_html:
+            if pieces.channel_imbalance_html:
                 block += f"""
                 <div style="flex: 1 1 420px; min-width: 0;">
                     <h3>Channel Imbalance Analysis</h3>
-                    {channel_imbalance_html}
+                    {pieces.channel_imbalance_html}
                 </div>
                 """
-            if identical_channels_html:
+            if pieces.identical_channels_html:
                 block += f"""
                 <div id="section-identical-channels" style="flex: 1 1 420px; min-width: 0;">
                     <h3>Identical Channels</h3>
-                    {identical_channels_html}
+                    {pieces.identical_channels_html}
                 </div>
                 """
             block += '</div>'
 
-        if audible_timecode_html or audio_dropout_html:
+        if pieces.audible_timecode_html or pieces.audio_dropout_html:
             block += (
                 '<div style="display: flex; flex-wrap: wrap; gap: 24px; '
                 'align-items: flex-start; margin: 16px 0;">'
             )
-            if audible_timecode_html:
+            if pieces.audible_timecode_html:
                 block += f"""
                 <div style="flex: 1 1 420px; min-width: 0;">
                     <h3>Audible Timecode Detection</h3>
-                    {audible_timecode_html}
+                    {pieces.audible_timecode_html}
                 </div>
                 """
-            if audio_dropout_html:
+            if pieces.audio_dropout_html:
                 block += f"""
                 <div style="flex: 1 1 420px; min-width: 0;">
                     <h3>Audio Dropout Detection</h3>
-                    {audio_dropout_html}
+                    {pieces.audio_dropout_html}
                 </div>
                 """
             block += '</div>'
 
         # Tone Leak Detection (full width - the per-channel table is wide)
-        if tone_leak_html:
+        if pieces.tone_leak_html:
             block += f"""
             <div id="section-tone-leak" style="margin: 16px 0;">
                 <h3>Tone Leak Detection</h3>
-                {tone_leak_html}
+                {pieces.tone_leak_html}
             </div>
             """
 
-        block += waveform_divider
+        block += pieces.waveform_divider
         add_section(block, ('section-audio-analysis', 'Audio Analysis Results'))
 
-    if dropped_sample_html:
-        add_section(f'<div id="section-dropped-sample">{dropped_sample_html}</div>',
+    if pieces.dropped_sample_html:
+        add_section(f'<div id="section-dropped-sample">{pieces.dropped_sample_html}</div>',
                     ('section-dropped-sample', 'Dropped Sample Detection'))
 
-    if artifacts.difference_csv:
+    if inputs.artifacts.difference_csv:
         add_section(f"""
-        <h3 id="section-difference-csv">{difference_csv_filename}</h3>
-        {diff_csv_html}
+        <h3 id="section-difference-csv">{pieces.difference_csv_filename}</h3>
+        {pieces.diff_csv_html}
         """, ('section-difference-csv', 'Difference CSV'))
 
-    if profile_summary_html:
+    if pieces.profile_summary_html:
         add_section(f"""
         <h3 id="section-profile-summary">qct-parse Profile Summary</h3>
         <div style="white-space: nowrap;">
-            {profile_summary_html}
+            {pieces.profile_summary_html}
         </div>
         """, ('section-profile-summary', 'QCT-Parse Profile Summary'))
 
-    if tags_summary_html:
+    if pieces.tags_summary_html:
         add_section(f"""
         <h3 id="section-tags-summary">qct-parse Tag Check Summary</h3>
         <div style="white-space: nowrap;">
-            {tags_summary_html}
+            {pieces.tags_summary_html}
         </div>
         """, ('section-tags-summary', 'QCT-Parse Tag Check Summary'))
 
-    if content_summary_html_list:
+    if pieces.content_summary_html_list:
         block = ''
-        for idx, content_summary_html in enumerate(content_summary_html_list):
+        for idx, content_summary_html in enumerate(pieces.content_summary_html_list):
             # Only the first content-detection block gets the anchor id, so TOC
             # links resolve even when multiple blocks render.
             heading_id = ' id="section-content-summary"' if idx == 0 else ''
@@ -7286,25 +7502,25 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         add_section(block, ('section-content-summary', 'QCT-Parse Content Detection'))
 
     # Raw tool output, each collapsible
-    if exiftool_output_path:
+    if inputs.exiftool_output_path:
         add_section(f"""
-        <h3 id="section-exiftool">{exif_file_filename}</h3>
+        <h3 id="section-exiftool">{pieces.exif_file_filename}</h3>
         <a id="link_exiftool" href="javascript:void(0);" onclick="toggleContent('exiftool', 'Show content ▼', 'Hide content ▲')" style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block;">Show content ▼</a>
-        <div id="exiftool" class="metadata-content" style="display: none;">{exif_file_content}</div>
+        <div id="exiftool" class="metadata-content" style="display: none;">{pieces.exif_file_content}</div>
         """, ('section-exiftool', 'ExifTool Output'))
 
-    if mediainfo_output_path:
+    if inputs.mediainfo_output_path:
         add_section(f"""
-        <h3 id="section-mediainfo">{mi_file_filename}</h3>
+        <h3 id="section-mediainfo">{pieces.mi_file_filename}</h3>
         <a id="link_mediainfo" href="javascript:void(0);" onclick="toggleContent('mediainfo', 'Show content ▼', 'Hide content ▲')" style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block;">Show content ▼</a>
-        <div id="mediainfo" class="metadata-content" style="display: none;">{mi_file_content}</div>
+        <div id="mediainfo" class="metadata-content" style="display: none;">{pieces.mi_file_content}</div>
         """, ('section-mediainfo', 'MediaInfo Output'))
 
-    if ffprobe_output_path:
+    if inputs.ffprobe_output_path:
         add_section(f"""
-        <h3 id="section-ffprobe">{ffprobe_file_filename}</h3>
+        <h3 id="section-ffprobe">{pieces.ffprobe_file_filename}</h3>
         <a id="link_ffprobe" href="javascript:void(0);" onclick="toggleContent('ffprobe', 'Show content ▼', 'Hide content ▲')" style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block;">Show content ▼</a>
-        <div id="ffprobe" class="metadata-content" style="display: none;">{ffprobe_file_content}</div>
+        <div id="ffprobe" class="metadata-content" style="display: none;">{pieces.ffprobe_file_content}</div>
         """, ('section-ffprobe', 'FFprobe Output'))
 
     if check_cancelled():
@@ -7330,13 +7546,13 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     toc_html = _build_toc_html([entry for section in sections for entry in section.toc])
 
     html_template = _report_head_html(
-        video_id, logo_image_path, color_strip_store, waveform_store, toc_html)
+        video_id, pieces.logo_image_path, pieces.color_strip_store, pieces.waveform_store, toc_html)
 
     for section in sections:
         html_template += section.html
 
-    html_template += color_strip_init_script
-    html_template += waveform_init_script
+    html_template += pieces.color_strip_init_script
+    html_template += pieces.waveform_init_script
     html_template += """
     </body>
     </html>
