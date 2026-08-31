@@ -1,11 +1,15 @@
 import subprocess
 import os
+import re
 import sys
 from AV_Spex.utils.log_setup import logger, report_ffmpeg_stderr
 from AV_Spex.utils import ffprobe_probe
 from AV_Spex.utils.config_setup import ChecksConfig
 from AV_Spex.utils.config_manager import ConfigManager
 from AV_Spex.utils.dir_setup import is_hidden_file
+
+# Cached result of get_video_sync_args(); ffmpeg's version can't change mid-run.
+_video_sync_args = None
 
 # Fraction of the file duration that channel-specific audible-timecode (LTC)
 # regions must cover before the channel is excluded from the access copy. A
@@ -128,6 +132,39 @@ def get_duration(video_path):
 
 
 
+def get_video_sync_args():
+    """ffmpeg flags for "pass every frame through untouched", matched to the build.
+
+    ``-vsync 0`` has been deprecated since ffmpeg 5.1 in favour of the
+    per-stream ``-fps_mode``, and some newer builds have dropped it entirely —
+    they fail the whole command with "Unrecognized option 'vsync'." rather than
+    warning. ``-fps_mode`` doesn't exist before 5.1, so pick by version and fall
+    back to the modern spelling when the version can't be read.
+    """
+    global _video_sync_args
+    if _video_sync_args is not None:
+        return list(_video_sync_args)
+
+    modern = ['-fps_mode', 'passthrough']
+    legacy = ['-vsync', '0']
+    args = modern
+    try:
+        result = subprocess.run(
+            ['ffmpeg', '-hide_banner', '-version'],
+            capture_output=True, text=True, timeout=10
+        )
+        match = re.search(r'ffmpeg version n?(\d+)\.(\d+)', result.stdout or '')
+        if match:
+            major, minor = int(match.group(1)), int(match.group(2))
+            if (major, minor) < (5, 1):
+                args = legacy
+    except (subprocess.SubprocessError, OSError):
+        pass
+
+    _video_sync_args = args
+    return list(_video_sync_args)
+
+
 def get_video_dimensions(video_path):
     """(width, height) of the first video stream, or (None, None) on failure."""
     dimensions = ffprobe_probe.video_dimensions(video_path)
@@ -174,7 +211,7 @@ def make_access_file(video_path, output_path, check_cancelled=None, signals=None
 
     duration_str = get_duration(video_path)
 
-    ffmpeg_command = ['ffmpeg', '-n', '-vsync', '0',
+    ffmpeg_command = ['ffmpeg', '-n',
         '-hide_banner', '-progress', 'pipe:1', '-nostats', '-loglevel', 'error']
 
     if start_time and start_time > 0:
@@ -294,7 +331,8 @@ def make_access_file(video_path, output_path, check_cancelled=None, signals=None
 
     ffmpeg_command.extend([
         '-i', video_path,
-        '-movflags', 'faststart', '-map', '0:v:0', *audio_args, '-c:v', 'libx264',
+        '-movflags', 'faststart', '-map', '0:v:0', *audio_args,
+        *get_video_sync_args(), '-c:v', 'libx264',
         '-vf', ','.join(vf_filters), '-crf', '18', '-preset', 'fast', '-maxrate', '1000k', '-bufsize', '1835k',
         '-c:a', 'aac', '-strict', '-2', '-b:a', '192k', '-f', 'mp4', output_path
     ])

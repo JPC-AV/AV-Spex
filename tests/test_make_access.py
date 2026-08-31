@@ -41,6 +41,9 @@ def _capture_ffmpeg_cmd(monkeypatch, dim=(720, 486), duration="60.0", audio_stre
     audio_streams defaults to a single stereo stream ``(2,)`` (typical MKV);
     pass e.g. ``(1, 1)`` to simulate two mono streams (typical MXF).
     """
+    # Pin the sync flags so the version probe doesn't run against the Popen mock;
+    # tests that care about the flag choice call get_video_sync_args directly.
+    monkeypatch.setattr(ma, "_video_sync_args", ["-fps_mode", "passthrough"])
     monkeypatch.setattr(ma, "get_duration", lambda _p: duration)
     monkeypatch.setattr(ma, "get_video_dimensions", lambda _p: dim)
     monkeypatch.setattr(ma, "get_audio_stream_channels", lambda _p: list(audio_streams))
@@ -568,3 +571,48 @@ def test_determine_zero_duration_skips_ltc_but_silent_still_works():
         _findings(silent=[1], regions=regions, duration=0)
     )
     assert excluded == [1]
+
+
+# ---------------------------------------------------------------------------
+# get_video_sync_args
+# ---------------------------------------------------------------------------
+
+def _fake_ffmpeg_version(monkeypatch, version_line):
+    monkeypatch.setattr(ma, "_video_sync_args", None)
+    monkeypatch.setattr(ma.subprocess, "run",
+                        lambda *a, **kw: MagicMock(returncode=0, stdout=version_line, stderr=""))
+
+
+def test_get_video_sync_args_modern_ffmpeg_uses_fps_mode(monkeypatch):
+    _fake_ffmpeg_version(monkeypatch, "ffmpeg version 8.1.1 Copyright (c) 2000-2026\n")
+    assert ma.get_video_sync_args() == ["-fps_mode", "passthrough"]
+
+
+def test_get_video_sync_args_old_ffmpeg_uses_vsync(monkeypatch):
+    _fake_ffmpeg_version(monkeypatch, "ffmpeg version 4.4.1 Copyright (c) 2000-2021\n")
+    assert ma.get_video_sync_args() == ["-vsync", "0"]
+
+
+def test_get_video_sync_args_unparsable_version_defaults_to_fps_mode(monkeypatch):
+    _fake_ffmpeg_version(monkeypatch, "ffmpeg version N-109693-gd6d8de7 Copyright\n")
+    assert ma.get_video_sync_args() == ["-fps_mode", "passthrough"]
+
+
+def test_get_video_sync_args_probe_failure_defaults_to_fps_mode(monkeypatch):
+    monkeypatch.setattr(ma, "_video_sync_args", None)
+
+    def boom(*_a, **_kw):
+        raise OSError("ffmpeg not found")
+
+    monkeypatch.setattr(ma.subprocess, "run", boom)
+    assert ma.get_video_sync_args() == ["-fps_mode", "passthrough"]
+
+
+def test_make_access_file_does_not_pass_deprecated_vsync(monkeypatch):
+    popen_mock = _capture_ffmpeg_cmd(monkeypatch)
+    ma.make_access_file("/v/in.mkv", "/v/out.mp4", check_cancelled=lambda: False)
+
+    cmd = popen_mock.call_args[0][0]
+    assert "-vsync" not in cmd
+    # -fps_mode is a per-output option: it must come after the input file.
+    assert cmd.index("-fps_mode") > cmd.index("-i")
