@@ -9,6 +9,7 @@ from PyQt6.QtGui import (
 )
 
 import os
+import re
 from datetime import datetime
 from AV_Spex.gui.gui_theme_manager import ThemeManager, ThemeableMixin
 from AV_Spex.gui.gui_processing_window_console import ConsoleTextEdit, MessageType
@@ -20,6 +21,52 @@ from AV_Spex.utils.log_setup import connect_logger_to_ui
 
 config_mgr = ConfigManager()
 checks_config = config_mgr.get_config('checks', ChecksConfig)
+
+# Qt's text layout silently stops laying out a QTextDocument once the laid-out
+# height reaches ~2^23 device units, and QTextDocument.print() reports no error
+# when it does — the PDF simply ends mid-console. The ceiling is measured in
+# *device* units, so it is a page count only for a given writer resolution:
+# at QPdfWriter's 1200 dpi default it works out to ~712 Letter pages (~18,500
+# console lines), which a long multi-tape run exceeds. Printing at 300 dpi
+# quadruples the headroom to ~2,850 pages; PDF text is vector, so nothing is
+# lost visually. _console_pdf_looks_truncated() catches the remaining case.
+CONSOLE_PDF_RESOLUTION = 300
+_PDF_LAYOUT_HEIGHT_LIMIT = 2 ** 23
+_PDF_PAGE_OBJECT_RE = re.compile(rb'/Type\s*/Page[^s]')
+
+
+def _console_pdf_looks_truncated(file_path, page_height):
+    """Report whether a written console PDF hit Qt's layout-height ceiling.
+
+    A truncated print always stops within one page of _PDF_LAYOUT_HEIGHT_LIMIT
+    device units, so counting the page objects Qt wrote and multiplying by the
+    writer's page height tells us whether the document ran into the wall. A
+    document that genuinely ends within one page of the ceiling would be
+    flagged too — a false "may be incomplete" on a ~2,800-page export is a fair
+    trade for never silently losing console output again.
+
+    The check fails open: if the file can't be read, or the page objects can't
+    be found (a future Qt could compress them), it reports False rather than
+    warning about a PDF it could not inspect.
+
+    Args:
+        file_path (str): The PDF that was just written
+        page_height (int): QPdfWriter.height() — the page height in device units
+
+    Returns:
+        bool: True only when the output is positively at the ceiling
+    """
+    if page_height <= 0:
+        return False
+    try:
+        with open(file_path, 'rb') as pdf_file:
+            page_count = len(_PDF_PAGE_OBJECT_RE.findall(pdf_file.read()))
+    except OSError:
+        return False
+    if page_count == 0:
+        return False
+    return page_count * page_height >= _PDF_LAYOUT_HEIGHT_LIMIT - page_height
+
 
 class ProcessingWindow(QMainWindow, ThemeableMixin):
     """Window to display processing status and progress."""
@@ -238,8 +285,30 @@ class ProcessingWindow(QMainWindow, ThemeableMixin):
             file_path += ".pdf"
 
         try:
-            self._write_console_pdf(file_path)
-            self.update_status(f"Console output saved to {file_path}", MessageType.SUCCESS)
+            complete = self._write_console_pdf(file_path)
+            if complete:
+                self.update_status(f"Console output saved to {file_path}", MessageType.SUCCESS)
+            else:
+                self.update_status(
+                    f"Console output saved to {file_path}, but it is incomplete — "
+                    "the console is too long for a single PDF and the export was "
+                    "cut short. Select all the console text and paste it into a "
+                    "text file to keep the full log.",
+                    MessageType.WARNING
+                )
+                msg_box = QMessageBox(self)
+                msg_box.setIcon(QMessageBox.Icon.Warning)
+                msg_box.setWindowTitle("Saved, but Incomplete")
+                msg_box.setText("The PDF was written but is missing the end of the console.")
+                msg_box.setInformativeText(
+                    "This console is longer than a PDF can hold, so the export "
+                    "stops partway through. The on-screen console still has "
+                    "everything: select all of it (Cmd+A, Cmd+C) and paste it "
+                    "into a text file to keep the complete log."
+                )
+                msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+                msg_box.setStyleSheet(self.get_message_box_style())
+                msg_box.exec()
         except Exception as e:
             self.update_status(f"Failed to save PDF: {str(e)}", MessageType.ERROR)
             msg_box = QMessageBox(self)
@@ -258,8 +327,15 @@ class ProcessingWindow(QMainWindow, ThemeableMixin):
             start_position (int): Character position to start from — anything
                 before it is dropped, which is how a single video's slice of
                 the console is exported.
+
+        Returns:
+            bool: True if the whole document made it into the PDF, False if it
+                hit Qt's layout ceiling and the output is incomplete.
         """
         writer = QPdfWriter(file_path)
+        # Must be set before the page size: it decides how much document fits
+        # under Qt's layout-height ceiling (see CONSOLE_PDF_RESOLUTION).
+        writer.setResolution(CONSOLE_PDF_RESOLUTION)
         writer.setPageSize(QPageSize(QPageSize.PageSizeId.Letter))
         writer.setPageMargins(QMarginsF(15, 15, 15, 15), QPageLayout.Unit.Millimeter)
 
@@ -280,6 +356,8 @@ class ProcessingWindow(QMainWindow, ThemeableMixin):
             cursor.removeSelectedText()
 
         doc.print(writer)
+
+        return not _console_pdf_looks_truncated(file_path, writer.height())
 
     def mark_file_console_start(self, source_directory=None, current=None, total=None):
         """Remember where in the console this video's output begins.
@@ -312,8 +390,15 @@ class ProcessingWindow(QMainWindow, ThemeableMixin):
         file_path = os.path.join(destination_directory, f"{video_id}_avspex_console.pdf")
 
         try:
-            self._write_console_pdf(file_path, self._file_console_start_pos)
-            self.update_status(f"Console output saved to {file_path}", MessageType.INFO)
+            complete = self._write_console_pdf(file_path, self._file_console_start_pos)
+            if complete:
+                self.update_status(f"Console output saved to {file_path}", MessageType.INFO)
+            else:
+                self.update_status(
+                    f"Console output saved to {file_path}, but this file's console "
+                    "output was too long to fit in a PDF and the end is missing.",
+                    MessageType.WARNING
+                )
         except Exception as e:
             self.update_status(f"Failed to save console PDF: {str(e)}", MessageType.ERROR)
 
