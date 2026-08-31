@@ -1,10 +1,15 @@
 import subprocess
 import os
+import re
 import sys
 from AV_Spex.utils.log_setup import logger, report_ffmpeg_stderr
+from AV_Spex.utils import ffprobe_probe
 from AV_Spex.utils.config_setup import ChecksConfig
 from AV_Spex.utils.config_manager import ConfigManager
 from AV_Spex.utils.dir_setup import is_hidden_file
+
+# Cached result of get_video_sync_args(); ffmpeg's version can't change mid-run.
+_video_sync_args = None
 
 # Fraction of the file duration that channel-specific audible-timecode (LTC)
 # regions must cover before the channel is excluded from the access copy. A
@@ -115,72 +120,65 @@ def determine_excluded_audio_channels(audio_findings):
     return sorted(flagged), reasons
 
 
+
 def get_duration(video_path):
-    """Return the file duration in seconds as a string, or None if unavailable.
+    """File duration in seconds as a string, or None if unavailable.
 
-    Tries the container (format) duration first, then falls back to the first
-    video stream's duration — some MKVs report 'N/A' for format=duration.
-    Returns None when neither is available so callers can skip progress math.
+    Kept as a string because the caller passes it straight into ffmpeg progress
+    math; see utils.ffprobe_probe.duration for the numeric form.
     """
-    def _probe(entries, stream_args=()):
-        command = [
-            'ffprobe', '-v', 'error', *stream_args,
-            '-show_entries', entries, '-of', 'csv=p=0', video_path,
-        ]
-        result = subprocess.run(command, stdout=subprocess.PIPE)
-        return result.stdout.decode().strip()
+    seconds = ffprobe_probe.duration(video_path)
+    return None if seconds is None else str(seconds)
 
-    for duration in (
-        _probe('format=duration'),
-        _probe('stream=duration', ('-select_streams', 'v:0')),
-    ):
-        if duration and duration != 'N/A':
-            return duration
-    return None
+
+
+def get_video_sync_args():
+    """ffmpeg flags for "pass every frame through untouched", matched to the build.
+
+    ``-vsync 0`` has been deprecated since ffmpeg 5.1 in favour of the
+    per-stream ``-fps_mode``, and some newer builds have dropped it entirely —
+    they fail the whole command with "Unrecognized option 'vsync'." rather than
+    warning. ``-fps_mode`` doesn't exist before 5.1, so pick by version and fall
+    back to the modern spelling when the version can't be read.
+    """
+    global _video_sync_args
+    if _video_sync_args is not None:
+        return list(_video_sync_args)
+
+    modern = ['-fps_mode', 'passthrough']
+    legacy = ['-vsync', '0']
+    args = modern
+    try:
+        result = subprocess.run(
+            ['ffmpeg', '-hide_banner', '-version'],
+            capture_output=True, text=True, timeout=10
+        )
+        match = re.search(r'ffmpeg version n?(\d+)\.(\d+)', result.stdout or '')
+        if match:
+            major, minor = int(match.group(1)), int(match.group(2))
+            if (major, minor) < (5, 1):
+                args = legacy
+    except (subprocess.SubprocessError, OSError):
+        pass
+
+    _video_sync_args = args
+    return list(_video_sync_args)
 
 
 def get_video_dimensions(video_path):
-    """Return (width, height) of the first video stream, or (None, None) on failure."""
-    command = [
-        'ffprobe',
-        '-v', 'error',
-        '-select_streams', 'v:0',
-        '-show_entries', 'stream=width,height',
-        '-of', 'csv=p=0:s=x',
-        video_path
-    ]
-    try:
-        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        out = result.stdout.decode().strip()
-        if not out or 'x' not in out:
-            return None, None
-        w_str, h_str = out.split('x', 1)
-        return int(w_str), int(h_str)
-    except (ValueError, subprocess.SubprocessError):
-        return None, None
+    """(width, height) of the first video stream, or (None, None) on failure."""
+    dimensions = ffprobe_probe.video_dimensions(video_path)
+    return dimensions if dimensions is not None else (None, None)
+
 
 
 def get_audio_stream_channels(video_path):
-    """Return the channel count of every audio stream, in order.
+    """Channel count of every audio stream, in order; empty list if unknown.
 
-    e.g. ``[2]`` for a single stereo stream (typical MKV) or ``[1, 1]`` for two
-    separate mono streams (typical broadcast MXF, where each track is its own
-    mono PCM stream). Returns an empty list if it can't be determined.
+    ``[2]`` for a single stereo stream (typical MKV), ``[1, 1]`` for two
+    separate mono streams (typical broadcast MXF).
     """
-    command = [
-        'ffprobe',
-        '-v', 'error',
-        '-select_streams', 'a',
-        '-show_entries', 'stream=channels',
-        '-of', 'default=noprint_wrappers=1:nokey=1',
-        video_path,
-    ]
-    try:
-        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        out = result.stdout.decode().strip()
-        return [int(x) for x in out.split() if x.strip()]
-    except (ValueError, OSError, subprocess.SubprocessError):
-        return []
+    return ffprobe_probe.audio_stream_channels(video_path) or []
 
 
 def make_access_file(video_path, output_path, check_cancelled=None, signals=None, start_time=None, crop_area=None, crop_to_480=True, excluded_audio_channels=None):
@@ -213,7 +211,7 @@ def make_access_file(video_path, output_path, check_cancelled=None, signals=None
 
     duration_str = get_duration(video_path)
 
-    ffmpeg_command = ['ffmpeg', '-n', '-vsync', '0',
+    ffmpeg_command = ['ffmpeg', '-n',
         '-hide_banner', '-progress', 'pipe:1', '-nostats', '-loglevel', 'error']
 
     if start_time and start_time > 0:
@@ -333,7 +331,8 @@ def make_access_file(video_path, output_path, check_cancelled=None, signals=None
 
     ffmpeg_command.extend([
         '-i', video_path,
-        '-movflags', 'faststart', '-map', '0:v:0', *audio_args, '-c:v', 'libx264',
+        '-movflags', 'faststart', '-map', '0:v:0', *audio_args,
+        *get_video_sync_args(), '-c:v', 'libx264',
         '-vf', ','.join(vf_filters), '-crf', '18', '-preset', 'fast', '-maxrate', '1000k', '-bufsize', '1835k',
         '-c:a', 'aac', '-strict', '-2', '-b:a', '192k', '-f', 'mp4', output_path
     ])

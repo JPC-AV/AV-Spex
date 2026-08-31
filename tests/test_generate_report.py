@@ -14,7 +14,7 @@ Coverage:
 * parse_timestamp — valid + malformed → placeholder tuple
 * parse_profile — prefix mapping + default
 * find_qct_thumbs — filename parsing into sorted dict
-* find_report_csvs — directory scanning into the 22-tuple
+* find_report_csvs — directory scanning into the ReportArtifacts dataclass
 * read_xml_file — UTF-8 + latin-1 fallback + missing-file
 * _get_video_duration / _get_audio_channel_count — ffprobe wrappers
 * _build_waveform_filter — mono / stereo / multi-channel filter graph
@@ -26,6 +26,9 @@ Coverage:
 """
 
 import csv
+import dataclasses
+import re
+import textwrap
 import os
 import subprocess
 from base64 import b64decode
@@ -34,6 +37,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from AV_Spex.utils import generate_report as gr
+from AV_Spex.utils import ffprobe_probe
 
 
 # ===========================================================================
@@ -528,74 +532,77 @@ def test_find_qct_thumbs_sorts_by_timestamp_when_tag_names_unknown(tmp_path):
 # Section 5 — find_report_csvs
 # ===========================================================================
 
-def test_find_report_csvs_empty_directory_returns_all_none(tmp_path):
-    out = gr.find_report_csvs(str(tmp_path))
-    # 22-tuple: all None except 2 list fields (content_check_outputs, windowed_colorbars_values)
-    assert isinstance(out, tuple)
-    assert len(out) == 22
-    none_count = sum(1 for x in out if x is None)
-    list_count = sum(1 for x in out if x == [])
-    assert none_count == 20
-    assert list_count == 2
+def test_find_report_csvs_empty_directory_returns_defaults(tmp_path):
+    """Every field defaults to None, except the two list-valued ones."""
+    art = gr.find_report_csvs(str(tmp_path))
+    assert isinstance(art, gr.ReportArtifacts)
+    values = [getattr(art, f.name) for f in dataclasses.fields(art)]
+    assert sum(1 for v in values if v is None) == len(values) - 2
+    assert art.windowed_colorbars_values == []
+    assert art.qctools_content_check_outputs == []
 
 
 def test_find_report_csvs_picks_up_known_filenames(tmp_path):
-    """Each well-named CSV lands in the right slot in the tuple."""
-    files = {
-        "qct-parse_colorbars_durations.csv":   "colorbars_duration_output",
-        "qct-parse_colorbars_eval_summary.csv": "bars_eval_check_output",
-        "qct-parse_colorbars_values.csv":       "colorbars_values_output",
-        "qct-parse_profile_summary.csv":        "profile_check_output",
-        "qct-parse_profile_failures.csv":       "profile_fails_csv",
-        "qct-parse_tags_summary.csv":           "tags_check_output",
-        "qct-parse_tags_failures.csv":          "tag_fails_csv",
-        "qct-parse_audio_clipping.csv":         "audio_clipping_csv",
-        "qct-parse_channel_imbalance.csv":      "channel_imbalance_csv",
-        "qct-parse_identical_channels.csv":     "identical_channels_csv",
-        "qct-parse_audible_timecode.csv":       "audible_timecode_csv",
-        "qct-parse_audio_dropout.csv":          "audio_dropout_csv",
-        "qct-parse_clamped_levels.csv":         "clamped_levels_csv",
-        "qct-parse_clamped_traces.csv":         "clamped_traces_csv",
-        "qct-parse_chroma_phase_summary.csv":   "chroma_phase_summary_csv",
-        "qct-parse_chroma_phase_events.csv":    "chroma_phase_events_csv",
-        "qct-parse_tone_leak_summary.csv":      "tone_leak_summary_csv",
-        "qct-parse_tone_leak_events.csv":       "tone_leak_events_csv",
-        "JPC_AV_metadata_difference.csv":       "difference_csv",
+    """Each well-named CSV lands on the right field."""
+    expected = {
+        "qct-parse_colorbars_durations.csv":     "qctools_colorbars_duration_output",
+        "qct-parse_colorbars_eval_summary.csv":  "qctools_bars_eval_check_output",
+        "qct-parse_colorbars_eval_failures.csv": "colorbars_eval_fails_csv",
+        "qct-parse_colorbars_values.csv":        "colorbars_values_output",
+        "qct-parse_profile_summary.csv":         "qctools_profile_check_output",
+        "qct-parse_profile_failures.csv":        "profile_fails_csv",
+        "qct-parse_tags_summary.csv":            "tags_check_output",
+        "qct-parse_tags_failures.csv":           "tag_fails_csv",
+        "qct-parse_audio_clipping.csv":          "audio_clipping_csv",
+        "qct-parse_channel_imbalance.csv":       "channel_imbalance_csv",
+        "qct-parse_identical_channels.csv":      "identical_channels_csv",
+        "qct-parse_audible_timecode.csv":        "audible_timecode_csv",
+        "qct-parse_audio_dropout.csv":           "audio_dropout_csv",
+        "qct-parse_clamped_levels.csv":          "clamped_levels_csv",
+        "qct-parse_clamped_traces.csv":          "clamped_traces_csv",
+        "qct-parse_chroma_phase_summary.csv":    "chroma_phase_summary_csv",
+        "qct-parse_chroma_phase_events.csv":     "chroma_phase_events_csv",
+        "qct-parse_tone_leak_summary.csv":       "tone_leak_summary_csv",
+        "qct-parse_tone_leak_events.csv":        "tone_leak_events_csv",
+        "clams_bars_colorbars_durations.csv":    "clams_bars_durations_csv",
+        "clams_tone_detection_durations.csv":    "clams_tone_durations_csv",
+        "JPC_AV_metadata_difference.csv":        "difference_csv",
     }
-    for name in files:
+    for name in expected:
         (tmp_path / name).write_text("")
 
-    out = gr.find_report_csvs(str(tmp_path))
-    # Unpack the 22-tuple in the order the function returns it
-    (
-        colorbars_duration_output, bars_eval_check_output, colorbars_values_output,
-        windowed_colorbars_values, content_check_outputs, profile_check_output,
-        profile_fails_csv, tags_check_output, tag_fails_csv, colorbars_eval_fails_csv,
-        audio_clipping_csv, channel_imbalance_csv, identical_channels_csv,
-        audible_timecode_csv,
-        audio_dropout_csv, clamped_levels_csv, clamped_traces_csv,
-        chroma_phase_summary_csv, chroma_phase_events_csv,
-        tone_leak_summary_csv, tone_leak_events_csv, difference_csv,
-    ) = out
-    assert colorbars_duration_output.endswith("qct-parse_colorbars_durations.csv")
-    assert bars_eval_check_output.endswith("qct-parse_colorbars_eval_summary.csv")
-    assert colorbars_values_output.endswith("qct-parse_colorbars_values.csv")
-    assert profile_check_output.endswith("qct-parse_profile_summary.csv")
-    assert profile_fails_csv.endswith("qct-parse_profile_failures.csv")
-    assert tags_check_output.endswith("qct-parse_tags_summary.csv")
-    assert tag_fails_csv.endswith("qct-parse_tags_failures.csv")
-    assert audio_clipping_csv.endswith("qct-parse_audio_clipping.csv")
-    assert channel_imbalance_csv.endswith("qct-parse_channel_imbalance.csv")
-    assert identical_channels_csv.endswith("qct-parse_identical_channels.csv")
-    assert audible_timecode_csv.endswith("qct-parse_audible_timecode.csv")
-    assert audio_dropout_csv.endswith("qct-parse_audio_dropout.csv")
-    assert clamped_levels_csv.endswith("qct-parse_clamped_levels.csv")
-    assert clamped_traces_csv.endswith("qct-parse_clamped_traces.csv")
-    assert chroma_phase_summary_csv.endswith("qct-parse_chroma_phase_summary.csv")
-    assert chroma_phase_events_csv.endswith("qct-parse_chroma_phase_events.csv")
-    assert tone_leak_summary_csv.endswith("qct-parse_tone_leak_summary.csv")
-    assert tone_leak_events_csv.endswith("qct-parse_tone_leak_events.csv")
-    assert difference_csv.endswith("metadata_difference.csv")
+    art = gr.find_report_csvs(str(tmp_path))
+    for filename, attr in expected.items():
+        assert getattr(art, attr) is not None, f"{attr} not populated by {filename}"
+        assert os.path.basename(getattr(art, attr)) == filename, f"{attr} got the wrong file"
+
+
+def test_find_report_csvs_distinguishes_shared_stem_pairs(tmp_path):
+    """clamped_levels/clamped_traces and the eval summary/failures pair are
+    distinct fields whose filenames share a stem — a substring match in the
+    wrong order would collapse them."""
+    (tmp_path / "qct-parse_clamped_levels.csv").write_text("")
+    (tmp_path / "qct-parse_clamped_traces.csv").write_text("")
+    (tmp_path / "qct-parse_colorbars_eval_summary.csv").write_text("")
+    (tmp_path / "qct-parse_colorbars_eval_failures.csv").write_text("")
+
+    art = gr.find_report_csvs(str(tmp_path))
+    assert art.clamped_levels_csv.endswith("qct-parse_clamped_levels.csv")
+    assert art.clamped_traces_csv.endswith("qct-parse_clamped_traces.csv")
+    assert art.qctools_bars_eval_check_output.endswith("qct-parse_colorbars_eval_summary.csv")
+    assert art.colorbars_eval_fails_csv.endswith("qct-parse_colorbars_eval_failures.csv")
+
+
+def test_find_report_csvs_separates_windowed_colorbars_values(tmp_path):
+    """The bare colorbars_values file is the head region; suffixed ones are
+    additional bars regions and accumulate into a list."""
+    (tmp_path / "qct-parse_colorbars_values.csv").write_text("")
+    (tmp_path / "qct-parse_colorbars_values_additional-1.csv").write_text("")
+    (tmp_path / "qct-parse_colorbars_values_additional-2.csv").write_text("")
+
+    art = gr.find_report_csvs(str(tmp_path))
+    assert art.colorbars_values_output.endswith("qct-parse_colorbars_values.csv")
+    assert len(art.windowed_colorbars_values) == 2
 
 
 def test_find_report_csvs_collects_content_filter_csvs_into_list(tmp_path):
@@ -603,18 +610,279 @@ def test_find_report_csvs_collects_content_filter_csvs_into_list(tmp_path):
     (tmp_path / "qct-parse_contentFilter_a.csv").write_text("")
     (tmp_path / "qct-parse_contentFilter_b.csv").write_text("")
 
-    out = gr.find_report_csvs(str(tmp_path))
-    content_check_outputs = out[4]
-    assert len(content_check_outputs) == 2
-    names = sorted(os.path.basename(p) for p in content_check_outputs)
+    art = gr.find_report_csvs(str(tmp_path))
+    names = sorted(os.path.basename(p) for p in art.qctools_content_check_outputs)
     assert names == ["qct-parse_contentFilter_a.csv", "qct-parse_contentFilter_b.csv"]
+
+
+def test_find_report_csvs_finds_mkvalidator_in_destination_dir(tmp_path):
+    """mkvalidator sidecars live in _qc_metadata, not the report dir."""
+    report_dir = tmp_path / "rpt"; report_dir.mkdir()
+    dest_dir = tmp_path / "meta"; dest_dir.mkdir()
+    (dest_dir / "JPC_AV_00001_mkvalidator_summary.txt").write_text("")
+    (dest_dir / "JPC_AV_00001_mkvalidator_clusters.csv").write_text("")
+
+    art = gr.find_report_csvs(str(report_dir), str(dest_dir), "JPC_AV_00001")
+    assert art.mkvalidator_summary_path.endswith("JPC_AV_00001_mkvalidator_summary.txt")
+    assert art.mkvalidator_clusters_csv.endswith("JPC_AV_00001_mkvalidator_clusters.csv")
+
+
+def test_find_report_csvs_mkvalidator_absent_without_destination_dir(tmp_path):
+    """Omitting the destination dir simply leaves the mkvalidator fields unset."""
+    art = gr.find_report_csvs(str(tmp_path))
+    assert art.mkvalidator_summary_path is None
+    assert art.mkvalidator_clusters_csv is None
+
+
+def test_find_report_csvs_mkvalidator_clusters_optional(tmp_path):
+    """The clusters CSV is only written when a WRN0C2 was found."""
+    report_dir = tmp_path / "rpt"; report_dir.mkdir()
+    dest_dir = tmp_path / "meta"; dest_dir.mkdir()
+    (dest_dir / "V1_mkvalidator_summary.txt").write_text("")
+
+    art = gr.find_report_csvs(str(report_dir), str(dest_dir), "V1")
+    assert art.mkvalidator_summary_path is not None
+    assert art.mkvalidator_clusters_csv is None
 
 
 def test_find_report_csvs_ignores_unknown_files(tmp_path):
     (tmp_path / ".DS_Store").write_text("")
     (tmp_path / "random_artifact.csv").write_text("")
-    out = gr.find_report_csvs(str(tmp_path))
-    assert all(x is None or x == [] for x in out)
+    art = gr.find_report_csvs(str(tmp_path))
+    values = [getattr(art, f.name) for f in dataclasses.fields(art)]
+    assert all(v is None or v == [] for v in values)
+
+
+def test_find_report_csvs_missing_directory_returns_defaults(tmp_path):
+    art = gr.find_report_csvs(str(tmp_path / "does_not_exist"))
+    assert art.colorbars_values_output is None
+    assert art.windowed_colorbars_values == []
+
+
+# ===========================================================================
+# Section 5b — report section assembly (ReportSection / TOC derivation)
+# ===========================================================================
+
+def test_report_section_defaults_to_no_toc_entries():
+    assert gr.ReportSection(html="<p>x</p>").toc == ()
+
+
+def test_toc_is_derived_in_section_order():
+    """The nav order is read off the section list, not restated separately."""
+    sections = [
+        gr.ReportSection('<h3 id="a">A</h3>', (('a', 'Alpha'),)),
+        gr.ReportSection('<h3 id="b">B</h3>', (('b', 'Beta'),)),
+        gr.ReportSection('<h3 id="c">C</h3>', (('c', 'Gamma'),)),
+    ]
+    entries = [e for s in sections for e in s.toc]
+    assert [a for a, _ in entries] == ['a', 'b', 'c']
+
+    html = gr._build_toc_html(entries)
+    # Links appear in the same order as the sections that produced them.
+    assert html.index('#a') < html.index('#b') < html.index('#c')
+
+
+def test_one_section_can_contribute_several_toc_entries():
+    """Frame analysis lists its rendered subsections rather than itself."""
+    section = gr.ReportSection(
+        "<div id='section-border-detection'></div><div id='section-brng-analysis'></div>",
+        (('section-border-detection', 'Border Detection'),
+         ('section-brng-analysis', 'BRNG Violation Analysis')),
+    )
+    assert len(section.toc) == 2
+    assert gr._dangling_toc_anchors([section]) == []
+
+
+def test_section_may_contribute_no_toc_entry():
+    """Dividers render markup but are not navigation targets."""
+    divider = gr.ReportSection('<img class="color-strip-divider">')
+    assert [e for s in [divider] for e in s.toc] == []
+    assert gr._dangling_toc_anchors([divider]) == []
+
+
+def test_build_toc_html_empty_when_no_entries():
+    assert gr._build_toc_html([]) == ''
+
+
+def test_dangling_toc_anchor_detected_when_id_missing():
+    """An anchor whose id was never written is a link that scrolls nowhere."""
+    sections = [gr.ReportSection('<h3 id="section-real">R</h3>',
+                                 (('section-typo', 'Typo'),))]
+    assert gr._dangling_toc_anchors(sections) == ['section-typo']
+
+
+def test_dangling_toc_anchors_accepts_single_quoted_ids():
+    """Frame analysis writes id='x'; the rest of the report writes id="x"."""
+    sections = [gr.ReportSection("<div id='section-x'>X</div>",
+                                 (('section-x', 'X'),))]
+    assert gr._dangling_toc_anchors(sections) == []
+
+
+def test_dangling_toc_anchor_resolves_against_any_section(tmp_path):
+    """An anchor may point into a sibling section's markup."""
+    sections = [
+        gr.ReportSection('<h3 id="section-a">A</h3>', (('section-b', 'B'),)),
+        gr.ReportSection('<h3 id="section-b">B</h3>'),
+    ]
+    assert gr._dangling_toc_anchors(sections) == []
+
+
+# ===========================================================================
+# Section 5c — report palette tokens
+# ===========================================================================
+
+def test_head_defines_the_palette_in_one_place():
+    head = gr._report_head_html("V1", "", "", "", "")
+    root = re.search(r':root \{(.*?)\}', head, re.S)
+    assert root, "no :root palette block in the report head"
+    tokens = dict(re.findall(r'--(report-[\w-]+):\s*(#[0-9a-fA-F]{6});', root.group(1)))
+    assert len(tokens) >= 10, f"expected the full palette, got {sorted(tokens)}"
+    # The colours that carried the report's identity before tokenisation.
+    assert tokens['report-ink'] == '#4d2b12'
+    assert tokens['report-paper'] == '#f5e9e3'
+    assert tokens['report-accent'] == '#378d6a'
+
+
+def test_head_markup_uses_the_tokens():
+    head = gr._report_head_html("V1", "", "", "", "")
+    assert 'var(--report-' in head
+
+
+def test_every_palette_token_used_anywhere_is_defined():
+    """An undefined CSS variable is dropped silently, so a typo would only
+    show up as a colour quietly going missing.
+
+    Scans the whole module rather than one rendered fragment: most var()
+    references live in individual section renderers, not the head.
+    """
+    import inspect
+    source = inspect.getsource(gr)
+    head = gr._report_head_html("V1", "", "", "", "")
+    root = re.search(r':root \{(.*?)\}', head, re.S).group(1)
+    defined = set(re.findall(r'--(report-[\w-]+)\s*:', root))
+    used = set(re.findall(r'var\(--(report-[\w-]+)\)', source))
+    assert used, "expected the module to reference palette tokens"
+    assert used <= defined, f"undefined palette tokens: {sorted(used - defined)}"
+
+
+def test_undefined_token_is_detected():
+    html = """<style>:root { --report-ink: #4d2b12; }</style>
+              <div style="color: var(--report-inkk)">x</div>"""
+    assert gr._undefined_style_tokens(html) == ['report-inkk']
+
+
+def test_defined_token_is_not_flagged():
+    html = """<style>:root { --report-ink: #4d2b12; }</style>
+              <div style="color: var(--report-ink)">x</div>"""
+    assert gr._undefined_style_tokens(html) == []
+
+
+def test_changing_one_token_changes_every_site():
+    """The point of the palette: a colour is edited in one place."""
+    head = gr._report_head_html("V1", "", "", "", "")
+    ink_refs = head.count('var(--report-ink)')
+    assert ink_refs > 1, "expected the ink token to be reused"
+    recoloured = head.replace('--report-ink: #4d2b12;', '--report-ink: #000000;')
+    assert '--report-ink: #000000;' in recoloured
+    # every reference still resolves to the single definition
+    assert recoloured.count('var(--report-ink)') == ink_refs
+
+
+# ===========================================================================
+# Section 5d — the three report phases
+#
+# write_html_report is now gather -> build -> assemble/emit. The two extracted
+# phases each return None when cancelled, and the caller must stop rather than
+# writing a partial report.
+# ===========================================================================
+
+def test_report_inputs_fields_match_what_gather_returns(tmp_path):
+    """Every declared field should be populated by the gather phase, not left
+    silently at its default."""
+    inputs = gr._gather_report_inputs(
+        None, str(tmp_path), str(tmp_path), "V1",
+        str(tmp_path / "out.html"), lambda: False, None)
+    assert isinstance(inputs, gr.ReportInputs)
+    assert inputs.artifacts is not None, "artifacts is always discovered"
+
+
+def test_gather_returns_none_when_cancelled(tmp_path):
+    assert gr._gather_report_inputs(
+        None, str(tmp_path), str(tmp_path), "V1",
+        str(tmp_path / "out.html"), lambda: True, None) is None
+
+
+def test_build_returns_none_when_cancelled(tmp_path):
+    inputs = gr._gather_report_inputs(
+        None, str(tmp_path), str(tmp_path), "V1",
+        str(tmp_path / "out.html"), lambda: False, None)
+    assert gr._build_section_html(
+        inputs, "V1", None, str(tmp_path), str(tmp_path), lambda: True, None) is None
+
+
+def test_build_produces_every_declared_piece(tmp_path):
+    """A bare directory still yields a complete ReportPieces — the section list
+    reads all of these, so a missing attribute would be an AttributeError."""
+    inputs = gr._gather_report_inputs(
+        None, str(tmp_path), str(tmp_path), "V1",
+        str(tmp_path / "out.html"), lambda: False, None)
+    pieces = gr._build_section_html(
+        inputs, "V1", None, str(tmp_path), str(tmp_path), lambda: False, None)
+    assert isinstance(pieces, gr.ReportPieces)
+    for field in gr.ReportPieces.__dataclass_fields__:
+        assert hasattr(pieces, field)
+
+
+def test_cancelling_writes_no_report(tmp_path):
+    """The whole point of the None contract: no partial file on disk."""
+    out = tmp_path / "report.html"
+    gr.write_html_report("V1", str(tmp_path), str(tmp_path), str(out),
+                         video_path=None, check_cancelled=lambda: True, signals=None)
+    assert not out.exists()
+
+
+def test_empty_directories_still_produce_a_report(tmp_path):
+    out = tmp_path / "report.html"
+    gr.write_html_report("V1", str(tmp_path), str(tmp_path), str(out),
+                         video_path=None, check_cancelled=lambda: False, signals=None)
+    assert out.exists()
+    html = out.read_text()
+    assert "AV Spex Report" in html
+    assert "V1" in html
+
+
+def test_section_list_only_reads_declared_piece_fields():
+    """A typo like pieces.fixity_htm would raise at render time; catch it
+    statically instead."""
+    import ast, inspect
+    tree = ast.parse(textwrap.dedent(inspect.getsource(gr.write_html_report)))
+    used = {n.attr for n in ast.walk(tree)
+            if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+            and n.value.id == 'pieces'}
+    declared = set(gr.ReportPieces.__dataclass_fields__)
+    assert used, "expected the section list to read from pieces"
+    assert used <= declared, f"undeclared piece fields: {sorted(used - declared)}"
+
+
+def test_section_list_only_reads_declared_input_fields():
+    import ast, inspect
+    tree = ast.parse(textwrap.dedent(inspect.getsource(gr.write_html_report)))
+    used = {n.attr for n in ast.walk(tree)
+            if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+            and n.value.id == 'inputs'}
+    declared = set(gr.ReportInputs.__dataclass_fields__)
+    assert used <= declared, f"undeclared input fields: {sorted(used - declared)}"
+
+
+def test_build_phase_only_reads_declared_input_fields():
+    import ast, inspect
+    tree = ast.parse(textwrap.dedent(inspect.getsource(gr._build_section_html)))
+    used = {n.attr for n in ast.walk(tree)
+            if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+            and n.value.id == 'inputs'}
+    declared = set(gr.ReportInputs.__dataclass_fields__)
+    assert used, "expected the build phase to read from inputs"
+    assert used <= declared, f"undeclared input fields: {sorted(used - declared)}"
 
 
 # ===========================================================================
@@ -655,31 +923,42 @@ def test_get_video_duration_subprocess_error_returns_none(monkeypatch):
     assert gr._get_video_duration("/v.mkv") is None
 
 
+def _audio_json(*channel_counts):
+    import json
+    return json.dumps({"streams": [{"index": i + 1, "channels": c}
+                                   for i, c in enumerate(channel_counts)]})
+
+
+def _fake_audio_probe(monkeypatch, *channel_counts):
+    """Probing moved to utils.ffprobe_probe, so that is what these patch."""
+    fake = MagicMock(returncode=0, stdout=_audio_json(*channel_counts), stderr="")
+    monkeypatch.setattr(ffprobe_probe.subprocess, "run", lambda *a, **kw: fake)
+
+
 def test_get_audio_channel_count_returns_int(monkeypatch):
-    fake = MagicMock(returncode=0, stdout="2\n")
-    monkeypatch.setattr(gr.subprocess, "run", lambda *a, **kw: fake)
+    _fake_audio_probe(monkeypatch, 2)
     assert gr._get_audio_channel_count("/v.mkv") == 2
 
 
 def test_get_audio_channel_count_failure_returns_none(monkeypatch):
-    monkeypatch.setattr(gr.subprocess, "run", MagicMock(side_effect=subprocess.CalledProcessError(1, "ffprobe")))
+    monkeypatch.setattr(ffprobe_probe.subprocess, "run",
+                        MagicMock(side_effect=OSError("no ffprobe")))
     assert gr._get_audio_channel_count("/v.mkv") is None
 
 
 def test_get_audio_stream_channels_single_stereo(monkeypatch):
-    fake = MagicMock(returncode=0, stdout="2\n")
-    monkeypatch.setattr(gr.subprocess, "run", lambda *a, **kw: fake)
+    _fake_audio_probe(monkeypatch, 2)
     assert gr._get_audio_stream_channels("/v.mkv") == [2]
 
 
 def test_get_audio_stream_channels_two_mono_streams(monkeypatch):
-    fake = MagicMock(returncode=0, stdout="1\n1\n")
-    monkeypatch.setattr(gr.subprocess, "run", lambda *a, **kw: fake)
+    _fake_audio_probe(monkeypatch, 1, 1)
     assert gr._get_audio_stream_channels("/v.mxf") == [1, 1]
 
 
 def test_get_audio_stream_channels_failure_returns_none(monkeypatch):
-    monkeypatch.setattr(gr.subprocess, "run", MagicMock(side_effect=subprocess.CalledProcessError(1, "ffprobe")))
+    monkeypatch.setattr(ffprobe_probe.subprocess, "run",
+                        MagicMock(side_effect=OSError("no ffprobe")))
     assert gr._get_audio_stream_channels("/v.mkv") is None
 
 

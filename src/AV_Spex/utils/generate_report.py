@@ -8,6 +8,8 @@ os.environ["NUMEXPR_MAX_THREADS"] = "11" # troubleshooting goofy numbpy related 
 
 import csv
 from base64 import b64encode
+from dataclasses import dataclass, field
+from typing import Any, List, Optional, Tuple
 import json
 import re
 import subprocess
@@ -18,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from AV_Spex.utils.config_setup import ChecksConfig
 from AV_Spex.utils.config_manager import ConfigManager
 from AV_Spex.utils.log_setup import logger, report_ffmpeg_stderr
+from AV_Spex.utils import ffprobe_probe
 
 config_mgr = ConfigManager()
 
@@ -365,85 +368,164 @@ def find_frame_analysis_outputs(source_directory, destination_directory, video_i
 
     return frame_outputs
 
-def find_report_csvs(report_directory):
+@dataclass
+class ReportArtifacts:
+    """Sidecar files discovered for one video's HTML report.
 
-    qctools_colorbars_duration_output = None
-    qctools_bars_eval_check_output = None
-    qctools_bars_eval_timestamps = None
-    colorbars_values_output = None
-    windowed_colorbars_values = []
-    qctools_content_check_outputs = []
-    qctools_profile_check_output = None
-    qctools_profile_timestamps = None
-    profile_fails_csv = None
-    tags_check_output = None
-    tag_fails_csv = None
-    colorbars_eval_fails_csv = None
-    audio_clipping_csv = None
-    channel_imbalance_csv = None
-    identical_channels_csv = None
-    audible_timecode_csv = None
-    audio_dropout_csv = None
-    clamped_levels_csv = None
-    clamped_traces_csv = None
-    chroma_phase_summary_csv = None
-    chroma_phase_events_csv = None
-    tone_leak_summary_csv = None
-    tone_leak_events_csv = None
-    difference_csv = None
+    Every field defaults to None (or an empty list), so a report section can
+    test its own inputs without knowing which analyses actually ran. Adding a
+    new sidecar means adding a field here and a branch in find_report_csvs() —
+    nothing downstream has to be renumbered.
+
+    Most of these live in the report directory ({video_id}_report_csvs). The
+    mkvalidator pair is the exception and is noted below.
+    """
+
+    # qct-parse — color bars detection and evaluation
+    qctools_colorbars_duration_output: Optional[str] = None
+    qctools_bars_eval_check_output: Optional[str] = None
+    colorbars_values_output: Optional[str] = None
+    windowed_colorbars_values: List[str] = field(default_factory=list)
+    colorbars_eval_fails_csv: Optional[str] = None
+
+    # qct-parse — threshold profile and tag checks
+    qctools_content_check_outputs: List[str] = field(default_factory=list)
+    qctools_profile_check_output: Optional[str] = None
+    profile_fails_csv: Optional[str] = None
+    tags_check_output: Optional[str] = None
+    tag_fails_csv: Optional[str] = None
+
+    # qct-parse — audio analysis
+    audio_clipping_csv: Optional[str] = None
+    channel_imbalance_csv: Optional[str] = None
+    identical_channels_csv: Optional[str] = None
+    audible_timecode_csv: Optional[str] = None
+    audio_dropout_csv: Optional[str] = None
+
+    # qct-parse — video signal analysis
+    clamped_levels_csv: Optional[str] = None
+    clamped_traces_csv: Optional[str] = None
+    chroma_phase_summary_csv: Optional[str] = None
+    chroma_phase_events_csv: Optional[str] = None
+    tone_leak_summary_csv: Optional[str] = None
+    tone_leak_events_csv: Optional[str] = None
+
+    # CLAMS detectors (run independently of qct-parse)
+    clams_bars_durations_csv: Optional[str] = None
+    clams_tone_durations_csv: Optional[str] = None
+
+    # mkvalidator. These two live in the _qc_metadata directory rather than the
+    # report directory, because the mkvalidator check runs before the report
+    # directory exists. The summary is written whenever the check ran; the
+    # clusters CSV only when at least one WRN0C2 was found.
+    mkvalidator_summary_path: Optional[str] = None
+    mkvalidator_clusters_csv: Optional[str] = None
+
+    # Metadata tool comparison
+    difference_csv: Optional[str] = None
+
+
+@dataclass
+class ReportSection:
+    """One block of the report body, with the TOC entries that point into it.
+
+    html: the block's markup. An empty string means the section is omitted, so
+        availability is expressed once — where the markup is built — instead of
+        being restated in a separate TOC condition.
+    toc: (anchor_id, label) pairs the "Jump to section" nav shows for this
+        block. Usually one; a block may contribute several (frame analysis,
+        which reads its own rendered anchors) or none (a divider).
+    """
+    html: str
+    toc: Tuple[Tuple[str, str], ...] = ()
+
+
+# Filename fragment -> ReportArtifacts field, for the qct-parse sidecars that
+# map one-to-one. Order matters: the first matching fragment wins, so
+# 'clamped_traces' must be tested before the 'clamped_levels' prefix it shares
+# a stem with, and the same for the eval-summary/eval-failures pair.
+_QCT_PARSE_SIDECARS = (
+    ("qct-parse_colorbars_durations",     "qctools_colorbars_duration_output"),
+    ("qct-parse_colorbars_eval_summary",  "qctools_bars_eval_check_output"),
+    ("qct-parse_colorbars_eval_failures", "colorbars_eval_fails_csv"),
+    ("qct-parse_profile_summary",         "qctools_profile_check_output"),
+    ("qct-parse_profile_failures",        "profile_fails_csv"),
+    ("qct-parse_tags_summary.csv",        "tags_check_output"),
+    ("qct-parse_tags_failures",           "tag_fails_csv"),
+    ("qct-parse_audio_clipping",          "audio_clipping_csv"),
+    ("qct-parse_channel_imbalance",       "channel_imbalance_csv"),
+    ("qct-parse_identical_channels",      "identical_channels_csv"),
+    ("qct-parse_audible_timecode",        "audible_timecode_csv"),
+    ("qct-parse_audio_dropout",           "audio_dropout_csv"),
+    ("qct-parse_clamped_traces",          "clamped_traces_csv"),
+    ("qct-parse_clamped_levels",          "clamped_levels_csv"),
+    ("qct-parse_chroma_phase_summary",    "chroma_phase_summary_csv"),
+    ("qct-parse_chroma_phase_events",     "chroma_phase_events_csv"),
+    ("qct-parse_tone_leak_summary",       "tone_leak_summary_csv"),
+    ("qct-parse_tone_leak_events",        "tone_leak_events_csv"),
+)
+
+
+def find_report_csvs(report_directory, destination_directory=None, video_id=None) -> ReportArtifacts:
+    """Discover every sidecar the HTML report can render.
+
+    This is the single discovery point for report inputs: qct-parse and CLAMS
+    sidecars from report_directory, and the mkvalidator pair from
+    destination_directory (the _qc_metadata dir), which is scanned only when
+    destination_directory and video_id are both supplied.
+
+    Args:
+        report_directory: the {video_id}_report_csvs directory
+        destination_directory: the {video_id}_qc_metadata directory, for the
+            mkvalidator sidecars
+        video_id: used to build the mkvalidator filenames
+
+    Returns:
+        ReportArtifacts, with absent sidecars left as None / empty list.
+    """
+    artifacts = ReportArtifacts()
 
     if os.path.isdir(report_directory):
         for file in os.listdir(report_directory):
             file_path = os.path.join(report_directory, file)
-            if os.path.isfile(file_path) and not file.startswith('.DS_Store'):
-                if file.startswith("qct-parse_"):
-                    if "qct-parse_colorbars_durations" in file:
-                        qctools_colorbars_duration_output = file_path
-                    elif "qct-parse_colorbars_eval_summary" in file:
-                        qctools_bars_eval_check_output = file_path
-                    elif "qct-parse_colorbars_values" in file:
-                        if file == "qct-parse_colorbars_values.csv":
-                            colorbars_values_output = file_path
-                        else:
-                            windowed_colorbars_values.append(file_path)
-                    elif "qct-parse_contentFilter" in file:
-                        qctools_content_check_outputs.append(file_path)
-                    elif "qct-parse_profile_summary" in file:
-                        qctools_profile_check_output = file_path
-                    elif "qct-parse_profile_failures" in file:
-                        profile_fails_csv = file_path
-                    elif "qct-parse_tags_summary.csv" in file:
-                        tags_check_output = file_path
-                    elif "qct-parse_tags_failures" in file:
-                        tag_fails_csv = file_path
-                    elif "qct-parse_colorbars_eval_failures" in file:
-                        colorbars_eval_fails_csv = file_path
-                    elif "qct-parse_audio_clipping" in file:
-                        audio_clipping_csv = file_path
-                    elif "qct-parse_channel_imbalance" in file:
-                        channel_imbalance_csv = file_path
-                    elif "qct-parse_identical_channels" in file:
-                        identical_channels_csv = file_path
-                    elif "qct-parse_audible_timecode" in file:
-                        audible_timecode_csv = file_path
-                    elif "qct-parse_audio_dropout" in file:
-                        audio_dropout_csv = file_path
-                    elif "qct-parse_clamped_traces" in file:
-                        clamped_traces_csv = file_path
-                    elif "qct-parse_clamped_levels" in file:
-                        clamped_levels_csv = file_path
-                    elif "qct-parse_chroma_phase_summary" in file:
-                        chroma_phase_summary_csv = file_path
-                    elif "qct-parse_chroma_phase_events" in file:
-                        chroma_phase_events_csv = file_path
-                    elif "qct-parse_tone_leak_summary" in file:
-                        tone_leak_summary_csv = file_path
-                    elif "qct-parse_tone_leak_events" in file:
-                        tone_leak_events_csv = file_path
-                elif "metadata_difference" in file:
-                    difference_csv = file_path
+            if not os.path.isfile(file_path) or file.startswith('.DS_Store'):
+                continue
 
-    return qctools_colorbars_duration_output, qctools_bars_eval_check_output, colorbars_values_output, windowed_colorbars_values, qctools_content_check_outputs, qctools_profile_check_output, profile_fails_csv, tags_check_output, tag_fails_csv, colorbars_eval_fails_csv, audio_clipping_csv, channel_imbalance_csv, identical_channels_csv, audible_timecode_csv, audio_dropout_csv, clamped_levels_csv, clamped_traces_csv, chroma_phase_summary_csv, chroma_phase_events_csv, tone_leak_summary_csv, tone_leak_events_csv, difference_csv
+            if file.startswith("qct-parse_"):
+                # The two multi-file cases are handled before the 1:1 table.
+                if "qct-parse_colorbars_values" in file:
+                    if file == "qct-parse_colorbars_values.csv":
+                        artifacts.colorbars_values_output = file_path
+                    else:
+                        artifacts.windowed_colorbars_values.append(file_path)
+                    continue
+
+                if "qct-parse_contentFilter" in file:
+                    artifacts.qctools_content_check_outputs.append(file_path)
+                    continue
+
+                for fragment, attr in _QCT_PARSE_SIDECARS:
+                    if fragment in file:
+                        setattr(artifacts, attr, file_path)
+                        break
+
+            elif file == "clams_bars_colorbars_durations.csv":
+                artifacts.clams_bars_durations_csv = file_path
+            elif file == "clams_tone_detection_durations.csv":
+                artifacts.clams_tone_durations_csv = file_path
+            elif "metadata_difference" in file:
+                artifacts.difference_csv = file_path
+
+    if destination_directory and video_id:
+        summary = os.path.join(destination_directory, f"{video_id}_mkvalidator_summary.txt")
+        if os.path.isfile(summary):
+            artifacts.mkvalidator_summary_path = summary
+
+        clusters = os.path.join(destination_directory, f"{video_id}_mkvalidator_clusters.csv")
+        if os.path.isfile(clusters):
+            artifacts.mkvalidator_clusters_csv = clusters
+
+    return artifacts
 
 
 def read_xml_file(xml_file_path):
@@ -471,53 +553,16 @@ def read_xml_file(xml_file_path):
             return f"[Error reading XML file: {e}]"
 
 
+
 def _get_video_duration(video_path):
-    """
-    Probe the video duration in seconds using ffprobe.
-    
-    Returns:
-        float or None: Duration in seconds, or None on failure.
-    """
-    cmd = [
-        "ffprobe",
-        "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        video_path,
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        return float(result.stdout.strip())
-    except Exception as e:
-        logger.warning(f"Could not probe video duration: {e}")
-        return None
+    """Video duration in seconds, or None. See utils.ffprobe_probe."""
+    return ffprobe_probe.duration(video_path)
+
 
 
 def _get_video_frame_rate(video_path):
-    """
-    Probe the video frame rate in frames per second using ffprobe.
-
-    Returns:
-        float or None: Frame rate in fps, or None on failure.
-    """
-    cmd = [
-        "ffprobe",
-        "-v", "error",
-        "-select_streams", "v:0",
-        "-show_entries", "stream=r_frame_rate",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        video_path,
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        rate = result.stdout.strip().splitlines()[0]
-        if '/' in rate:
-            num, den = rate.split('/')
-            return float(num) / float(den)
-        return float(rate)
-    except Exception as e:
-        logger.warning(f"Could not probe video frame rate: {e}")
-        return None
+    """Frame rate in fps, or None. See utils.ffprobe_probe."""
+    return ffprobe_probe.frame_rate(video_path)
 
 
 def _extract_frame_at(video_path, timestamp, output_path, height):
@@ -631,54 +676,21 @@ def generate_color_strip_base64(video_path, num_frames=40, strip_height=120, max
         return None
 
 
-def _get_audio_channel_count(video_path):
-    """Get the number of audio channels in the first audio stream using ffprobe.
 
-    Returns:
-        int or None: Number of channels, or None if unavailable.
-    """
-    cmd = [
-        "ffprobe",
-        "-v", "error",
-        "-select_streams", "a:0",
-        "-show_entries", "stream=channels",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        video_path,
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        return int(result.stdout.strip())
-    except Exception as e:
-        logger.warning(f"Could not probe audio channel count: {e}")
-        return None
+def _get_audio_channel_count(video_path):
+    """Channel count of the first audio stream, or None."""
+    return ffprobe_probe.first_audio_channel_count(video_path)
+
 
 
 def _get_audio_stream_channels(video_path):
-    """Get the channel count of every audio stream, in order, using ffprobe.
+    """Channel count of every audio stream in order, or None if unavailable
+    or the file has no audio.
 
-    Returns a list with one entry per audio stream, e.g. ``[2]`` for a single
-    stereo stream (typical MKV) or ``[1, 1]`` for two separate mono streams
-    (typical broadcast MXF, where each track is its own mono PCM stream).
-
-    Returns:
-        list[int] or None: Per-stream channel counts, or None if unavailable
-        or there are no audio streams.
+    ``[2]`` for a single stereo stream (typical MKV), ``[1, 1]`` for two
+    separate mono streams (typical broadcast MXF).
     """
-    cmd = [
-        "ffprobe",
-        "-v", "error",
-        "-select_streams", "a",
-        "-show_entries", "stream=channels",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        video_path,
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        counts = [int(x) for x in result.stdout.split() if x.strip()]
-        return counts or None
-    except Exception as e:
-        logger.warning(f"Could not probe audio channel count: {e}")
-        return None
+    return ffprobe_probe.audio_stream_channels(video_path) or None
 
 
 # Colors assigned per channel for waveform visualization
@@ -1076,7 +1088,7 @@ def make_fixity_section_html(fixity_summary_json, fixity_file_content):
 
     section_body = ''.join(blocks)
     return (
-        '<div style="background-color: #f5e9e3; border: 1px solid #4d2b12; border-radius: 4px; '
+        '<div style="background-color: var(--report-paper); border: 1px solid var(--report-ink); border-radius: 4px; '
         'padding: 10px 30px 20px 30px; margin: 10px 0 20px 0;">'
         f'{section_body}'
         '</div>'
@@ -1301,10 +1313,10 @@ def make_audio_clipping_html(audio_clipping_csv):
     html = f'''
     <a id="link_clipping_methodology" href="javascript:void(0);"
        onclick="toggleContent('clipping_methodology', 'What is audio clipping detection? ▼', 'What is audio clipping detection? ▲')"
-       style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+       style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
        What is audio clipping detection? ▼</a>
-    <div id="clipping_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px;
-         margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+    <div id="clipping_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px;
+         margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
         <p style="margin: 0 0 10px 0;">
             <strong>Audio clipping detection</strong> scans the audio frames of the QCTools report to
             identify moments where the audio signal reaches or exceeds digital full scale, indicating
@@ -1345,10 +1357,10 @@ def make_audio_clipping_html(audio_clipping_csv):
     clipping_events = [r for r in rows[9:] if len(r) >= 2]
     if clipping_events:
         html += f'''
-        <a href="javascript:void(0);" onclick="toggleContent('audio_clipping_events', 'Show clipping events ({len(clipping_events)}) ▼', 'Hide clipping events ▲')" style="color: #378d6a; text-decoration: underline; margin: 10px 0; display: block;">Show clipping events ({len(clipping_events)}) ▼</a>
+        <a href="javascript:void(0);" onclick="toggleContent('audio_clipping_events', 'Show clipping events ({len(clipping_events)}) ▼', 'Hide clipping events ▲')" style="color: var(--report-accent); text-decoration: underline; margin: 10px 0; display: block;">Show clipping events ({len(clipping_events)}) ▼</a>
         <div id="audio_clipping_events" style="display: none;">
         <table style="border-collapse: collapse; margin: 10px 0;">
-            <tr><th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Timestamp</th><th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Peak Level (dBFS)</th><th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Flat Factor</th></tr>
+            <tr><th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Timestamp</th><th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Peak Level (dBFS)</th><th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Flat Factor</th></tr>
         '''
         for event in clipping_events:
             ff_val = event[2] if len(event) > 2 else "N/A"
@@ -1446,10 +1458,10 @@ def make_channel_imbalance_html(channel_imbalance_csv):
     html = f'''
     <a id="link_imbalance_methodology" href="javascript:void(0);"
        onclick="toggleContent('imbalance_methodology', 'What is channel imbalance analysis? ▼', 'What is channel imbalance analysis? ▲')"
-       style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+       style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
        What is channel imbalance analysis? ▼</a>
-    <div id="imbalance_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px;
-         margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+    <div id="imbalance_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px;
+         margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
         <p style="margin: 0 0 10px 0;">
             {methodology_text}
         </p>
@@ -1487,7 +1499,7 @@ def make_channel_imbalance_html(channel_imbalance_csv):
         html += f'<tr><td style="padding: 4px 12px; border: 1px solid #ddd;"><strong>Channel {ch} Mean RMS (dBFS)</strong></td><td style="padding: 4px 12px; border: 1px solid #ddd;">{channel_means[ch]}</td></tr>\n'
 
     if silent_channels:
-        html += f'<tr><td style="padding: 4px 12px; border: 1px solid #ddd;"><strong>Silent Channels</strong></td><td style="padding: 4px 12px; border: 1px solid #ddd; color: #dc3545;"><strong>{silent_channels}</strong></td></tr>\n'
+        html += f'<tr><td style="padding: 4px 12px; border: 1px solid #ddd;"><strong>Silent Channels</strong></td><td style="padding: 4px 12px; border: 1px solid #ddd; color: var(--report-danger);"><strong>{silent_channels}</strong></td></tr>\n'
 
     # For stereo, show simple difference and louder channel
     if num_channels == 2:
@@ -1520,11 +1532,11 @@ def make_channel_imbalance_html(channel_imbalance_csv):
             <h4 style="margin-top: 16px;">Pairwise Comparisons</h4>
             <table style="border-collapse: collapse; margin: 10px 0;">
                 <tr>
-                    <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Channel A</th>
-                    <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Channel B</th>
-                    <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Mean Diff (dB)</th>
-                    <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Characterization</th>
-                    <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Louder Channel</th>
+                    <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Channel A</th>
+                    <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Channel B</th>
+                    <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Mean Diff (dB)</th>
+                    <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Characterization</th>
+                    <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Louder Channel</th>
                 </tr>
             '''
             for row in pairwise_rows:
@@ -1634,10 +1646,10 @@ def make_identical_channels_html(identical_channels_csv):
     html = f'''
     <a id="link_identical_methodology" href="javascript:void(0);"
        onclick="toggleContent('identical_methodology', 'What is identical channel detection? ▼', 'What is identical channel detection? ▲')"
-       style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+       style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
        What is identical channel detection? ▼</a>
-    <div id="identical_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px;
-         margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+    <div id="identical_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px;
+         margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
         <p style="margin: 0 0 10px 0;">
             <strong>Identical channel detection</strong> looks for the same audio duplicated across two
             channels &mdash; a file that is stereo on paper but effectively mono. That is common when a
@@ -1692,13 +1704,13 @@ def make_identical_channels_html(identical_channels_csv):
         html += '''
         <table style="border-collapse: collapse; margin: 10px 0; font-size: 13px;">
             <tr>
-                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Channels</th>
-                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Matching Frames</th>
-                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Phase</th>
-                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Difference Peak</th>
-                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Program Peak</th>
-                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Compared</th>
-                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Result</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: var(--report-surface);">Channels</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: var(--report-surface);">Matching Frames</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: var(--report-surface);">Phase</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: var(--report-surface);">Difference Peak</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: var(--report-surface);">Program Peak</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: var(--report-surface);">Compared</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: var(--report-surface);">Result</th>
             </tr>
         '''
         for row in pair_rows:
@@ -1723,10 +1735,10 @@ def make_identical_channels_html(identical_channels_csv):
         <h4 style="margin-top: 16px;">Matching Regions</h4>
         <table style="border-collapse: collapse; margin: 10px 0; font-size: 13px;">
             <tr>
-                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Channels</th>
-                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Start</th>
-                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">End</th>
-                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: #f2f2f2;">Duration (s)</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: var(--report-surface);">Channels</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: var(--report-surface);">Start</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: var(--report-surface);">End</th>
+                <th style="padding: 4px 10px; border: 1px solid #ddd; background-color: var(--report-surface);">Duration (s)</th>
             </tr>
         '''
         for row in region_rows:
@@ -1807,10 +1819,10 @@ def make_audible_timecode_html(audible_timecode_csv):
     html = f'''
     <a id="link_timecode_methodology" href="javascript:void(0);"
        onclick="toggleContent('timecode_methodology', 'What is audible timecode detection? ▼', 'What is audible timecode detection? ▲')"
-       style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+       style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
        What is audible timecode detection? ▼</a>
-    <div id="timecode_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px;
-         margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+    <div id="timecode_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px;
+         margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
         <p style="margin: 0 0 10px 0;">
             <strong>Audible timecode detection</strong> scans the audio frames of the QCTools report to
             identify the presence of Linear Timecode (LTC) artifacts &mdash; a biphase-modulated square
@@ -1901,19 +1913,19 @@ def make_audible_timecode_html(audible_timecode_csv):
         summary_text = (f"Audible timecode detected in {len(consensus_rows)} region(s), "
                         f"{span}; highest confidence: {top_conf}.")
         html += (
-            f'<p style="margin: 10px 0; padding: 10px 14px; background-color: #f5e9e3; '
-            f'border-radius: 4px; color: #4d2b12;">{summary_text}</p>'
+            f'<p style="margin: 10px 0; padding: 10px 14px; background-color: var(--report-paper); '
+            f'border-radius: 4px; color: var(--report-ink);">{summary_text}</p>'
         )
 
         html += '''
         <table style="border-collapse: collapse; margin: 10px 0;">
             <tr>
-                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Start Time</th>
-                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">End Time</th>
-                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Duration</th>
-                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Channel</th>
-                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Confidence</th>
-                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Detection Methods</th>
+                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Start Time</th>
+                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">End Time</th>
+                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Duration</th>
+                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Channel</th>
+                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Confidence</th>
+                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Detection Methods</th>
             </tr>
         '''
         for row in consensus_rows:
@@ -1977,10 +1989,10 @@ def make_audio_dropout_html(audio_dropout_csv):
     html = f'''
     <a id="link_dropout_methodology" href="javascript:void(0);"
        onclick="toggleContent('dropout_methodology', 'What is audio dropout detection? ▼', 'What is audio dropout detection? ▲')"
-       style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+       style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
        What is audio dropout detection? ▼</a>
-    <div id="dropout_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px;
-         margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+    <div id="dropout_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px;
+         margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
         <p style="margin: 0 0 10px 0;">
             <strong>Audio dropout detection</strong> identifies moments where the audio signal level
             drops suddenly and significantly, which is characteristic of tape dropout during analog
@@ -2032,18 +2044,18 @@ def make_audio_dropout_html(audio_dropout_csv):
             'low': '#ffc107',
         }
         html += f'''
-        <a href="javascript:void(0);" onclick="toggleContent('audio_dropout_events', 'Show dropout events ({len(dropout_events)}) ▼', 'Hide dropout events ▲')" style="color: #378d6a; text-decoration: underline; margin: 10px 0; display: block;">Show dropout events ({len(dropout_events)}) ▼</a>
+        <a href="javascript:void(0);" onclick="toggleContent('audio_dropout_events', 'Show dropout events ({len(dropout_events)}) ▼', 'Hide dropout events ▲')" style="color: var(--report-accent); text-decoration: underline; margin: 10px 0; display: block;">Show dropout events ({len(dropout_events)}) ▼</a>
         <div id="audio_dropout_events" style="display: none;">
         <table style="border-collapse: collapse; margin: 10px 0;">
             <tr>
-                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Timestamp Start</th>
-                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Timestamp End</th>
-                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Channel</th>
-                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Worst RMS (dBFS)</th>
-                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Median RMS (dBFS)</th>
-                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Drop (dB)</th>
-                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Confidence</th>
-                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Corroborating Metrics</th>
+                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Timestamp Start</th>
+                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Timestamp End</th>
+                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Channel</th>
+                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Worst RMS (dBFS)</th>
+                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Median RMS (dBFS)</th>
+                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Drop (dB)</th>
+                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Confidence</th>
+                <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Corroborating Metrics</th>
             </tr>
         '''
         for event in dropout_events:
@@ -2140,10 +2152,10 @@ def make_clamped_levels_html(clamped_levels_csv, clamped_traces_csv=None):
     html = f'''
     <a id="link_clamp_methodology" href="javascript:void(0);"
        onclick="toggleContent('clamp_methodology', 'What is clamped-levels detection? ▼', 'What is clamped-levels detection? ▲')"
-       style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+       style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
        What is clamped-levels detection? ▼</a>
-    <div id="clamp_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px;
-         margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+    <div id="clamp_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px;
+         margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
         <p style="margin: 0 0 10px 0;">
             <strong>Clamped-levels detection</strong> flags analog-to-digital converters that truncate
             the video signal at the broadcast (legal) range limits. A clamped channel will pile up at
@@ -2177,14 +2189,14 @@ def make_clamped_levels_html(clamped_levels_csv, clamped_traces_csv=None):
     </table>
     <table style="border-collapse: collapse; margin: 10px 0;">
         <tr>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Channel</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Direction</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Limit</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Global Extreme</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Frames at/near Limit</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Hit %</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Frames Beyond Limit</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Verdict</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Channel</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Direction</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Limit</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Global Extreme</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Frames at/near Limit</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Hit %</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Frames Beyond Limit</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Verdict</th>
         </tr>
         {rows_html}
     </table>
@@ -2429,19 +2441,19 @@ def make_chroma_phase_html(chroma_phase_summary_csv, chroma_phase_events_csv):
     events_table = ""
     if events:
         events_table = f'''
-    <a href="javascript:void(0);" onclick="toggleContent('chroma_phase_events', 'Show chroma phase events ({len(events)}) ▼', 'Hide chroma phase events ▲')" style="color: #378d6a; text-decoration: underline; margin: 10px 0; display: block;">Show chroma phase events ({len(events)}) ▼</a>
+    <a href="javascript:void(0);" onclick="toggleContent('chroma_phase_events', 'Show chroma phase events ({len(events)}) ▼', 'Hide chroma phase events ▲')" style="color: var(--report-accent); text-decoration: underline; margin: 10px 0; display: block;">Show chroma phase events ({len(events)}) ▼</a>
     <div id="chroma_phase_events" style="display: none;">
     <table style="border-collapse: collapse; margin: 10px 0;">
         <tr>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Event</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Start</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">End</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Duration (s)</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Frames</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Rule</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Peak SATMAX</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Peak Time</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Hue at Peak (deg)</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Event</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Start</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">End</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Duration (s)</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Frames</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Rule</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Peak SATMAX</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Peak Time</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Hue at Peak (deg)</th>
         </tr>
         {rows_html}
     </table>
@@ -2455,10 +2467,10 @@ def make_chroma_phase_html(chroma_phase_summary_csv, chroma_phase_events_csv):
     html = f'''
     <a id="link_chroma_phase_methodology" href="javascript:void(0);"
        onclick="toggleContent('chroma_phase_methodology', 'What is chroma phase detection? ▼', 'What is chroma phase detection? ▲')"
-       style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+       style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
        What is chroma phase detection? ▼</a>
-    <div id="chroma_phase_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px;
-         margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+    <div id="chroma_phase_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px;
+         margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
         <p style="margin: 0 0 10px 0;">
             <strong>Chroma phase detection</strong> flags frames where the chroma signal has collapsed
             toward a single hue (typically cyan or magenta), usually caused by helical-scan tracking
@@ -2554,7 +2566,7 @@ def _make_chroma_phase_thumbs_html(chroma_phase_summary_csv, events):
         items_html += f'''
         <div style="text-align: center; margin: 5px;">
             <img src="{data_uri}"
-                 style="width: 300px; height: auto; border: 1px solid #4d2b12; cursor: pointer;"
+                 style="width: 300px; height: auto; border: 1px solid var(--report-ink); cursor: pointer;"
                  onclick="openImage(this.src, 'Chroma Phase Event {idx} - peak at {peak_time}')"
                  title="Click to enlarge" />
             <p style="font-size: 12px; margin: 4px 0 0 0;"><strong>Event {idx}</strong> &mdash; starts {start}</p>
@@ -2634,7 +2646,7 @@ def make_tone_leak_html(tone_leak_summary_csv, tone_leak_events_csv):
     channel_table = ""
     if channel_header and channel_rows:
         header_html = "".join(
-            f'<th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">{h}</th>'
+            f'<th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">{h}</th>'
             for h in channel_header
         )
         rows_html = ""
@@ -2685,18 +2697,18 @@ def make_tone_leak_html(tone_leak_summary_csv, tone_leak_events_csv):
                 f'</tr>\n'
             )
         events_table = f'''
-    <a href="javascript:void(0);" onclick="toggleContent('tone_leak_events', 'Show tone leak regions ({len(events)}) ▼', 'Hide tone leak regions ▲')" style="color: #378d6a; text-decoration: underline; margin: 10px 0; display: block;">Show tone leak regions ({len(events)}) ▼</a>
+    <a href="javascript:void(0);" onclick="toggleContent('tone_leak_events', 'Show tone leak regions ({len(events)}) ▼', 'Hide tone leak regions ▲')" style="color: var(--report-accent); text-decoration: underline; margin: 10px 0; display: block;">Show tone leak regions ({len(events)}) ▼</a>
     <div id="tone_leak_events" style="display: none;">
     <table style="border-collapse: collapse; margin: 10px 0;">
         <tr>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Start</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">End</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Stream</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Channel</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Duration (s)</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Mean Comb (dB)</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Peak Comb (dB)</th>
-            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: #f2f2f2;">Median 1kHz Level (dBFS)</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Start</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">End</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Stream</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Channel</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Duration (s)</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Mean Comb (dB)</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Peak Comb (dB)</th>
+            <th style="padding: 4px 12px; border: 1px solid #ddd; background-color: var(--report-surface);">Median 1kHz Level (dBFS)</th>
         </tr>
         {event_rows_html}
     </table>
@@ -2705,10 +2717,10 @@ def make_tone_leak_html(tone_leak_summary_csv, tone_leak_events_csv):
     html = f'''
     <a id="link_tone_leak_methodology" href="javascript:void(0);"
        onclick="toggleContent('tone_leak_methodology', 'What is tone leak detection? ▼', 'What is tone leak detection? ▲')"
-       style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+       style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
        What is tone leak detection? ▼</a>
-    <div id="tone_leak_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px;
-         margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+    <div id="tone_leak_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px;
+         margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
         <p style="margin: 0 0 10px 0;">
             <strong>Tone leak detection</strong> flags a continuous ~1 kHz calibration/reference tone
             leaking from the transfer chain into the recorded audio &mdash; heard as a faint
@@ -2906,7 +2918,7 @@ def make_color_bars_graphs(video_id, qctools_colorbars_duration_output, colorbar
     # instead of widening the column and pushing the fixed-width chart into the
     # section's overflow clip.
     colorbars_html = f'''
-    <div style="background-color: #f5e9e3; padding: 20px 30px; border-radius: 6px;">
+    <div style="background-color: var(--report-paper); padding: 20px 30px; border-radius: 6px;">
         <div style="display: flex; align-items: center; justify-content: center;">
             <div style="flex: 0 0 200px; max-width: 200px; overflow-wrap: break-word;">
                 {thumbnail_html}
@@ -3089,12 +3101,12 @@ def make_bars_detection_comparison_html(qct_csv_path, clams_csv_path, agreement_
     # both methods together, then additional bars); "not detected" rows last.
     body_rows.sort(key=lambda r: (r[3] is None, r[3] if r[3] is not None else 0.0))
 
-    cell = "padding: 6px 12px; border: 1px solid #e0d0c0;"
+    cell = "padding: 6px 12px; border: 1px solid var(--report-border-soft);"
 
     def render_row(source, pass_label, found, start_sec, end_sec, is_secondary):
-        bg = "background-color: #fff3cd;" if is_secondary else ""
+        bg = "background-color: var(--report-notice-bg);" if is_secondary else ""
         if found:
-            detected = '<span style="color: #0a5f1c; font-weight: bold;">✓ Detected</span>'
+            detected = '<span style="color: var(--report-success); font-weight: bold;">✓ Detected</span>'
             dur = f"{end_sec - start_sec:.1f}s" if (start_sec is not None and end_sec is not None) else "—"
         else:
             detected = '<span style="color: #999;">Not detected</span>'
@@ -3126,8 +3138,8 @@ def make_bars_detection_comparison_html(qct_csv_path, clams_csv_path, agreement_
     if mid_count:
         summary_text += f" {mid_count} additional mid-file detection(s) shown below (report-only)."
     summary_html = (
-        f'<p style="margin: 10px 0; padding: 10px 14px; background-color: #f5e9e3; '
-        f'border-radius: 4px; color: #4d2b12;">{summary_text}</p>'
+        f'<p style="margin: 10px 0; padding: 10px 14px; background-color: var(--report-paper); '
+        f'border-radius: 4px; color: var(--report-ink);">{summary_text}</p>'
     )
 
     note_lines = [
@@ -3147,16 +3159,16 @@ def make_bars_detection_comparison_html(qct_csv_path, clams_csv_path, agreement_
             "head bars."
         )
     note = "".join(
-        f'<p style="font-size: 13px; color: #4d2b12; margin: 10px 0 0 0;">{line}</p>'
+        f'<p style="font-size: 13px; color: var(--report-ink); margin: 10px 0 0 0;">{line}</p>'
         for line in note_lines
     )
 
     legend = ""
     if has_secondary:
         legend = (
-            '<p style="font-size: 13px; color: #4d2b12; margin: 8px 0 0 0;">'
+            '<p style="font-size: 13px; color: var(--report-ink); margin: 8px 0 0 0;">'
             '<span style="display: inline-block; width: 12px; height: 12px; '
-            'background-color: #fff3cd; border: 1px solid #e0d0c0; vertical-align: middle; '
+            'background-color: var(--report-notice-bg); border: 1px solid var(--report-border-soft); vertical-align: middle; '
             'margin-right: 6px;"></span>'
             '= targeted re-scan (report-only)</p>'
         )
@@ -3173,7 +3185,7 @@ def make_bars_detection_comparison_html(qct_csv_path, clams_csv_path, agreement_
     {summary_html}
     <table style="border-collapse: collapse; margin-top: 10px;">
         <thead>
-            <tr style="background-color: #f5e9e3;">
+            <tr style="background-color: var(--report-paper);">
                 <th style="text-align: left; {cell}">Source</th>
                 <th style="text-align: left; {cell}">Pass</th>
                 <th style="text-align: left; {cell}">Bars detected</th>
@@ -3261,7 +3273,7 @@ def make_tone_detection_html(tone_csv_path):
 
     if not tones:
         return (
-            '<div style="background-color: #f5e9e3; padding: 10px;">'
+            '<div style="background-color: var(--report-paper); padding: 10px;">'
             '<p style="margin: 0;">CLAMS tone detector ran on the audio track '
             'and found no monotonic spans meeting the minimum duration threshold.</p>'
             '</div>'
@@ -3269,10 +3281,10 @@ def make_tone_detection_html(tone_csv_path):
 
     has_secondary = any(p != "primary" for p, _, _ in tones)
 
-    cell = "padding: 6px 12px; border: 1px solid #e0d0c0;"
+    cell = "padding: 6px 12px; border: 1px solid var(--report-border-soft);"
 
     def render_row(i, pass_label, s, e):
-        bg = "background-color: #fff3cd;" if pass_label != "primary" else ""
+        bg = "background-color: var(--report-notice-bg);" if pass_label != "primary" else ""
         return (
             f'<tr style="{bg}">'
             f'<td style="{cell} text-align: right;">{i + 1}</td>'
@@ -3299,8 +3311,8 @@ def make_tone_detection_html(tone_csv_path):
     if secondary_count:
         summary_text += f" {secondary_count} targeted re-scan detection(s) shown below."
     summary_html = (
-        f'<p style="margin: 10px 0; padding: 10px 14px; background-color: #f5e9e3; '
-        f'border-radius: 4px; color: #4d2b12;">{summary_text}</p>'
+        f'<p style="margin: 10px 0; padding: 10px 14px; background-color: var(--report-paper); '
+        f'border-radius: 4px; color: var(--report-ink);">{summary_text}</p>'
     )
 
     note_lines = [
@@ -3313,16 +3325,16 @@ def make_tone_detection_html(tone_csv_path):
             "primary tone window, run with relaxed thresholds (tolerance 0.7, min duration 500 ms)."
         )
     note = "".join(
-        f'<p style="font-size: 13px; color: #4d2b12; margin: 10px 0 0 0;">{line}</p>'
+        f'<p style="font-size: 13px; color: var(--report-ink); margin: 10px 0 0 0;">{line}</p>'
         for line in note_lines
     )
 
     legend = ""
     if has_secondary:
         legend = (
-            '<p style="font-size: 13px; color: #4d2b12; margin: 8px 0 0 0;">'
+            '<p style="font-size: 13px; color: var(--report-ink); margin: 8px 0 0 0;">'
             '<span style="display: inline-block; width: 12px; height: 12px; '
-            'background-color: #fff3cd; border: 1px solid #e0d0c0; vertical-align: middle; '
+            'background-color: var(--report-notice-bg); border: 1px solid var(--report-border-soft); vertical-align: middle; '
             'margin-right: 6px;"></span>'
             '= targeted re-scan (report-only)</p>'
         )
@@ -3331,7 +3343,7 @@ def make_tone_detection_html(tone_csv_path):
     {summary_html}
     <table style="border-collapse: collapse; margin-top: 10px;">
         <thead>
-            <tr style="background-color: #f5e9e3;">
+            <tr style="background-color: var(--report-paper);">
                 <th style="text-align: left; {cell}">#</th>
                 <th style="text-align: left; {cell}">Pass</th>
                 <th style="text-align: left; {cell}">Start</th>
@@ -3478,7 +3490,7 @@ def make_profile_piecharts(qctools_profile_check_output, sorted_thumbs_dict, fai
             if percentage > 0 and not failure_details:
                 # Failure specifics are shown in the timeline below the pies
                 summary_html = f"""
-                <div style="display: flex; flex-direction: column; align-items: flex-start; background-color: #f5e9e3; padding: 10px;">
+                <div style="display: flex; flex-direction: column; align-items: flex-start; background-color: var(--report-paper); padding: 10px;">
                     <p><b>{failed_frames} frames outside threshold &mdash; see timeline below</b></p>
                 </div>
                 """
@@ -3532,11 +3544,11 @@ def make_profile_piecharts(qctools_profile_check_output, sorted_thumbs_dict, fai
                     
                     full_table_html = f"""
                     <div id="table_{tag_id}" style="display: none; margin-top: 10px;">
-                        <table style="border-collapse: collapse; width: 100%; border: 1px solid #4d2b12;">
+                        <table style="border-collapse: collapse; width: 100%; border: 1px solid var(--report-ink);">
                             <tr style="background-color: #fbe4eb;">
-                                <th style="border: 1px solid #4d2b12; padding: 8px;">Timestamp</th>
-                                <th style="border: 1px solid #4d2b12; padding: 8px;">Value</th>
-                                <th style="border: 1px solid #4d2b12; padding: 8px;">Threshold</th>
+                                <th style="border: 1px solid var(--report-ink); padding: 8px;">Timestamp</th>
+                                <th style="border: 1px solid var(--report-ink); padding: 8px;">Value</th>
+                                <th style="border: 1px solid var(--report-ink); padding: 8px;">Threshold</th>
                             </tr>
                             {''.join(table_rows)}
                         </table>
@@ -3544,17 +3556,17 @@ def make_profile_piecharts(qctools_profile_check_output, sorted_thumbs_dict, fai
                     """
                 
                 summary_html = f"""
-                <div style="display: flex; flex-direction: column; align-items: flex-start; background-color: #f5e9e3; padding: 10px; max-height: 400px; overflow-y: auto;">
+                <div style="display: flex; flex-direction: column; align-items: flex-start; background-color: var(--report-paper); padding: 10px; max-height: 400px; overflow-y: auto;">
                     <p><b>Peak Values outside of Threshold for {tag}:</b></p>
                     {formatted_failures}
-                    <a id="link_{tag_id}" href="javascript:void(0);" onclick="toggleTable('{tag_id}')" style="color: #378d6a; text-decoration: underline; margin-top: 10px;">Show all failures ▼</a>
+                    <a id="link_{tag_id}" href="javascript:void(0);" onclick="toggleTable('{tag_id}')" style="color: var(--report-accent); text-decoration: underline; margin-top: 10px;">Show all failures ▼</a>
                     {full_table_html}
                 </div>
                 """
             else:
                 # For 0% failures, show a simple message without thumbnails
                 summary_html = f"""
-                <div style="display: flex; flex-direction: column; align-items: flex-start; background-color: #f5e9e3; padding: 10px;">
+                <div style="display: flex; flex-direction: column; align-items: flex-start; background-color: var(--report-paper); padding: 10px;">
                     <p><b>All values within specified threshold</b></p>
                 </div>
                 """
@@ -3586,7 +3598,7 @@ def make_profile_piecharts(qctools_profile_check_output, sorted_thumbs_dict, fai
 
             # Wrap everything in one div
             pie_chart_html = f"""
-            <div style="display: flex; flex-direction: column; align-items: start; background-color: #f5e9e3; padding: 10px;"> 
+            <div style="display: flex; flex-direction: column; align-items: start; background-color: var(--report-paper); padding: 10px;"> 
                 <div style="width: 400px;">{pie_fig.to_html(full_html=False, include_plotlyjs='cdn', config=config)}</div>
                 {summary_html}
             </div>
@@ -4063,14 +4075,14 @@ def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_d
         </tr>
         """)
     full_table_html = f"""
-    <a id="link_evalbars_all" href="javascript:void(0);" onclick="toggleTable('evalbars_all')" style="color: #378d6a; text-decoration: underline; margin-top: 10px;">Show all failures ▼</a>
+    <a id="link_evalbars_all" href="javascript:void(0);" onclick="toggleTable('evalbars_all')" style="color: var(--report-accent); text-decoration: underline; margin-top: 10px;">Show all failures ▼</a>
     <div id="table_evalbars_all" style="display: none; margin-top: 10px; max-height: 400px; overflow-y: auto;">
-        <table style="border-collapse: collapse; width: 100%; border: 1px solid #4d2b12;">
+        <table style="border-collapse: collapse; width: 100%; border: 1px solid var(--report-ink);">
             <tr style="background-color: #fbe4eb;">
-                <th style="border: 1px solid #4d2b12; padding: 8px;">Timestamp</th>
-                <th style="border: 1px solid #4d2b12; padding: 8px;">Tag</th>
-                <th style="border: 1px solid #4d2b12; padding: 8px;">Value</th>
-                <th style="border: 1px solid #4d2b12; padding: 8px;">Threshold</th>
+                <th style="border: 1px solid var(--report-ink); padding: 8px;">Timestamp</th>
+                <th style="border: 1px solid var(--report-ink); padding: 8px;">Tag</th>
+                <th style="border: 1px solid var(--report-ink); padding: 8px;">Value</th>
+                <th style="border: 1px solid var(--report-ink); padding: 8px;">Threshold</th>
             </tr>
             {''.join(table_rows)}
         </table>
@@ -4094,7 +4106,7 @@ def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_d
                      " analysis uses to choose where to place its analysis periods.")
     timeline_html = f"""
     {FAILURE_SECTION_JS}
-    <div style="background-color: #f5e9e3; padding: 10px; margin-top: 10px;">
+    <div style="background-color: var(--report-paper); padding: 10px; margin-top: 10px;">
         <p><b>Failure distribution over the video's duration</b></p>
         <p style="font-size: 13px;">Each line shows, per {bin_label}-second interval, the percentage of frames
         whose value fell outside that tag's threshold.
@@ -4159,7 +4171,7 @@ def generate_bitplane_html(frame_outputs):
         status_color = '#666666'
         status_icon = '&#x2753;'
 
-    html = "<h3 style='color: #bf971b;'>Bitplane Check (7th–10th Bit Verification)</h3>"
+    html = "<h3 style='color: var(--report-gold);'>Bitplane Check (7th–10th Bit Verification)</h3>"
     html += f"""
     <p style="font-size: 14px; color: {status_color}; font-weight: bold;">
         {status_icon} {message}
@@ -4171,16 +4183,16 @@ def generate_bitplane_html(frame_outputs):
         html += """
         <table style="border-collapse: collapse; margin: 10px 0; font-size: 13px;">
             <tr style="background-color: #f0ebe4;">
-                <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: left;">Bitplane</th>
-                <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">Avg Noise (all channels)</th>
+                <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: left;">Bitplane</th>
+                <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">Avg Noise (all channels)</th>
             </tr>
         """
         for bp_name, avg in overall_avgs.items():
             val_str = f"{avg:.6f}" if avg is not None else "N/A"
             html += f"""
             <tr>
-                <td style="padding: 6px 12px; border: 1px solid #d0c0b0;">{bp_name}</td>
-                <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{val_str}</td>
+                <td style="padding: 6px 12px; border: 1px solid var(--report-border);">{bp_name}</td>
+                <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{val_str}</td>
             </tr>
             """
         html += "</table>"
@@ -4210,17 +4222,17 @@ def generate_bitplane_html(frame_outputs):
         html += """
         <a id="link_bitplane_detail" href="javascript:void(0);"
            onclick="toggleContent('bitplane_detail', 'Per-channel detail ▼', 'Per-channel detail ▲')"
-           style="color: #378d6a; text-decoration: underline; margin: 10px 0; display: block; font-size: 13px;">
+           style="color: var(--report-accent); text-decoration: underline; margin: 10px 0; display: block; font-size: 13px;">
            Per-channel detail ▼</a>
         <div id="bitplane_detail" style="display: none; margin: 0 0 16px 0;">
         <table style="border-collapse: collapse; font-size: 13px;">
             <tr style="background-color: #f0ebe4;">
-                <th style="padding: 6px 12px; border: 1px solid #d0c0b0;">Channel</th>
-                <th style="padding: 6px 12px; border: 1px solid #d0c0b0;">Bitplane</th>
-                <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: center;">Status</th>
-                <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">Avg Noise</th>
-                <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">Max Noise</th>
-                <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">Zero Frames</th>
+                <th style="padding: 6px 12px; border: 1px solid var(--report-border);">Channel</th>
+                <th style="padding: 6px 12px; border: 1px solid var(--report-border);">Bitplane</th>
+                <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: center;">Status</th>
+                <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">Avg Noise</th>
+                <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">Max Noise</th>
+                <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">Zero Frames</th>
             </tr>
         """
         for ch_name, bp_data in channels.items():
@@ -4233,14 +4245,14 @@ def generate_bitplane_html(frame_outputs):
                 style = f' style="background-color: {row_color};"' if row_color else ''
                 html += f"""
                 <tr{style}>
-                    <td style="padding: 6px 12px; border: 1px solid #d0c0b0;">{ch_name}</td>
-                    <td style="padding: 6px 12px; border: 1px solid #d0c0b0;">{bp_name}</td>
-                    <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: center;">
+                    <td style="padding: 6px 12px; border: 1px solid var(--report-border);">{ch_name}</td>
+                    <td style="padding: 6px 12px; border: 1px solid var(--report-border);">{bp_name}</td>
+                    <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: center;">
                         {'&#x274C; empty' if bp_status == 'empty' else '&#x2705; active'}
                     </td>
-                    <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{avg_noise:.6f}</td>
-                    <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{max_noise:.6f}</td>
-                    <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{zero_pct:.1f}%</td>
+                    <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{avg_noise:.6f}</td>
+                    <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{max_noise:.6f}</td>
+                    <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{zero_pct:.1f}%</td>
                 </tr>
                 """
         html += "</table></div>"
@@ -4248,43 +4260,14 @@ def generate_bitplane_html(frame_outputs):
     return html
 
 
-def generate_frame_analysis_html(frame_outputs, video_id):
-    """
-    Generate HTML section for frame analysis results.
-
-    Args:
-        frame_outputs (dict): Dictionary of frame analysis output paths
-        video_id (str): Video identifier
-
-    Returns:
-        str: HTML string for frame analysis section
-    """
-    has_content = (
-        frame_outputs.get('border_visualization') or
-        frame_outputs.get('border_data') or
-        frame_outputs.get('brng_analysis') or
-        frame_outputs.get('signalstats_analysis')
-    )
-    if not has_content:
-        return ""
-
-    html = """
-    <div class="frame-analysis-section" id="section-frame-analysis">
-        <h2 style="color: #0a5f1c; text-decoration: underline; margin-top: 30px;">Frame Analysis Results</h2>
-    """
-
-    # Border Detection Section
-    if frame_outputs['border_visualization'] or frame_outputs['border_data']:
-        html += "<h3 id='section-border-detection' style='color: #bf971b;'>Border Detection</h3>"
-        
-        # Methodology explanation (collapsible)
-        html += """
+# Static explainer for the Border Detection section.
+BORDER_DETECTION_METHODOLOGY_HTML = """
         <a id="link_border_methodology" href="javascript:void(0);" 
            onclick="toggleContent('border_methodology', 'What is border detection? ▼', 'What is border detection? ▲')" 
-           style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+           style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
            What is border detection? ▼</a>
-        <div id="border_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px; 
-             margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+        <div id="border_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px; 
+             margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
             <p style="margin: 0 0 10px 0;">
                 <strong>Border detection</strong> identifies the active picture area within the video frame, 
                 excluding non-content regions such as blanking intervals, head switching noise, and 
@@ -4315,298 +4298,16 @@ def generate_frame_analysis_html(frame_outputs, video_id):
             </p>
         </div>
         """
-        
-        # Determine border data source: prefer enhanced JSON, fall back to standalone file
-        border_data = None
-        enhanced_data = None
-        
-        # Try enhanced JSON first (has more complete data)
-        if frame_outputs.get('enhanced_frame_analysis'):
-            try:
-                with open(frame_outputs['enhanced_frame_analysis'], 'r') as f:
-                    enhanced_data = json.load(f)
-            except Exception:
-                pass
-        
-        # Try standalone border_data.json
-        if frame_outputs['border_data']:
-            try:
-                with open(frame_outputs['border_data'], 'r') as f:
-                    border_data = json.load(f)
-            except Exception as e:
-                logger.error(f"Error reading border data: {e}")
-        
-        # Determine initial and final border data
-        initial_borders = frame_outputs.get('initial_borders') or (enhanced_data or {}).get('initial_borders')
-        final_borders = frame_outputs.get('final_borders') or (enhanced_data or {}).get('final_borders')
-        refinement_iterations = frame_outputs.get('refinement_iterations', 0) or (enhanced_data or {}).get('refinement_iterations', 0)
-        refinement_history = frame_outputs.get('refinement_history', []) or (enhanced_data or {}).get('refinement_history', [])
-        
-        # Use the best available border info for display
-        display_borders = final_borders or initial_borders or border_data
-        
-        if display_borders:
-            # Display detection method
-            detection_method = display_borders.get('detection_method', 'unknown')
-            method_label = "Simple (fixed borders)" if detection_method.startswith('simple') else "Sophisticated (quality-based detection)"
-            if 'refined' in detection_method:
-                method_label += " with iterative refinement"
-            
-            html += f"<p><strong>Method:</strong> {method_label}</p>"
-            
-            # Active area display
-            active_area = display_borders.get('active_area')
-            if active_area:
-                if isinstance(active_area, (list, tuple)) and len(active_area) == 4:
-                    x, y, w, h = active_area
-                else:
-                    x, y, w, h = 0, 0, 0, 0
-                
-                # Get video dimensions from border_data or enhanced data
-                video_width, video_height = 0, 0
-                if border_data and border_data.get('video_properties'):
-                    video_width = border_data['video_properties']['width']
-                    video_height = border_data['video_properties']['height']
-                elif initial_borders and initial_borders.get('active_area'):
-                    # Estimate from initial borders (initial area + borders = full frame)
-                    init_area = initial_borders['active_area']
-                    if isinstance(init_area, (list, tuple)) and len(init_area) == 4:
-                        # Use border_regions if available
-                        pass
-                
-                # Build active area HTML
-                active_area_html = ""
-                if video_width > 0 and video_height > 0:
-                    active_percentage = (w * h) / (video_width * video_height) * 100
-                    right_border = video_width - x - w
-                    bottom_border = video_height - y - h
 
-                    active_area_html = f"""
-                        <table style="border-collapse: collapse; width: 100%; font-size: 14px;">
-                            <tr>
-                                <td style="padding: 4px 10px; font-weight: bold; width: 200px;">Active picture area</td>
-                                <td style="padding: 4px 10px;">{w}×{h} pixels ({active_percentage:.1f}% of {video_width}×{video_height} frame)</td>
-                            </tr>
-                            <tr>
-                                <td style="padding: 4px 10px; font-weight: bold;">Position</td>
-                                <td style="padding: 4px 10px;">({x}, {y})</td>
-                            </tr>
-                            <tr>
-                                <td style="padding: 4px 10px; font-weight: bold;">Borders</td>
-                                <td style="padding: 4px 10px;">Left={x}px, Right={right_border}px, Top={y}px, Bottom={bottom_border}px</td>
-                            </tr>
-                        </table>
-                    """
-                else:
-                    active_area_html = f"""
-                        <p><strong>Active Picture Area:</strong> {w}×{h} pixels at ({x}, {y})</p>
-                    """
-            else:
-                active_area_html = ""
 
-            # Head switching artifacts
-            hs_html = ""
-            hs_data = display_borders.get('head_switching_artifacts')
-            if hs_data and isinstance(hs_data, dict):
-                severity = hs_data.get('severity', 'none')
-                if severity not in ('none', 'error', None):
-                    artifact_pct = hs_data.get('percentage', 0)
-                    avg_height = hs_data.get('avg_height_px', 0)
-                    height_info = ""
-                    if avg_height:
-                        height_info = f"<p>Average artifact height: {avg_height}px</p>"
-                    hs_html = f"""
-                        <p><strong>Head Switching Artifacts Detected</strong></p>
-                        <p>Affected frames: {artifact_pct:.1f}%</p>
-                        {height_info}
-                    """
-
-            # Render active area and head switching side by side using flexbox
-            if active_area_html and hs_html:
-                html += f"""
-                <div style="display: flex; gap: 12px; margin: 10px 0; align-items: stretch;">
-                    <div style="background-color: #f5e9e3; padding: 10px; border-radius: 4px; flex: 1; min-width: 0;">
-                        {active_area_html}
-                    </div>
-                    <div style="background-color: #f5e9e3; padding: 10px; border-radius: 4px; flex: 1; min-width: 0;">
-                        {hs_html}
-                    </div>
-                </div>
-                """
-            elif active_area_html:
-                html += f"""
-                <div style="background-color: #f5e9e3; padding: 10px; margin: 10px 0; border-radius: 4px;">
-                    {active_area_html}
-                </div>
-                """
-            elif hs_html:
-                html += f"""
-                <div style="background-color: #f5e9e3; padding: 10px; margin: 10px 0; border-radius: 4px;">
-                    {hs_html}
-                </div>
-                """
-        
-        # Display initial border visualization image
-        if frame_outputs['border_visualization']:
-            viz_label = "Initial border detection" if refinement_iterations > 0 else "Border detection"
-            try:
-                with open(frame_outputs['border_visualization'], "rb") as img_file:
-                    encoded_img = b64encode(img_file.read()).decode()
-                html += f"""
-                <div style="margin: 15px 0;">
-                    <p style="font-size: 13px; color: #666; margin-bottom: 6px;"><em>{viz_label}</em></p>
-                    <img src="data:image/jpeg;base64,{encoded_img}" 
-                         style="max-width: 100%; height: auto; border: 1px solid #4d2b12;"
-                         alt="{viz_label} visualization" />
-                </div>
-                """
-            except Exception as e:
-                logger.warning(f"Could not embed border visualization: {e}")
-        
-        # === Border Refinement Section ===
-        if refinement_iterations and refinement_iterations > 0:
-            html += f"""
-            <div style="margin-top: 20px; padding: 14px 16px; background-color: #fff3cd; border: 1px solid #bf971b; border-radius: 4px;">
-                <p style="margin: 0 0 10px 0; font-weight: bold; color: #856404;">
-                    ⚠️ Border Refinement Performed ({refinement_iterations} iteration{'s' if refinement_iterations > 1 else ''})
-                </p>
-                <p style="margin: 0 0 10px 0; font-size: 13px;">
-                    Initial BRNG analysis detected a high percentage of violations at the edges of the 
-                    active area, indicating the initial border crop was insufficient. Borders were 
-                    automatically expanded and analysis was re-run.
-                </p>
-            """
-            
-            # Show initial → final comparison
-            if initial_borders and final_borders:
-                init_area = initial_borders.get('active_area', [0,0,0,0])
-                final_area = final_borders.get('active_area', [0,0,0,0])
-                
-                if isinstance(init_area, (list, tuple)) and len(init_area) == 4:
-                    init_w, init_h = init_area[2], init_area[3]
-                    final_w, final_h = final_area[2], final_area[3]
-                    width_change = final_w - init_w
-                    height_change = final_h - init_h
-                    
-                    html += f"""
-                <table style="border-collapse: collapse; width: 100%; font-size: 13px; margin-bottom: 10px;">
-                    <tr style="background-color: rgba(255,255,255,0.5);">
-                        <th style="padding: 5px 10px; text-align: left; border-bottom: 1px solid #bf971b;"></th>
-                        <th style="padding: 5px 10px; text-align: left; border-bottom: 1px solid #bf971b;">Initial</th>
-                        <th style="padding: 5px 10px; text-align: left; border-bottom: 1px solid #bf971b;">Final</th>
-                        <th style="padding: 5px 10px; text-align: left; border-bottom: 1px solid #bf971b;">Change</th>
-                    </tr>
-                    <tr>
-                        <td style="padding: 4px 10px; font-weight: bold;">Active area</td>
-                        <td style="padding: 4px 10px;">{init_w}×{init_h}</td>
-                        <td style="padding: 4px 10px;">{final_w}×{final_h}</td>
-                        <td style="padding: 4px 10px;">{width_change:+d}×{height_change:+d} px</td>
-                    </tr>
-                    <tr>
-                        <td style="padding: 4px 10px; font-weight: bold;">Position</td>
-                        <td style="padding: 4px 10px;">({init_area[0]}, {init_area[1]})</td>
-                        <td style="padding: 4px 10px;">({final_area[0]}, {final_area[1]})</td>
-                        <td style="padding: 4px 10px;"></td>
-                    </tr>"""
-
-                    # Extract borders
-                    if video_width > 0 and video_height > 0:
-                        init_borders_str = f"L={init_area[0]} R={video_width-init_area[0]-init_w} T={init_area[1]} B={video_height-init_area[1]-init_h}"
-                        final_borders_str = f"L={final_area[0]} R={video_width-final_area[0]-final_w} T={final_area[1]} B={video_height-final_area[1]-final_h}"
-                        html += f"""
-                    <tr>
-                        <td style="padding: 4px 10px; font-weight: bold;">Borders (px)</td>
-                        <td style="padding: 4px 10px;">{init_borders_str}</td>
-                        <td style="padding: 4px 10px;">{final_borders_str}</td>
-                        <td style="padding: 4px 10px;"></td>
-                    </tr>"""
-                    
-                    html += "</table>"
-            
-            # Show per-iteration details
-            if refinement_history:
-                for iteration in refinement_history:
-                    iter_num = iteration.get('iteration', '?')
-                    iter_area = iteration.get('active_area', [0,0,0,0])
-                    area_change = iteration.get('area_change', {})
-                    violations_before = iteration.get('violations_before', 0)
-                    violations_after = iteration.get('violations_after', 0)
-                    edge_pct = iteration.get('edge_violation_pct', 0)
-                    
-                    violation_delta = violations_after - violations_before
-                    violation_delta_str = f"{violation_delta:+d}" if violation_delta != 0 else "no change"
-                    
-                    if isinstance(iter_area, (list, tuple)) and len(iter_area) == 4:
-                        html += f"""
-                <div style="background-color: rgba(255,255,255,0.4); padding: 6px 10px; margin: 6px 0; border-radius: 3px; font-size: 12px;">
-                    <strong>Iteration {iter_num}:</strong> 
-                    Active area → {iter_area[2]}×{iter_area[3]} 
-                    (width {area_change.get('width', 0):+d}px, height {area_change.get('height', 0):+d}px) — 
-                    Violation frames: {violations_before} → {violations_after} ({violation_delta_str}) — 
-                    Edge violations: {edge_pct:.1f}%
-                </div>"""
-            
-            html += "</div>"  # Close refinement container
-            
-            # Collect all refinement thumbnails for horizontal display
-            refinement_thumbs = []
-            
-            # Add each refinement iteration visualization
-            refinement_vizs = frame_outputs.get('refinement_visualizations', [])
-            if refinement_vizs:
-                for idx, viz_path in enumerate(refinement_vizs, 1):
-                    try:
-                        with open(viz_path, "rb") as img_file:
-                            encoded_img = b64encode(img_file.read()).decode()
-                        refinement_thumbs.append((f'Refinement iteration {idx}', encoded_img))
-                    except Exception as e:
-                        logger.warning(f"Could not embed refinement visualization {viz_path}: {e}")
-            
-            # Add before/after comparison
-            comparison_path = frame_outputs.get('refinement_comparison')
-            if comparison_path:
-                try:
-                    with open(comparison_path, "rb") as img_file:
-                        encoded_img = b64encode(img_file.read()).decode()
-                    refinement_thumbs.append(('Initial vs. final comparison', encoded_img))
-                except Exception as e:
-                    logger.warning(f"Could not embed refinement comparison: {e}")
-            
-            # Render horizontal thumbnail strip
-            if refinement_thumbs:
-                html += """
-                <div style="margin: 15px 0;">
-                    <p style="font-size: 13px; color: #666; margin-bottom: 8px;"><em>Border refinement visualizations</em> <span style="font-size: 11px;">(click to enlarge)</span></p>
-                    <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-start;">"""
-                
-                for caption, encoded_img in refinement_thumbs:
-                    html += f"""
-                        <div style="flex: 1 1 0; min-width: 180px; max-width: {max(100 // len(refinement_thumbs), 20)}%; text-align: center;">
-                            <img src="data:image/jpeg;base64,{encoded_img}"
-                                 style="width: 100%; height: auto; border: 1px solid #4d2b12; cursor: pointer; transition: opacity 0.2s;"
-                                 onmouseover="this.style.opacity='0.85'" onmouseout="this.style.opacity='1'"
-                                 onclick="openImage(this.src, '{caption}')"
-                                 title="Click to enlarge"
-                                 alt="{caption}" />
-                            <p style="font-size: 11px; color: #888; margin: 4px 0 0 0;">{caption}</p>
-                        </div>"""
-                
-                html += """
-                    </div>
-                </div>"""
-    
-    # Signalstats Analysis Section
-    if frame_outputs['signalstats_analysis']:
-        html += "<h3 id='section-signalstats' style='color: #bf971b;'>Signalstats Analysis</h3>"
-        
-        # Methodology explanation (collapsible)
-        html += """
+# Static explainer for the Signalstats section.
+SIGNALSTATS_METHODOLOGY_HTML = """
         <a id="link_signalstats_methodology" href="javascript:void(0);" 
            onclick="toggleContent('signalstats_methodology', 'What is signalstats analysis? ▼', 'What is signalstats analysis? ▲')" 
-           style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+           style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
            What is signalstats analysis? ▼</a>
-        <div id="signalstats_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px; 
-             margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+        <div id="signalstats_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px; 
+             margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
             <p style="margin: 0 0 10px 0;">
                 <strong>Signalstats analysis</strong> evaluates broadcast range compliance across sampled 
                 time periods of the video. It reads the FFmpeg 
@@ -4651,378 +4352,16 @@ def generate_frame_analysis_html(frame_outputs, video_id):
             </p>
         </div>
         """
-        
-        try:
-            # Handle both dict (from enhanced_frame_analysis.json) and file path (legacy)
-            if isinstance(frame_outputs['signalstats_analysis'], dict):
-                signalstats_data = frame_outputs['signalstats_analysis']
-            else:
-                with open(frame_outputs['signalstats_analysis'], 'r') as f:
-                    signalstats_data = json.load(f)
-            
-            diagnosis = signalstats_data.get('diagnosis', 'Analysis complete')
 
-            # Determine assessment styling from the severity field when present;
-            # fall back to diagnosis keyword matching for results generated
-            # before severity existed
-            severity = signalstats_data.get('severity')
-            if not severity:
-                d = diagnosis.lower()
-                if 'broadcast-compliant' in d or 'broadcast-safe' in d:
-                    severity = 'ok'
-                elif 'acceptable' in d or 'minor' in d:
-                    severity = 'info'
-                elif 'significant' in d or 'requires' in d or 'severe' in d:
-                    severity = 'alert'
-                elif 'review' in d or 'detected' in d:
-                    severity = 'warning'
 
-            if severity == 'ok':
-                assessment_bg = '#d2ffed'
-                assessment_border = '#378d6a'
-                assessment_icon = '✅'
-            elif severity == 'alert':
-                assessment_bg = '#ffbaba'
-                assessment_border = '#d32f2f'
-                assessment_icon = '⛔'
-            elif severity == 'warning':
-                assessment_bg = '#fff3cd'
-                assessment_border = '#bf971b'
-                assessment_icon = '⚠️'
-            elif severity == 'info':
-                assessment_bg = '#e3f0ff'
-                assessment_border = '#5c6bc0'
-                assessment_icon = 'ℹ️'
-            else:
-                assessment_bg = '#f5e9e3'
-                assessment_border = '#bf971b'
-                assessment_icon = 'ℹ️'
-            
-            html += f"""
-            <div style="background-color: {assessment_bg}; padding: 12px 16px; margin: 10px 0; 
-                        border-left: 4px solid {assessment_border}; border-radius: 0 4px 4px 0;">
-                <p style="margin: 0; font-size: 14px;"><strong>{assessment_icon} Diagnosis:</strong> {diagnosis}</p>
-            </div>
-            """
-            
-            # Overall results
-            violation_pct = signalstats_data.get('violation_percentage')
-            max_brng = signalstats_data.get('max_brng')
-            avg_brng = signalstats_data.get('avg_brng')
-            used_qctools = signalstats_data.get('used_qctools', False)
-            
-            if violation_pct is not None or max_brng is not None:
-                # Label the heading with the region the stats were measured on
-                # ('' for legacy results that didn't record it)
-                analyzed_region = signalstats_data.get('analyzed_region', '')
-                region_label = {
-                    'active_area': ' (measured on the active picture area)',
-                    'full_frame': ' (measured on the full frame — borders not excluded)',
-                    'mixed': ' (mixed: some periods active picture area, some full frame)',
-                }.get(analyzed_region, '')
-
-                # Example-frame thumbnails (representative / worst) rendered by
-                # frame analysis. Each is a side-by-side original | magenta BRNG
-                # overlay image cropped to the measured region; framed inside the
-                # stat card it illustrates.
-                def _signalstats_frame_figure(thumb_key, timecode_key, caption_label):
-                    thumb_path = signalstats_data.get(thumb_key)
-                    if not thumb_path or not os.path.exists(thumb_path):
-                        return ""
-                    uri = image_to_data_uri(thumb_path, 'image/jpeg')
-                    if not uri:
-                        return ""
-                    timecode = signalstats_data.get(timecode_key)
-                    badge_text = f"{caption_label} &middot; {timecode}" if timecode else caption_label
-                    return f"""
-                        <figure style="margin: 12px 0 0 0;">
-                            <img src="{uri}" alt="{caption_label}"
-                                 style="display: block; width: 100%; height: auto;
-                                        border: 1px solid #e0d0c0; border-radius: 5px;">
-                            <figcaption style="margin-top: 8px;">
-                                <span style="display: inline-block; font-size: 11px; font-weight: 600;
-                                             color: #4d2b12; background-color: #f8f6f3;
-                                             border: 1px solid #e0d0c0; border-radius: 10px;
-                                             padding: 2px 10px;">{badge_text}</span>
-                            </figcaption>
-                        </figure>
-                    """
-
-                representative_fig = _signalstats_frame_figure(
-                    'representative_frame_thumbnail', 'representative_frame_timecode',
-                    'Representative frame')
-                worst_fig = _signalstats_frame_figure(
-                    'worst_frame_thumbnail', 'worst_frame_timecode', 'Worst frame')
-
-                # Each metric is rendered as a clean card: a muted uppercase label,
-                # a prominent value with a smaller descriptor, and (for the two
-                # share metrics) the illustrative frame framed inside the card.
-                def _signalstats_stat_card(label, value_main, value_desc, figure_html=""):
-                    return f"""
-                    <div style="background-color: #ffffff; border: 1px solid #e8ddd0;
-                                border-radius: 8px; padding: 12px 16px;
-                                box-shadow: 0 1px 2px rgba(77, 43, 18, 0.06);">
-                        <div style="display: flex; justify-content: space-between;
-                                    align-items: baseline; gap: 16px;">
-                            <span style="font-size: 11px; text-transform: uppercase;
-                                         letter-spacing: 0.06em; color: #8a7a6d;
-                                         font-weight: 600;">{label}</span>
-                            <span style="font-size: 22px; font-weight: 700; color: #4d2b12;
-                                         white-space: nowrap;">{value_main}</span>
-                        </div>
-                        <div style="font-size: 12px; color: #9a8a7d; text-align: right;
-                                    margin-top: 2px;">{value_desc}</div>
-                        {figure_html}
-                    </div>
-                    """
-
-                cards = []
-                if violation_pct is not None:
-                    cards.append(_signalstats_stat_card(
-                        "Frames with out-of-range pixels",
-                        f"{violation_pct:.1f}%", "of analyzed frames"))
-                if avg_brng is not None:
-                    cards.append(_signalstats_stat_card(
-                        "Average out-of-range share",
-                        f"{avg_brng:.4f}%", "of pixels per analyzed frame",
-                        representative_fig))
-                if max_brng is not None:
-                    cards.append(_signalstats_stat_card(
-                        "Worst frame",
-                        f"{max_brng:.4f}%", "of pixels out of range",
-                        worst_fig))
-
-                source_text = "QCTools + FFprobe comparison" if used_qctools else "FFprobe signalstats"
-
-                html += f"""
-                <div style="margin: 16px 0;">
-                    <p style="font-weight: bold; margin-bottom: 10px; color: #4d2b12;">Overall Results{region_label}</p>
-                    <div style="display: flex; flex-direction: column; gap: 10px; max-width: 560px;">
-                        {''.join(cards)}
-                    </div>
-                    <p style="font-size: 11px; color: #9a8a7d; margin: 8px 2px 0;">Data source: {source_text}</p>
-                </div>
-                """
-            
-            # Display results for active area (legacy format)
-            if signalstats_data.get('results', {}).get('active_area'):
-                active_area = signalstats_data['results']['active_area']
-                html += f"""
-                <div style="margin: 16px 0;">
-                    <p style="font-weight: bold; margin-bottom: 8px; color: #4d2b12;">Active Area Results</p>
-                    <table style="border-collapse: collapse; width: auto; margin: 0;">
-                        <tr>
-                            <td style="padding: 4px 12px 4px 0; color: #555; font-size: 13px; border: none;">Frames with violations</td>
-                            <td style="padding: 4px 0; font-weight: bold; font-size: 13px; border: none;">{active_area['frames_with_violations']}/{active_area['frames_analyzed']} ({active_area['violation_percentage']:.1f}%)</td>
-                        </tr>
-                        <tr>
-                            <td style="padding: 4px 12px 4px 0; color: #555; font-size: 13px; border: none;">Average BRNG</td>
-                            <td style="padding: 4px 0; font-weight: bold; font-size: 13px; border: none;">{active_area['avg_brng']:.4f}%</td>
-                        </tr>
-                        <tr>
-                            <td style="padding: 4px 12px 4px 0; color: #555; font-size: 13px; border: none;">Maximum BRNG</td>
-                            <td style="padding: 4px 0; font-weight: bold; font-size: 13px; border: none;">{active_area['max_brng']:.4f}%</td>
-                        </tr>
-                    </table>
-                </div>
-                """
-            
-            # Per-period comparison cards
-            comparison_results = signalstats_data.get('comparison_results', [])
-            analysis_periods = signalstats_data.get('analysis_periods', [])
-            
-            if comparison_results:
-                # Build time range display
-                all_starts = []
-                all_ends = []
-                for comp in comparison_results:
-                    tr = comp.get('time_range')
-                    if tr and len(tr) >= 2:
-                        all_starts.append(tr[0])
-                        all_ends.append(tr[1])
-                
-                coverage_label = ""
-                if all_starts and all_ends:
-                    coverage_label = f" ({_seconds_to_display(min(all_starts))} – {_seconds_to_display(max(all_ends))})"
-                
-                html += f"""
-                <div style="margin: 16px 0;">
-                    <p style="font-weight: bold; margin-bottom: 8px; color: #4d2b12;">
-                        Period Comparison: {len(comparison_results)} periods{coverage_label}
-                    </p>
-                """
-                
-                for comp in comparison_results:
-                    period_num = comp.get('period', '?')
-                    time_range = comp.get('time_range', [0, 0])
-                    start_display = _seconds_to_display(time_range[0]) if len(time_range) >= 1 else "?"
-                    end_display = _seconds_to_display(time_range[1]) if len(time_range) >= 2 else "?"
-                    
-                    qc_data = comp.get('qctools_full_frame', {})
-                    ff_data = comp.get('ffprobe_active_area', {})
-                    period_diag = comp.get('diagnosis', '')
-                    
-                    # Diagnosis badge
-                    if period_diag == 'border_violations':
-                        diag_label = 'Border violations'
-                        diag_color = '#bf971b'
-                        diag_bg = '#fff3cd'
-                    elif period_diag == 'content_violations':
-                        diag_label = 'Content violations'
-                        diag_color = '#d32f2f'
-                        diag_bg = '#ffbaba'
-                    elif period_diag == 'minimal_violations':
-                        diag_label = 'Minimal'
-                        diag_color = '#378d6a'
-                        diag_bg = '#d2ffed'
-                    else:
-                        diag_label = ''
-                        diag_color = ''
-                        diag_bg = ''
-                    
-                    html += f"""
-                    <div style="background-color: #f5e9e3; padding: 10px 14px; margin: 6px 0; 
-                                border-radius: 4px; border: 1px solid #e0d0c0;">
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                            <span style="font-weight: bold; color: #4d2b12;">
-                                Period {period_num}: {start_display} – {end_display}
-                            </span>
-                    """
-                    
-                    if diag_label:
-                        html += f"""
-                            <span style="background: {diag_bg}; color: {diag_color}; padding: 2px 8px; 
-                                        border-radius: 3px; font-size: 12px; font-weight: bold;">{diag_label}</span>
-                        """
-                    
-                    html += "</div>"
-                    
-                    # Comparison bars
-                    if qc_data or ff_data:
-                        qc_pct = qc_data.get('violations_pct', 0)
-                        ff_pct = ff_data.get('violations_pct', 0)
-                        qc_frames = qc_data.get('frames_analyzed', 0)
-                        qc_violations = qc_data.get('frames_with_violations', 0)
-                        ff_frames = ff_data.get('frames_analyzed', 0)
-                        ff_violations = ff_data.get('frames_with_violations', 0)
-                        qc_max = qc_data.get('max_brng', 0)
-                        ff_max = ff_data.get('max_brng', 0)
-                        
-                        # Scale bars to the larger value
-                        max_pct = max(qc_pct, ff_pct, 0.1)
-                        
-                        if qc_data:
-                            qc_bar_width = (qc_pct / max_pct * 100) if max_pct > 0 else 0
-                            qc_bar_color = '#bf971b' if qc_pct > 10 else '#607d8b'
-                            html += f"""
-                            <div style="margin-bottom: 6px;">
-                                <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 2px;">
-                                    <span style="color: #555;">Full frame (QCTools)</span>
-                                    <span style="color: #666;">{qc_violations}/{qc_frames} frames ({qc_pct:.1f}%) · max {qc_max:.4f}%</span>
-                                </div>
-                                <div style="background-color: #e8ddd5; border-radius: 3px; height: 10px; overflow: hidden;">
-                                    <div style="background-color: {qc_bar_color}; height: 100%; width: {qc_bar_width:.1f}%; 
-                                                min-width: {('2px' if qc_pct > 0 else '0')}; border-radius: 3px;"></div>
-                                </div>
-                            </div>
-                            """
-                        
-                        if ff_data:
-                            ff_bar_width = (ff_pct / max_pct * 100) if max_pct > 0 else 0
-                            ff_bar_color = '#d32f2f' if ff_pct > 10 else '#378d6a'
-                            html += f"""
-                            <div style="margin-bottom: 4px;">
-                                <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 2px;">
-                                    <span style="color: #555;">Active area (FFprobe)</span>
-                                    <span style="color: #666;">{ff_violations}/{ff_frames} frames ({ff_pct:.1f}%) · max {ff_max:.4f}%</span>
-                                </div>
-                                <div style="background-color: #e8ddd5; border-radius: 3px; height: 10px; overflow: hidden;">
-                                    <div style="background-color: {ff_bar_color}; height: 100%; width: {ff_bar_width:.1f}%; 
-                                                min-width: {('2px' if ff_pct > 0 else '0')}; border-radius: 3px;"></div>
-                                </div>
-                            </div>
-                            """
-                        
-                        # Show delta if both sources present
-                        if qc_data and ff_data:
-                            delta = qc_pct - ff_pct
-                            if abs(delta) > 0.5:
-                                delta_label = f"Full frame has {delta:.1f}% more violations than active area" if delta > 0 else f"Active area has {abs(delta):.1f}% more violations than full frame"
-                                html += f"""
-                                <div style="font-size: 11px; color: #888; margin-top: 2px;">
-                                    → {delta_label}
-                                </div>
-                                """
-                    
-                    html += "</div>"
-                
-                html += "</div>"
-            
-            elif analysis_periods:
-                # Fallback: display analysis periods without comparison data
-                periods = analysis_periods
-                
-                # Build time range display
-                all_starts = []
-                all_ends = []
-                for period in periods:
-                    if isinstance(period, (list, tuple)) and len(period) >= 2:
-                        all_starts.append(period[0])
-                        all_ends.append(period[0] + period[1])
-                    elif isinstance(period, dict):
-                        s = period.get('start_time', period.get('start', 0))
-                        d = period.get('duration', 60)
-                        all_starts.append(s)
-                        all_ends.append(s + d)
-                
-                coverage_label = ""
-                if all_starts and all_ends:
-                    coverage_label = f" ({_seconds_to_display(min(all_starts))} – {_seconds_to_display(max(all_ends))})"
-                
-                html += f"""
-                <div style="margin: 16px 0;">
-                    <p style="font-weight: bold; margin-bottom: 8px; color: #4d2b12;">
-                        Analysis Periods: {len(periods)} periods{coverage_label}
-                    </p>
-                """
-                
-                for i, period in enumerate(periods[:5]):
-                    if isinstance(period, (list, tuple)) and len(period) >= 2:
-                        start, duration = period[0], period[1]
-                    elif isinstance(period, dict):
-                        start = period.get('start_time', period.get('start', 0))
-                        duration = period.get('duration', 60)
-                    else:
-                        continue
-                    
-                    start_display = _seconds_to_display(start)
-                    end_display = _seconds_to_display(start + duration)
-                    
-                    html += f"""
-                    <div style="background-color: #f5e9e3; padding: 8px 14px; margin: 4px 0; 
-                                border-radius: 4px; border: 1px solid #e0d0c0; font-size: 13px;">
-                        <span style="font-weight: bold; color: #4d2b12;">Period {i+1}:</span> 
-                        {start_display} – {end_display} ({duration}s duration)
-                    </div>
-                    """
-                
-                html += "</div>"
-                
-        except Exception as e:
-            logger.error(f"Error reading signalstats analysis: {e}")
-    
-    # BRNG Analysis Section
-    if frame_outputs['brng_analysis']:
-        html += "<h3 id='section-brng-analysis' style='color: #bf971b;'>BRNG Violation Analysis</h3>"
-        
-        # Methodology explanation (collapsible)
-        html += """
+# Static explainer for the BRNG Violation Analysis section.
+BRNG_METHODOLOGY_HTML = """
         <a id="link_brng_methodology" href="javascript:void(0);" 
            onclick="toggleContent('brng_methodology', 'What is BRNG analysis? ▼', 'What is BRNG analysis? ▲')" 
-           style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+           style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
            What is BRNG analysis? ▼</a>
-        <div id="brng_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px; 
-             margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+        <div id="brng_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px; 
+             margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
             <p style="margin: 0 0 10px 0;">
                 <strong>BRNG (Broadcast Range)</strong> measures whether pixel values fall outside the 
                 broadcast-legal range (16–235 for luma, 16–240 for chroma in 8-bit video). Pixels outside 
@@ -5107,7 +4446,693 @@ def generate_frame_analysis_html(frame_outputs, video_id):
             </p>
         </div>
         """
-        
+
+
+def _render_frame_border_html(frame_outputs) -> str:
+    """Border Detection: the detected active picture area, the crop it implies,
+    and the before/after visualisation.
+
+    Returns an empty string when this section has no inputs.
+    """
+    html = ""
+    if frame_outputs['border_visualization'] or frame_outputs['border_data']:
+        html += "<h3 id='section-border-detection' style='color: var(--report-gold);'>Border Detection</h3>"
+
+        # Methodology explanation (collapsible)
+        html += BORDER_DETECTION_METHODOLOGY_HTML
+
+        # Determine border data source: prefer enhanced JSON, fall back to standalone file
+        border_data = None
+        enhanced_data = None
+
+        # Try enhanced JSON first (has more complete data)
+        if frame_outputs.get('enhanced_frame_analysis'):
+            try:
+                with open(frame_outputs['enhanced_frame_analysis'], 'r') as f:
+                    enhanced_data = json.load(f)
+            except Exception:
+                pass
+
+        # Try standalone border_data.json
+        if frame_outputs['border_data']:
+            try:
+                with open(frame_outputs['border_data'], 'r') as f:
+                    border_data = json.load(f)
+            except Exception as e:
+                logger.error(f"Error reading border data: {e}")
+
+        # Determine initial and final border data
+        initial_borders = frame_outputs.get('initial_borders') or (enhanced_data or {}).get('initial_borders')
+        final_borders = frame_outputs.get('final_borders') or (enhanced_data or {}).get('final_borders')
+        refinement_iterations = frame_outputs.get('refinement_iterations', 0) or (enhanced_data or {}).get('refinement_iterations', 0)
+        refinement_history = frame_outputs.get('refinement_history', []) or (enhanced_data or {}).get('refinement_history', [])
+
+        # Use the best available border info for display
+        display_borders = final_borders or initial_borders or border_data
+
+        if display_borders:
+            # Display detection method
+            detection_method = display_borders.get('detection_method', 'unknown')
+            method_label = "Simple (fixed borders)" if detection_method.startswith('simple') else "Sophisticated (quality-based detection)"
+            if 'refined' in detection_method:
+                method_label += " with iterative refinement"
+
+            html += f"<p><strong>Method:</strong> {method_label}</p>"
+
+            # Active area display
+            active_area = display_borders.get('active_area')
+            if active_area:
+                if isinstance(active_area, (list, tuple)) and len(active_area) == 4:
+                    x, y, w, h = active_area
+                else:
+                    x, y, w, h = 0, 0, 0, 0
+
+                # Get video dimensions from border_data or enhanced data
+                video_width, video_height = 0, 0
+                if border_data and border_data.get('video_properties'):
+                    video_width = border_data['video_properties']['width']
+                    video_height = border_data['video_properties']['height']
+                elif initial_borders and initial_borders.get('active_area'):
+                    # Estimate from initial borders (initial area + borders = full frame)
+                    init_area = initial_borders['active_area']
+                    if isinstance(init_area, (list, tuple)) and len(init_area) == 4:
+                        # Use border_regions if available
+                        pass
+
+                # Build active area HTML
+                active_area_html = ""
+                if video_width > 0 and video_height > 0:
+                    active_percentage = (w * h) / (video_width * video_height) * 100
+                    right_border = video_width - x - w
+                    bottom_border = video_height - y - h
+
+                    active_area_html = f"""
+                        <table style="border-collapse: collapse; width: 100%; font-size: 14px;">
+                            <tr>
+                                <td style="padding: 4px 10px; font-weight: bold; width: 200px;">Active picture area</td>
+                                <td style="padding: 4px 10px;">{w}×{h} pixels ({active_percentage:.1f}% of {video_width}×{video_height} frame)</td>
+                            </tr>
+                            <tr>
+                                <td style="padding: 4px 10px; font-weight: bold;">Position</td>
+                                <td style="padding: 4px 10px;">({x}, {y})</td>
+                            </tr>
+                            <tr>
+                                <td style="padding: 4px 10px; font-weight: bold;">Borders</td>
+                                <td style="padding: 4px 10px;">Left={x}px, Right={right_border}px, Top={y}px, Bottom={bottom_border}px</td>
+                            </tr>
+                        </table>
+                    """
+                else:
+                    active_area_html = f"""
+                        <p><strong>Active Picture Area:</strong> {w}×{h} pixels at ({x}, {y})</p>
+                    """
+            else:
+                active_area_html = ""
+
+            # Head switching artifacts
+            hs_html = ""
+            hs_data = display_borders.get('head_switching_artifacts')
+            if hs_data and isinstance(hs_data, dict):
+                severity = hs_data.get('severity', 'none')
+                if severity not in ('none', 'error', None):
+                    artifact_pct = hs_data.get('percentage', 0)
+                    avg_height = hs_data.get('avg_height_px', 0)
+                    height_info = ""
+                    if avg_height:
+                        height_info = f"<p>Average artifact height: {avg_height}px</p>"
+                    hs_html = f"""
+                        <p><strong>Head Switching Artifacts Detected</strong></p>
+                        <p>Affected frames: {artifact_pct:.1f}%</p>
+                        {height_info}
+                    """
+
+            # Render active area and head switching side by side using flexbox
+            if active_area_html and hs_html:
+                html += f"""
+                <div style="display: flex; gap: 12px; margin: 10px 0; align-items: stretch;">
+                    <div style="background-color: var(--report-paper); padding: 10px; border-radius: 4px; flex: 1; min-width: 0;">
+                        {active_area_html}
+                    </div>
+                    <div style="background-color: var(--report-paper); padding: 10px; border-radius: 4px; flex: 1; min-width: 0;">
+                        {hs_html}
+                    </div>
+                </div>
+                """
+            elif active_area_html:
+                html += f"""
+                <div style="background-color: var(--report-paper); padding: 10px; margin: 10px 0; border-radius: 4px;">
+                    {active_area_html}
+                </div>
+                """
+            elif hs_html:
+                html += f"""
+                <div style="background-color: var(--report-paper); padding: 10px; margin: 10px 0; border-radius: 4px;">
+                    {hs_html}
+                </div>
+                """
+
+        # Display initial border visualization image
+        if frame_outputs['border_visualization']:
+            viz_label = "Initial border detection" if refinement_iterations > 0 else "Border detection"
+            try:
+                with open(frame_outputs['border_visualization'], "rb") as img_file:
+                    encoded_img = b64encode(img_file.read()).decode()
+                html += f"""
+                <div style="margin: 15px 0;">
+                    <p style="font-size: 13px; color: #666; margin-bottom: 6px;"><em>{viz_label}</em></p>
+                    <img src="data:image/jpeg;base64,{encoded_img}" 
+                         style="max-width: 100%; height: auto; border: 1px solid var(--report-ink);"
+                         alt="{viz_label} visualization" />
+                </div>
+                """
+            except Exception as e:
+                logger.warning(f"Could not embed border visualization: {e}")
+
+        # === Border Refinement Section ===
+        if refinement_iterations and refinement_iterations > 0:
+            html += f"""
+            <div style="margin-top: 20px; padding: 14px 16px; background-color: var(--report-notice-bg); border: 1px solid var(--report-gold); border-radius: 4px;">
+                <p style="margin: 0 0 10px 0; font-weight: bold; color: var(--report-notice-ink);">
+                    ⚠️ Border Refinement Performed ({refinement_iterations} iteration{'s' if refinement_iterations > 1 else ''})
+                </p>
+                <p style="margin: 0 0 10px 0; font-size: 13px;">
+                    Initial BRNG analysis detected a high percentage of violations at the edges of the 
+                    active area, indicating the initial border crop was insufficient. Borders were 
+                    automatically expanded and analysis was re-run.
+                </p>
+            """
+
+            # Show initial → final comparison
+            if initial_borders and final_borders:
+                init_area = initial_borders.get('active_area', [0,0,0,0])
+                final_area = final_borders.get('active_area', [0,0,0,0])
+
+                if isinstance(init_area, (list, tuple)) and len(init_area) == 4:
+                    init_w, init_h = init_area[2], init_area[3]
+                    final_w, final_h = final_area[2], final_area[3]
+                    width_change = final_w - init_w
+                    height_change = final_h - init_h
+
+                    html += f"""
+                <table style="border-collapse: collapse; width: 100%; font-size: 13px; margin-bottom: 10px;">
+                    <tr style="background-color: rgba(255,255,255,0.5);">
+                        <th style="padding: 5px 10px; text-align: left; border-bottom: 1px solid var(--report-gold);"></th>
+                        <th style="padding: 5px 10px; text-align: left; border-bottom: 1px solid var(--report-gold);">Initial</th>
+                        <th style="padding: 5px 10px; text-align: left; border-bottom: 1px solid var(--report-gold);">Final</th>
+                        <th style="padding: 5px 10px; text-align: left; border-bottom: 1px solid var(--report-gold);">Change</th>
+                    </tr>
+                    <tr>
+                        <td style="padding: 4px 10px; font-weight: bold;">Active area</td>
+                        <td style="padding: 4px 10px;">{init_w}×{init_h}</td>
+                        <td style="padding: 4px 10px;">{final_w}×{final_h}</td>
+                        <td style="padding: 4px 10px;">{width_change:+d}×{height_change:+d} px</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 4px 10px; font-weight: bold;">Position</td>
+                        <td style="padding: 4px 10px;">({init_area[0]}, {init_area[1]})</td>
+                        <td style="padding: 4px 10px;">({final_area[0]}, {final_area[1]})</td>
+                        <td style="padding: 4px 10px;"></td>
+                    </tr>"""
+
+                    # Extract borders
+                    if video_width > 0 and video_height > 0:
+                        init_borders_str = f"L={init_area[0]} R={video_width-init_area[0]-init_w} T={init_area[1]} B={video_height-init_area[1]-init_h}"
+                        final_borders_str = f"L={final_area[0]} R={video_width-final_area[0]-final_w} T={final_area[1]} B={video_height-final_area[1]-final_h}"
+                        html += f"""
+                    <tr>
+                        <td style="padding: 4px 10px; font-weight: bold;">Borders (px)</td>
+                        <td style="padding: 4px 10px;">{init_borders_str}</td>
+                        <td style="padding: 4px 10px;">{final_borders_str}</td>
+                        <td style="padding: 4px 10px;"></td>
+                    </tr>"""
+
+                    html += "</table>"
+
+            # Show per-iteration details
+            if refinement_history:
+                for iteration in refinement_history:
+                    iter_num = iteration.get('iteration', '?')
+                    iter_area = iteration.get('active_area', [0,0,0,0])
+                    area_change = iteration.get('area_change', {})
+                    violations_before = iteration.get('violations_before', 0)
+                    violations_after = iteration.get('violations_after', 0)
+                    edge_pct = iteration.get('edge_violation_pct', 0)
+
+                    violation_delta = violations_after - violations_before
+                    violation_delta_str = f"{violation_delta:+d}" if violation_delta != 0 else "no change"
+
+                    if isinstance(iter_area, (list, tuple)) and len(iter_area) == 4:
+                        html += f"""
+                <div style="background-color: rgba(255,255,255,0.4); padding: 6px 10px; margin: 6px 0; border-radius: 3px; font-size: 12px;">
+                    <strong>Iteration {iter_num}:</strong> 
+                    Active area → {iter_area[2]}×{iter_area[3]} 
+                    (width {area_change.get('width', 0):+d}px, height {area_change.get('height', 0):+d}px) — 
+                    Violation frames: {violations_before} → {violations_after} ({violation_delta_str}) — 
+                    Edge violations: {edge_pct:.1f}%
+                </div>"""
+
+            html += "</div>"  # Close refinement container
+
+            # Collect all refinement thumbnails for horizontal display
+            refinement_thumbs = []
+
+            # Add each refinement iteration visualization
+            refinement_vizs = frame_outputs.get('refinement_visualizations', [])
+            if refinement_vizs:
+                for idx, viz_path in enumerate(refinement_vizs, 1):
+                    try:
+                        with open(viz_path, "rb") as img_file:
+                            encoded_img = b64encode(img_file.read()).decode()
+                        refinement_thumbs.append((f'Refinement iteration {idx}', encoded_img))
+                    except Exception as e:
+                        logger.warning(f"Could not embed refinement visualization {viz_path}: {e}")
+
+            # Add before/after comparison
+            comparison_path = frame_outputs.get('refinement_comparison')
+            if comparison_path:
+                try:
+                    with open(comparison_path, "rb") as img_file:
+                        encoded_img = b64encode(img_file.read()).decode()
+                    refinement_thumbs.append(('Initial vs. final comparison', encoded_img))
+                except Exception as e:
+                    logger.warning(f"Could not embed refinement comparison: {e}")
+
+            # Render horizontal thumbnail strip
+            if refinement_thumbs:
+                html += """
+                <div style="margin: 15px 0;">
+                    <p style="font-size: 13px; color: #666; margin-bottom: 8px;"><em>Border refinement visualizations</em> <span style="font-size: 11px;">(click to enlarge)</span></p>
+                    <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-start;">"""
+
+                for caption, encoded_img in refinement_thumbs:
+                    html += f"""
+                        <div style="flex: 1 1 0; min-width: 180px; max-width: {max(100 // len(refinement_thumbs), 20)}%; text-align: center;">
+                            <img src="data:image/jpeg;base64,{encoded_img}"
+                                 style="width: 100%; height: auto; border: 1px solid var(--report-ink); cursor: pointer; transition: opacity 0.2s;"
+                                 onmouseover="this.style.opacity='0.85'" onmouseout="this.style.opacity='1'"
+                                 onclick="openImage(this.src, '{caption}')"
+                                 title="Click to enlarge"
+                                 alt="{caption}" />
+                            <p style="font-size: 11px; color: #888; margin: 4px 0 0 0;">{caption}</p>
+                        </div>"""
+
+                html += """
+                    </div>
+                </div>"""
+
+    # Signalstats Analysis Section
+    return html
+
+
+def _render_frame_signalstats_html(frame_outputs) -> str:
+    """Signalstats: per-period luma/chroma statistics, the derived diagnosis, and
+    the example frames behind it.
+
+    Returns an empty string when this section has no inputs.
+    """
+    html = ""
+    if frame_outputs['signalstats_analysis']:
+        html += "<h3 id='section-signalstats' style='color: var(--report-gold);'>Signalstats Analysis</h3>"
+
+        # Methodology explanation (collapsible)
+        html += SIGNALSTATS_METHODOLOGY_HTML
+
+        try:
+            # Handle both dict (from enhanced_frame_analysis.json) and file path (legacy)
+            if isinstance(frame_outputs['signalstats_analysis'], dict):
+                signalstats_data = frame_outputs['signalstats_analysis']
+            else:
+                with open(frame_outputs['signalstats_analysis'], 'r') as f:
+                    signalstats_data = json.load(f)
+
+            diagnosis = signalstats_data.get('diagnosis', 'Analysis complete')
+
+            # Determine assessment styling from the severity field when present;
+            # fall back to diagnosis keyword matching for results generated
+            # before severity existed
+            severity = signalstats_data.get('severity')
+            if not severity:
+                d = diagnosis.lower()
+                if 'broadcast-compliant' in d or 'broadcast-safe' in d:
+                    severity = 'ok'
+                elif 'acceptable' in d or 'minor' in d:
+                    severity = 'info'
+                elif 'significant' in d or 'requires' in d or 'severe' in d:
+                    severity = 'alert'
+                elif 'review' in d or 'detected' in d:
+                    severity = 'warning'
+
+            if severity == 'ok':
+                assessment_bg = '#d2ffed'
+                assessment_border = '#378d6a'
+                assessment_icon = '✅'
+            elif severity == 'alert':
+                assessment_bg = '#ffbaba'
+                assessment_border = '#d32f2f'
+                assessment_icon = '⛔'
+            elif severity == 'warning':
+                assessment_bg = '#fff3cd'
+                assessment_border = '#bf971b'
+                assessment_icon = '⚠️'
+            elif severity == 'info':
+                assessment_bg = '#e3f0ff'
+                assessment_border = '#5c6bc0'
+                assessment_icon = 'ℹ️'
+            else:
+                assessment_bg = '#f5e9e3'
+                assessment_border = '#bf971b'
+                assessment_icon = 'ℹ️'
+
+            html += f"""
+            <div style="background-color: {assessment_bg}; padding: 12px 16px; margin: 10px 0; 
+                        border-left: 4px solid {assessment_border}; border-radius: 0 4px 4px 0;">
+                <p style="margin: 0; font-size: 14px;"><strong>{assessment_icon} Diagnosis:</strong> {diagnosis}</p>
+            </div>
+            """
+
+            # Overall results
+            violation_pct = signalstats_data.get('violation_percentage')
+            max_brng = signalstats_data.get('max_brng')
+            avg_brng = signalstats_data.get('avg_brng')
+            used_qctools = signalstats_data.get('used_qctools', False)
+
+            if violation_pct is not None or max_brng is not None:
+                # Label the heading with the region the stats were measured on
+                # ('' for legacy results that didn't record it)
+                analyzed_region = signalstats_data.get('analyzed_region', '')
+                region_label = {
+                    'active_area': ' (measured on the active picture area)',
+                    'full_frame': ' (measured on the full frame — borders not excluded)',
+                    'mixed': ' (mixed: some periods active picture area, some full frame)',
+                }.get(analyzed_region, '')
+
+                # Example-frame thumbnails (representative / worst) rendered by
+                # frame analysis. Each is a side-by-side original | magenta BRNG
+                # overlay image cropped to the measured region; framed inside the
+                # stat card it illustrates.
+                def _signalstats_frame_figure(thumb_key, timecode_key, caption_label):
+                    thumb_path = signalstats_data.get(thumb_key)
+                    if not thumb_path or not os.path.exists(thumb_path):
+                        return ""
+                    uri = image_to_data_uri(thumb_path, 'image/jpeg')
+                    if not uri:
+                        return ""
+                    timecode = signalstats_data.get(timecode_key)
+                    badge_text = f"{caption_label} &middot; {timecode}" if timecode else caption_label
+                    return f"""
+                        <figure style="margin: 12px 0 0 0;">
+                            <img src="{uri}" alt="{caption_label}"
+                                 style="display: block; width: 100%; height: auto;
+                                        border: 1px solid var(--report-border-soft); border-radius: 5px;">
+                            <figcaption style="margin-top: 8px;">
+                                <span style="display: inline-block; font-size: 11px; font-weight: 600;
+                                             color: var(--report-ink); background-color: var(--report-panel);
+                                             border: 1px solid var(--report-border-soft); border-radius: 10px;
+                                             padding: 2px 10px;">{badge_text}</span>
+                            </figcaption>
+                        </figure>
+                    """
+
+                representative_fig = _signalstats_frame_figure(
+                    'representative_frame_thumbnail', 'representative_frame_timecode',
+                    'Representative frame')
+                worst_fig = _signalstats_frame_figure(
+                    'worst_frame_thumbnail', 'worst_frame_timecode', 'Worst frame')
+
+                # Each metric is rendered as a clean card: a muted uppercase label,
+                # a prominent value with a smaller descriptor, and (for the two
+                # share metrics) the illustrative frame framed inside the card.
+                def _signalstats_stat_card(label, value_main, value_desc, figure_html=""):
+                    return f"""
+                    <div style="background-color: #ffffff; border: 1px solid #e8ddd0;
+                                border-radius: 8px; padding: 12px 16px;
+                                box-shadow: 0 1px 2px rgba(77, 43, 18, 0.06);">
+                        <div style="display: flex; justify-content: space-between;
+                                    align-items: baseline; gap: 16px;">
+                            <span style="font-size: 11px; text-transform: uppercase;
+                                         letter-spacing: 0.06em; color: #8a7a6d;
+                                         font-weight: 600;">{label}</span>
+                            <span style="font-size: 22px; font-weight: 700; color: var(--report-ink);
+                                         white-space: nowrap;">{value_main}</span>
+                        </div>
+                        <div style="font-size: 12px; color: #9a8a7d; text-align: right;
+                                    margin-top: 2px;">{value_desc}</div>
+                        {figure_html}
+                    </div>
+                    """
+
+                cards = []
+                if violation_pct is not None:
+                    cards.append(_signalstats_stat_card(
+                        "Frames with out-of-range pixels",
+                        f"{violation_pct:.1f}%", "of analyzed frames"))
+                if avg_brng is not None:
+                    cards.append(_signalstats_stat_card(
+                        "Average out-of-range share",
+                        f"{avg_brng:.4f}%", "of pixels per analyzed frame",
+                        representative_fig))
+                if max_brng is not None:
+                    cards.append(_signalstats_stat_card(
+                        "Worst frame",
+                        f"{max_brng:.4f}%", "of pixels out of range",
+                        worst_fig))
+
+                source_text = "QCTools + FFprobe comparison" if used_qctools else "FFprobe signalstats"
+
+                html += f"""
+                <div style="margin: 16px 0;">
+                    <p style="font-weight: bold; margin-bottom: 10px; color: var(--report-ink);">Overall Results{region_label}</p>
+                    <div style="display: flex; flex-direction: column; gap: 10px; max-width: 560px;">
+                        {''.join(cards)}
+                    </div>
+                    <p style="font-size: 11px; color: #9a8a7d; margin: 8px 2px 0;">Data source: {source_text}</p>
+                </div>
+                """
+
+            # Display results for active area (legacy format)
+            if signalstats_data.get('results', {}).get('active_area'):
+                active_area = signalstats_data['results']['active_area']
+                html += f"""
+                <div style="margin: 16px 0;">
+                    <p style="font-weight: bold; margin-bottom: 8px; color: var(--report-ink);">Active Area Results</p>
+                    <table style="border-collapse: collapse; width: auto; margin: 0;">
+                        <tr>
+                            <td style="padding: 4px 12px 4px 0; color: #555; font-size: 13px; border: none;">Frames with violations</td>
+                            <td style="padding: 4px 0; font-weight: bold; font-size: 13px; border: none;">{active_area['frames_with_violations']}/{active_area['frames_analyzed']} ({active_area['violation_percentage']:.1f}%)</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 4px 12px 4px 0; color: #555; font-size: 13px; border: none;">Average BRNG</td>
+                            <td style="padding: 4px 0; font-weight: bold; font-size: 13px; border: none;">{active_area['avg_brng']:.4f}%</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 4px 12px 4px 0; color: #555; font-size: 13px; border: none;">Maximum BRNG</td>
+                            <td style="padding: 4px 0; font-weight: bold; font-size: 13px; border: none;">{active_area['max_brng']:.4f}%</td>
+                        </tr>
+                    </table>
+                </div>
+                """
+
+            # Per-period comparison cards
+            comparison_results = signalstats_data.get('comparison_results', [])
+            analysis_periods = signalstats_data.get('analysis_periods', [])
+
+            if comparison_results:
+                # Build time range display
+                all_starts = []
+                all_ends = []
+                for comp in comparison_results:
+                    tr = comp.get('time_range')
+                    if tr and len(tr) >= 2:
+                        all_starts.append(tr[0])
+                        all_ends.append(tr[1])
+
+                coverage_label = ""
+                if all_starts and all_ends:
+                    coverage_label = f" ({_seconds_to_display(min(all_starts))} – {_seconds_to_display(max(all_ends))})"
+
+                html += f"""
+                <div style="margin: 16px 0;">
+                    <p style="font-weight: bold; margin-bottom: 8px; color: var(--report-ink);">
+                        Period Comparison: {len(comparison_results)} periods{coverage_label}
+                    </p>
+                """
+
+                for comp in comparison_results:
+                    period_num = comp.get('period', '?')
+                    time_range = comp.get('time_range', [0, 0])
+                    start_display = _seconds_to_display(time_range[0]) if len(time_range) >= 1 else "?"
+                    end_display = _seconds_to_display(time_range[1]) if len(time_range) >= 2 else "?"
+
+                    qc_data = comp.get('qctools_full_frame', {})
+                    ff_data = comp.get('ffprobe_active_area', {})
+                    period_diag = comp.get('diagnosis', '')
+
+                    # Diagnosis badge
+                    if period_diag == 'border_violations':
+                        diag_label = 'Border violations'
+                        diag_color = '#bf971b'
+                        diag_bg = '#fff3cd'
+                    elif period_diag == 'content_violations':
+                        diag_label = 'Content violations'
+                        diag_color = '#d32f2f'
+                        diag_bg = '#ffbaba'
+                    elif period_diag == 'minimal_violations':
+                        diag_label = 'Minimal'
+                        diag_color = '#378d6a'
+                        diag_bg = '#d2ffed'
+                    else:
+                        diag_label = ''
+                        diag_color = ''
+                        diag_bg = ''
+
+                    html += f"""
+                    <div style="background-color: var(--report-paper); padding: 10px 14px; margin: 6px 0; 
+                                border-radius: 4px; border: 1px solid var(--report-border-soft);">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                            <span style="font-weight: bold; color: var(--report-ink);">
+                                Period {period_num}: {start_display} – {end_display}
+                            </span>
+                    """
+
+                    if diag_label:
+                        html += f"""
+                            <span style="background: {diag_bg}; color: {diag_color}; padding: 2px 8px; 
+                                        border-radius: 3px; font-size: 12px; font-weight: bold;">{diag_label}</span>
+                        """
+
+                    html += "</div>"
+
+                    # Comparison bars
+                    if qc_data or ff_data:
+                        qc_pct = qc_data.get('violations_pct', 0)
+                        ff_pct = ff_data.get('violations_pct', 0)
+                        qc_frames = qc_data.get('frames_analyzed', 0)
+                        qc_violations = qc_data.get('frames_with_violations', 0)
+                        ff_frames = ff_data.get('frames_analyzed', 0)
+                        ff_violations = ff_data.get('frames_with_violations', 0)
+                        qc_max = qc_data.get('max_brng', 0)
+                        ff_max = ff_data.get('max_brng', 0)
+
+                        # Scale bars to the larger value
+                        max_pct = max(qc_pct, ff_pct, 0.1)
+
+                        if qc_data:
+                            qc_bar_width = (qc_pct / max_pct * 100) if max_pct > 0 else 0
+                            qc_bar_color = '#bf971b' if qc_pct > 10 else '#607d8b'
+                            html += f"""
+                            <div style="margin-bottom: 6px;">
+                                <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 2px;">
+                                    <span style="color: #555;">Full frame (QCTools)</span>
+                                    <span style="color: #666;">{qc_violations}/{qc_frames} frames ({qc_pct:.1f}%) · max {qc_max:.4f}%</span>
+                                </div>
+                                <div style="background-color: #e8ddd5; border-radius: 3px; height: 10px; overflow: hidden;">
+                                    <div style="background-color: {qc_bar_color}; height: 100%; width: {qc_bar_width:.1f}%; 
+                                                min-width: {('2px' if qc_pct > 0 else '0')}; border-radius: 3px;"></div>
+                                </div>
+                            </div>
+                            """
+
+                        if ff_data:
+                            ff_bar_width = (ff_pct / max_pct * 100) if max_pct > 0 else 0
+                            ff_bar_color = '#d32f2f' if ff_pct > 10 else '#378d6a'
+                            html += f"""
+                            <div style="margin-bottom: 4px;">
+                                <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 2px;">
+                                    <span style="color: #555;">Active area (FFprobe)</span>
+                                    <span style="color: #666;">{ff_violations}/{ff_frames} frames ({ff_pct:.1f}%) · max {ff_max:.4f}%</span>
+                                </div>
+                                <div style="background-color: #e8ddd5; border-radius: 3px; height: 10px; overflow: hidden;">
+                                    <div style="background-color: {ff_bar_color}; height: 100%; width: {ff_bar_width:.1f}%; 
+                                                min-width: {('2px' if ff_pct > 0 else '0')}; border-radius: 3px;"></div>
+                                </div>
+                            </div>
+                            """
+
+                        # Show delta if both sources present
+                        if qc_data and ff_data:
+                            delta = qc_pct - ff_pct
+                            if abs(delta) > 0.5:
+                                delta_label = f"Full frame has {delta:.1f}% more violations than active area" if delta > 0 else f"Active area has {abs(delta):.1f}% more violations than full frame"
+                                html += f"""
+                                <div style="font-size: 11px; color: #888; margin-top: 2px;">
+                                    → {delta_label}
+                                </div>
+                                """
+
+                    html += "</div>"
+
+                html += "</div>"
+
+            elif analysis_periods:
+                # Fallback: display analysis periods without comparison data
+                periods = analysis_periods
+
+                # Build time range display
+                all_starts = []
+                all_ends = []
+                for period in periods:
+                    if isinstance(period, (list, tuple)) and len(period) >= 2:
+                        all_starts.append(period[0])
+                        all_ends.append(period[0] + period[1])
+                    elif isinstance(period, dict):
+                        s = period.get('start_time', period.get('start', 0))
+                        d = period.get('duration', 60)
+                        all_starts.append(s)
+                        all_ends.append(s + d)
+
+                coverage_label = ""
+                if all_starts and all_ends:
+                    coverage_label = f" ({_seconds_to_display(min(all_starts))} – {_seconds_to_display(max(all_ends))})"
+
+                html += f"""
+                <div style="margin: 16px 0;">
+                    <p style="font-weight: bold; margin-bottom: 8px; color: var(--report-ink);">
+                        Analysis Periods: {len(periods)} periods{coverage_label}
+                    </p>
+                """
+
+                for i, period in enumerate(periods[:5]):
+                    if isinstance(period, (list, tuple)) and len(period) >= 2:
+                        start, duration = period[0], period[1]
+                    elif isinstance(period, dict):
+                        start = period.get('start_time', period.get('start', 0))
+                        duration = period.get('duration', 60)
+                    else:
+                        continue
+
+                    start_display = _seconds_to_display(start)
+                    end_display = _seconds_to_display(start + duration)
+
+                    html += f"""
+                    <div style="background-color: var(--report-paper); padding: 8px 14px; margin: 4px 0; 
+                                border-radius: 4px; border: 1px solid var(--report-border-soft); font-size: 13px;">
+                        <span style="font-weight: bold; color: var(--report-ink);">Period {i+1}:</span> 
+                        {start_display} – {end_display} ({duration}s duration)
+                    </div>
+                    """
+
+                html += "</div>"
+
+        except Exception as e:
+            logger.error(f"Error reading signalstats analysis: {e}")
+
+    # BRNG Analysis Section
+    return html
+
+
+def _render_frame_brng_html(frame_outputs) -> str:
+    """BRNG: broadcast-range violation counts per analysis period, with the
+    severity assessment and recommendations.
+
+    Returns an empty string when this section has no inputs.
+    """
+    html = ""
+    if frame_outputs['brng_analysis']:
+        html += "<h3 id='section-brng-analysis' style='color: var(--report-gold);'>BRNG Violation Analysis</h3>"
+
+        # Methodology explanation (collapsible)
+        html += BRNG_METHODOLOGY_HTML
+
         try:
             # Handle both file path (string) and dict (from enhanced JSON)
             if isinstance(frame_outputs['brng_analysis'], str):
@@ -5115,23 +5140,23 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     brng_data = json.load(f)
             else:
                 brng_data = frame_outputs['brng_analysis']
-            
+
             # Get actionable report
             report = brng_data.get('actionable_report', {})
             aggregate = brng_data.get('aggregate_patterns', {})
             violations = brng_data.get('violations', [])
             period_summaries = brng_data.get('period_summaries', [])
             analysis_periods = brng_data.get('analysis_periods', [])
-            
+
             # Overall assessment banner
             assessment = report.get('overall_assessment', 'Analysis complete')
             stats = report.get('summary_statistics', {})
-            
+
             # Determine assessment styling
             edge_pct = aggregate.get('edge_violation_percentage', 0)
             avg_violation = stats.get('average_violation_percentage', 0)
             max_violation = stats.get('max_violation_percentage', 0)
-            
+
             if avg_violation >= 10:
                 assessment_bg = '#ffbaba'
                 assessment_border = '#d32f2f'
@@ -5148,7 +5173,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                 assessment_bg = '#d2ffed'
                 assessment_border = '#2e7d32'
                 assessment_icon = '✅'
-            
+
             html += f"""
             <div style="background-color: {assessment_bg}; padding: 12px 16px; margin: 10px 0;
                         border-left: 4px solid {assessment_border}; border-radius: 0 4px 4px 0;">
@@ -5184,8 +5209,8 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                                  "Interpret the values below with care."))
                 confidence_note = brng_data.get('period_confidence_note') or default_note
                 html += f"""
-            <div style="background-color: #fff3cd; padding: 12px 16px; margin: 10px 0;
-                        border-left: 4px solid #bf971b; border-radius: 0 4px 4px 0;">
+            <div style="background-color: var(--report-notice-bg); padding: 12px 16px; margin: 10px 0;
+                        border-left: 4px solid var(--report-gold); border-radius: 0 4px 4px 0;">
                 <p style="margin: 0; font-size: 14px;"><strong>{heading}:</strong> {confidence_note}</p>
                 <p style="margin: 6px 0 0 0; font-size: 13px; color: #6b5a3e;">{qualifier}</p>
             </div>
@@ -5199,15 +5224,15 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                 time_range_start = min(all_starts) if all_starts else 0
                 time_range_end = max(all_ends) if all_ends else 0
                 total_violations_across = sum(p.get('violations_found', 0) for p in period_summaries)
-                
+
                 html += f"""
                 <div style="margin: 16px 0;">
-                    <p style="font-weight: bold; margin-bottom: 8px; color: #4d2b12;">
+                    <p style="font-weight: bold; margin-bottom: 8px; color: var(--report-ink);">
                         Analysis Coverage: {len(period_summaries)} periods 
                         ({_seconds_to_display(time_range_start)} – {_seconds_to_display(time_range_end)})
                     </p>
                 """
-                
+
                 for ps in period_summaries:
                     p_num = ps.get('period_num', '?')
                     p_start = ps.get('start_time', 0)
@@ -5220,21 +5245,21 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     ss_diagnosis = ps.get('signalstats_diagnosis', '')
                     sensitivity_used = ps.get('sensitivity_used', '')
                     ss_active_pct = ps.get('signalstats_active_area_pct', None)
-                    
+
                     # Bar width as proportion of violations found vs frames checked
                     bar_pct = (found / checked * 100) if checked > 0 else 0
                     bar_color = '#d32f2f' if bar_pct > 50 else '#bf971b' if bar_pct > 20 else '#1976d2'
-                    
+
                     html += f"""
-                    <div style="background-color: #f5e9e3; padding: 10px 14px; margin: 6px 0; 
-                                border-radius: 4px; border: 1px solid #e0d0c0;">
+                    <div style="background-color: var(--report-paper); padding: 10px 14px; margin: 6px 0; 
+                                border-radius: 4px; border: 1px solid var(--report-border-soft);">
                         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-                            <span style="font-weight: bold; color: #4d2b12;">
+                            <span style="font-weight: bold; color: var(--report-ink);">
                                 Period {p_num}: {_seconds_to_display(p_start)} – {_seconds_to_display(p_end)}
                             </span>
                             <span style="display: flex; align-items: center; gap: 6px;">
                     """
-                    
+
                     # Signalstats diagnosis badge
                     if ss_diagnosis:
                         diag_labels = {
@@ -5249,7 +5274,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                                             border-radius: 3px; font-size: 11px; font-weight: bold;"
                                       title="Signalstats diagnosis for this period">{label}</span>
                             """
-                    
+
                     html += f"""
                                 <span style="font-size: 13px; color: #666;">
                                     {found} violation{'s' if found != 1 else ''} / {checked} frames checked
@@ -5264,7 +5289,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                         <div style="font-size: 12px; color: #777;">
                             QCTools targeted {qct_targeted} frames → {frames_mapped} mapped to period → {total_samples} total samples analyzed
                     """
-                    
+
                     # Show sensitivity and signalstats context on a second line if available
                     context_parts = []
                     if sensitivity_used and sensitivity_used != 'normal':
@@ -5275,14 +5300,14 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                         html += f"""
                             <br>{'  ·  '.join(context_parts)}
                         """
-                    
+
                     html += """
                         </div>
                     </div>
                     """
-                
+
                 html += "</div>"
-            
+
             elif analysis_periods:
                 # Fall back to showing period ranges without per-period stats
                 time_range_start = min(p[0] for p in analysis_periods)
@@ -5293,7 +5318,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     {_seconds_to_display(time_range_start)} – {_seconds_to_display(time_range_end)}
                 </p>
                 """
-            
+
             # Flex wrapper so "Violation Types Detected" and "Violation
             # Statistics" render side-by-side.
             viol_flex_open = bool(violations) or bool(stats or aggregate)
@@ -5307,7 +5332,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
             if violations:
                 diagnostic_counts = {}
                 edge_artifact_edges = set()
-                
+
                 for v in violations:
                     diags = v.get('diagnostics', [])
                     if diags:
@@ -5322,11 +5347,11 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                                 continue
                             else:
                                 diagnostic_counts[diag] = diagnostic_counts.get(diag, 0) + 1
-                
+
                 if diagnostic_counts:
                     total_v = len(violations)
                     refinement_iters = frame_outputs.get('refinement_iterations', 0)
-                    
+
                     # Build initial-run diagnostics for comparison if refinement occurred
                     initial_diag_counts = {}
                     if refinement_iters > 0 and frame_outputs.get('initial_brng_analysis'):
@@ -5340,14 +5365,14 @@ def generate_frame_analysis_html(frame_outputs, video_id):
 
                     html += """
                     <div style="flex: 1 1 320px; min-width: 0;">
-                        <p style="font-weight: bold; margin-bottom: 8px; color: #4d2b12;">Violation Types Detected</p>
+                        <p style="font-weight: bold; margin-bottom: 8px; color: var(--report-ink);">Violation Types Detected</p>
                     """
-                    
+
                     # Sort by count (descending)
                     priority_order = ["Sub-black detected", "Highlight clipping", "Edge artifacts", 
                                      "Linear blanking patterns",
                                      "General broadcast range violations"]
-                    
+
                     sorted_diags = []
                     for diag_type in priority_order:
                         if diag_type in diagnostic_counts:
@@ -5355,7 +5380,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     for diag_type, count in diagnostic_counts.items():
                         if diag_type not in priority_order:
                             sorted_diags.append((diag_type, count))
-                    
+
                     # Type-specific colors
                     type_colors = {
                         "Sub-black detected": "#5c6bc0",
@@ -5367,11 +5392,11 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                         "Border detection likely missed blanking": "#d32f2f",
                         "Moderate blanking detected": "#f57c00"
                     }
-                    
+
                     for diag_type, count in sorted_diags:
                         pct = (count / total_v) * 100
                         bar_color = type_colors.get(diag_type, '#90a4ae')
-                        
+
                         # Show before → after if refinement happened
                         initial_count = initial_diag_counts.get(diag_type)
                         count_display = f"{count} frames ({pct:.1f}%)"
@@ -5383,12 +5408,12 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                                 f'{initial_count} ({initial_pct:.1f}%)</span>'
                                 f' → {count} frames ({pct:.1f}%)'
                             )
-                        
+
                         # Build label
                         label = diag_type
                         if diag_type == "Edge artifacts" and edge_artifact_edges:
                             label = f"Edge artifacts ({', '.join(sorted(edge_artifact_edges))})"
-                        
+
                         html += f"""
                         <div style="margin: 4px 0;">
                             <div style="display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 2px;">
@@ -5401,29 +5426,29 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                             </div>
                         </div>
                         """
-                    
+
                     # High edge percentage warning
                     if edge_pct > 50:
                         html += f"""
-                        <div style="background-color: #fff3cd; padding: 8px 12px; margin-top: 8px; 
-                                    border-left: 3px solid #bf971b; border-radius: 0 4px 4px 0; font-size: 13px;">
+                        <div style="background-color: var(--report-notice-bg); padding: 8px 12px; margin-top: 8px; 
+                                    border-left: 3px solid var(--report-gold); border-radius: 0 4px 4px 0; font-size: 13px;">
                             ⚠ High edge percentage ({edge_pct:.1f}%) suggests border detection may need adjustment
                         </div>
                         """
-                    
+
                     html += "</div>"
-            
+
             # ── Violation Statistics ──
             if stats or aggregate:
                 continuous_pct = aggregate.get('continuous_edge_percentage', 0)
                 linear_pct = aggregate.get('linear_pattern_percentage', 0)
-                
+
                 html += """
                 <div style="flex: 1 1 320px; min-width: 0;">
-                    <p style="font-weight: bold; margin-bottom: 8px; color: #4d2b12;">Violation Statistics</p>
+                    <p style="font-weight: bold; margin-bottom: 8px; color: var(--report-ink);">Violation Statistics</p>
                     <table style="border-collapse: collapse; width: auto; margin: 0;">
                 """
-                
+
                 stat_rows = [
                     ("Frames with violations", f"{stats.get('total_violations', 0)}"),
                     ("Average BRNG", f"{avg_violation:.2f}%"),
@@ -5431,14 +5456,14 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     ("Edge violations (any)", f"{edge_pct:.1f}% of analyzed frames"),
                     ("Edge violations (solid line)", f"{continuous_pct:.1f}% of analyzed frames"),
                 ]
-                
+
                 if linear_pct > 0:
                     stat_rows.append(("Linear patterns", f"{linear_pct:.1f}% of analyzed frames"))
-                
+
                 # Add note about scattered vs solid edges
                 if continuous_pct == 0 and edge_pct > 95:
                     stat_rows.append(("", "→ Violations are scattered rather than forming a solid line"))
-                
+
                 for label, value in stat_rows:
                     if label:
                         html += f"""
@@ -5454,7 +5479,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                             <td colspan="2" style="padding: 4px 0; font-size: 12px; color: #888; border: none; font-style: italic;">{value}</td>
                         </tr>
                         """
-                
+
                 html += """
                     </table>
                 </div>
@@ -5467,15 +5492,15 @@ def generate_frame_analysis_html(frame_outputs, video_id):
             skip_info = brng_data.get('skip_info', {})
             if skip_info and skip_info.get('total_skipped_seconds', 0) > 0:
                 html += f"""
-                <div style="background-color: #f5e9e3; padding: 10px; margin: 10px 0; border-radius: 4px;">
+                <div style="background-color: var(--report-paper); padding: 10px; margin: 10px 0; border-radius: 4px;">
                     <p style="margin: 0; font-size: 13px;"><strong>Content Start Detection:</strong> 
                     Skipped first {skip_info['total_skipped_seconds']:.1f} seconds (test patterns/color bars)</p>
                 </div>
                 """
-            
+
             # ── Recommendations ──
             if report.get('recommendations'):
-                html += "<div style='margin: 16px 0;'><p style='font-weight: bold; margin-bottom: 8px; color: #4d2b12;'>Recommendations</p>"
+                html += "<div style='margin: 16px 0;'><p style='font-weight: bold; margin-bottom: 8px; color: var(--report-ink);'>Recommendations</p>"
                 for rec in report['recommendations']:
                     severity = rec.get('severity', 'low')
                     if severity == 'high':
@@ -5487,7 +5512,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     else:
                         rec_bg = '#e8f4fd'
                         rec_border = '#1976d2'
-                    
+
                     html += f"""
                     <div style="background-color: {rec_bg}; padding: 8px 12px; margin: 4px 0; 
                                 border-left: 3px solid {rec_border}; border-radius: 0 4px 4px 0; font-size: 13px;">
@@ -5497,11 +5522,20 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                         html += f"<br><span style='color: #555;'>{rec['description']}</span>"
                     html += "</div>"
                 html += "</div>"
-                
+
         except Exception as e:
             logger.error(f"Error reading BRNG analysis: {e}")
-    
+
     # BRNG Diagnostic Thumbnails
+    return html
+
+
+def _render_frame_thumbs_html(frame_outputs) -> str:
+    """BRNG thumbnails: the sampled frames with out-of-range pixels highlighted.
+
+    Returns an empty string when this section has no inputs.
+    """
+    html = ""
     if frame_outputs['brng_thumbnails']:
         # Try to get violations data for thumbnail metadata
         thumb_violations_data = []
@@ -5516,17 +5550,17 @@ def generate_frame_analysis_html(frame_outputs, video_id):
             thumb_violations_data = _brng_data.get('violations', [])
         except Exception:
             pass
-        
+
         num_thumbs = len(frame_outputs['brng_thumbnails'])
-        
+
         html += f"""
-        <h3 style='color: #bf971b;'>BRNG Diagnostic Thumbnails</h3>
+        <h3 style='color: var(--report-gold);'>BRNG Diagnostic Thumbnails</h3>
         <a id="link_brng_thumb_info" href="javascript:void(0);" 
            onclick="toggleContent('brng_thumb_info', 'How are thumbnails selected? ▼', 'How are thumbnails selected? ▲')" 
-           style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+           style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
            How are thumbnails selected? ▼</a>
-        <div id="brng_thumb_info" style="display: none; background-color: #f8f6f3; padding: 12px 14px; margin: 0 0 12px 0; 
-                    border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+        <div id="brng_thumb_info" style="display: none; background-color: var(--report-panel); padding: 12px 14px; margin: 0 0 12px 0; 
+                    border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
             <p style="margin: 0 0 6px 0;">
                 <strong>Thumbnail selection:</strong> Up to 5 diagnostic thumbnails are chosen from the 
                 frames with detected violations. The highest-scoring violation frame is always included. 
@@ -5546,10 +5580,10 @@ def generate_frame_analysis_html(frame_outputs, video_id):
         </div>
         <div style="display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0;">
         """
-        
+
         # Sort thumbnails by filename (which includes timecode)
         sorted_thumbs = sorted(frame_outputs['brng_thumbnails'])
-        
+
         for thumb_idx, thumb_path in enumerate(sorted_thumbs[:6]):  # Limit to 6 thumbnails in report
             # Extract timecode from filename if possible
             filename = os.path.basename(thumb_path)
@@ -5563,7 +5597,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     timestamp_seconds = float(timecode.replace('s', ''))
                 except (ValueError, AttributeError):
                     pass
-            
+
             # Try to find matching violation data for this thumbnail
             thumb_score = None
             thumb_diags = None
@@ -5576,20 +5610,20 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                         thumb_brng_pct = v.get('violation_percentage')
                         thumb_diags = v.get('diagnostics', [])
                         break
-            
+
             with open(thumb_path, "rb") as img_file:
                 encoded_thumb = b64encode(img_file.read()).decode()
-            
+
             # Build caption
             caption_parts = [f"Frame at {timecode}"]
             if thumb_score is not None:
                 caption_parts.append(f"score: {thumb_score:.4f}")
             if thumb_brng_pct is not None:
                 caption_parts.append(f"BRNG: {thumb_brng_pct:.2f}%")
-            
+
             caption_line1 = caption_parts[0]
             caption_line2 = ", ".join(caption_parts[1:]) if len(caption_parts) > 1 else ""
-            
+
             # Diagnostic badge
             diag_html = ""
             if thumb_diags:
@@ -5599,11 +5633,11 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                     for dl in diag_labels:
                         badges += f'<span style="display: inline-block; background: #e8ddd5; padding: 1px 6px; border-radius: 3px; font-size: 11px; margin: 1px 2px;">{dl}</span>'
                     diag_html = f'<div style="margin-top: 3px;">{badges}</div>'
-            
+
             html += f"""
             <div style="text-align: center; margin: 5px;">
                 <img src="data:image/jpeg;base64,{encoded_thumb}"
-                     style="width: 300px; height: auto; border: 1px solid #4d2b12; cursor: pointer;"
+                     style="width: 300px; height: auto; border: 1px solid var(--report-ink); cursor: pointer;"
                      onclick="openImage(this.src, 'BRNG Diagnostic - {caption_line1}')"
                      title="Click to enlarge" />
                 <p style="font-size: 12px; margin: 4px 0 0 0;">{caption_line1}</p>
@@ -5612,12 +5646,49 @@ def generate_frame_analysis_html(frame_outputs, video_id):
                 html += f'<p style="font-size: 11px; margin: 1px 0 0 0; color: #777;">{caption_line2}</p>'
             html += diag_html
             html += "</div>"
-        
+
         html += "</div>"
-        
+
         if num_thumbs > 6:
             html += f"<p style='font-style: italic; font-size: 13px;'>Showing 6 of {num_thumbs} diagnostic thumbnails</p>"
-    
+
+    return html
+
+
+def generate_frame_analysis_html(frame_outputs, video_id):
+    """
+    Generate HTML section for frame analysis results.
+
+    Args:
+        frame_outputs (dict): Dictionary of frame analysis output paths
+        video_id (str): Video identifier
+
+    Returns:
+        str: HTML string for frame analysis section
+    """
+    has_content = (
+        frame_outputs.get('border_visualization') or
+        frame_outputs.get('border_data') or
+        frame_outputs.get('brng_analysis') or
+        frame_outputs.get('signalstats_analysis')
+    )
+    if not has_content:
+        return ""
+
+    html = """
+    <div class="frame-analysis-section" id="section-frame-analysis">
+        <h2 style="color: var(--report-success); text-decoration: underline; margin-top: 30px;">Frame Analysis Results</h2>
+    """
+
+    # Border Detection Section
+    html += _render_frame_border_html(frame_outputs)
+    html += _render_frame_signalstats_html(frame_outputs)
+    html += _render_frame_brng_html(frame_outputs)
+    html += _render_frame_thumbs_html(frame_outputs)
+
+    # Closes the frame-analysis-section wrapper opened above. This used to sit
+    # at the end of the thumbnails block, which made that renderer emit a
+    # stray </div> even when it had nothing to draw.
     html += "</div>"
     return html
 
@@ -5642,10 +5713,10 @@ def generate_dropped_sample_html(frame_outputs):
     html += """
     <a id="link_dropped_sample_methodology" href="javascript:void(0);"
        onclick="toggleContent('dropped_sample_methodology', 'What is dropped sample detection? ▼', 'What is dropped sample detection? ▲')"
-       style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+       style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
        What is dropped sample detection? ▼</a>
-    <div id="dropped_sample_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px;
-         margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+    <div id="dropped_sample_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px;
+         margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
         <p style="margin: 0 0 10px 0;">
             <strong>Dropped sample detection</strong> identifies potential audio sample drops caused by
             TBC/framesync devices or analog-to-digital converters during digitization. Two indicators are analyzed:
@@ -5684,8 +5755,13 @@ def generate_dropped_sample_html(frame_outputs):
         status_color = '#cc6600'
         status_icon = '&#x26A0;'
     elif status == 'clean':
-        status_color = '#0a5f1c'
+        status_color = 'var(--report-success)'
         status_icon = '&#x2705;'
+    elif status == 'unknown':
+        # The check could not run. Deliberately not green: an operator must be
+        # able to tell "no dropped samples" from "we could not tell".
+        status_color = '#cc6600'
+        status_icon = '&#x26A0;'
     else:
         status_color = '#666666'
         status_icon = '&#x2753;'
@@ -5714,7 +5790,7 @@ def generate_dropped_sample_html(frame_outputs):
             html += f"""
             <p style="font-size: 13px; font-weight: bold; margin: 16px 0 6px 0;">Audio Spectrogram:</p>
             <img src="data:image/jpeg;base64,{encoded_img}"
-                 style="max-width: 100%; height: auto; margin: 0 0 10px 0; border: 1px solid #d0c0b0;" />
+                 style="max-width: 100%; height: auto; margin: 0 0 10px 0; border: 1px solid var(--report-border);" />
             """
         except Exception as e:
             logger.warning(f"Could not embed spectrogram image: {e}")
@@ -5723,38 +5799,38 @@ def generate_dropped_sample_html(frame_outputs):
     html += """
     <table style="border-collapse: collapse; margin: 10px 0; font-size: 13px;">
         <tr style="background-color: #f0ebe4;">
-            <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: left;">Metric</th>
-            <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">Value</th>
+            <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: left;">Metric</th>
+            <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">Value</th>
         </tr>
     """
     html += f"""
         <tr>
-            <td style="padding: 6px 12px; border: 1px solid #d0c0b0;">Spectrogram spikes detected</td>
-            <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{spike_count}</td>
+            <td style="padding: 6px 12px; border: 1px solid var(--report-border);">Spectrogram spikes detected</td>
+            <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{spike_count}</td>
         </tr>
         <tr>
-            <td style="padding: 6px 12px; border: 1px solid #d0c0b0;">Audio/video duration difference</td>
-            <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{duration_diff_ms:.3f} ms</td>
+            <td style="padding: 6px 12px; border: 1px solid var(--report-border);">Audio/video duration difference</td>
+            <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{duration_diff_ms:.3f} ms</td>
         </tr>
         <tr>
-            <td style="padding: 6px 12px; border: 1px solid #d0c0b0;">Audio stream duration</td>
-            <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{audio_duration:.6f} s</td>
+            <td style="padding: 6px 12px; border: 1px solid var(--report-border);">Audio stream duration</td>
+            <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{audio_duration:.6f} s</td>
         </tr>
         <tr>
-            <td style="padding: 6px 12px; border: 1px solid #d0c0b0;">Video stream duration</td>
-            <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{video_duration:.6f} s</td>
+            <td style="padding: 6px 12px; border: 1px solid var(--report-border);">Video stream duration</td>
+            <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{video_duration:.6f} s</td>
         </tr>
         <tr>
-            <td style="padding: 6px 12px; border: 1px solid #d0c0b0;">Estimated loss from detected spikes</td>
-            <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{estimated_loss_ms:.4f} ms</td>
+            <td style="padding: 6px 12px; border: 1px solid var(--report-border);">Estimated loss from detected spikes</td>
+            <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{estimated_loss_ms:.4f} ms</td>
         </tr>
         <tr>
-            <td style="padding: 6px 12px; border: 1px solid #d0c0b0;">Audio sample rate</td>
-            <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{sample_rate} Hz</td>
+            <td style="padding: 6px 12px; border: 1px solid var(--report-border);">Audio sample rate</td>
+            <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{sample_rate} Hz</td>
         </tr>
         <tr>
-            <td style="padding: 6px 12px; border: 1px solid #d0c0b0;">Combined risk score</td>
-            <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{combined_score:.3f}</td>
+            <td style="padding: 6px 12px; border: 1px solid var(--report-border);">Combined risk score</td>
+            <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{combined_score:.3f}</td>
         </tr>
     </table>
     """
@@ -5784,20 +5860,20 @@ def generate_dropped_sample_html(frame_outputs):
         html += f"""
         <a id="link_spike_timestamps" href="javascript:void(0);"
            onclick="toggleContent('spike_timestamps', 'Estimated spike timestamps ({len(spike_timestamps)}) ▼', 'Estimated spike timestamps ▲')"
-           style="color: #378d6a; text-decoration: underline; margin: 10px 0; display: block; font-size: 13px;">
+           style="color: var(--report-accent); text-decoration: underline; margin: 10px 0; display: block; font-size: 13px;">
            Estimated spike timestamps ({len(spike_timestamps)}) ▼</a>
         <div id="spike_timestamps" style="display: none; margin: 0 0 16px 0;">
         <table style="border-collapse: collapse; font-size: 13px;">
             <tr style="background-color: #f0ebe4;">
-                <th style="padding: 6px 12px; border: 1px solid #d0c0b0;">#</th>
-                <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">Timestamp (s)</th>
+                <th style="padding: 6px 12px; border: 1px solid var(--report-border);">#</th>
+                <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">Timestamp (s)</th>
             </tr>
         """
         for i, ts in enumerate(spike_timestamps, 1):
             html += f"""
             <tr>
-                <td style="padding: 6px 12px; border: 1px solid #d0c0b0;">{i}</td>
-                <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{ts:.2f}</td>
+                <td style="padding: 6px 12px; border: 1px solid var(--report-border);">{i}</td>
+                <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{ts:.2f}</td>
             </tr>
             """
         html += "</table></div>"
@@ -5842,11 +5918,18 @@ def generate_duplicate_frame_html(frame_outputs):
         status_color = '#cc6600'
         status_icon = '&#x26A0;'
     elif status == 'clean':
-        status_color = '#0a5f1c'
+        status_color = 'var(--report-success)'
         status_icon = '&#x2705;'
     else:
         status_color = '#666666'
         status_icon = '&#x2753;'
+
+    # Without OpenCV the MSE check never ran, and that is what rejects the
+    # deck's flat-field signal-loss frames — so these are candidates, not
+    # findings. Downgrade the presentation to match.
+    if not duplicate_data.get('verification_available', True):
+        status_color = '#cc6600'
+        status_icon = '&#x26A0;'
 
     bit_depth_label = "10-bit" if bit_depth_10 else "8-bit"
 
@@ -5856,10 +5939,10 @@ def generate_duplicate_frame_html(frame_outputs):
     html += f"""
     <a id="link_duplicate_frame_methodology" href="javascript:void(0);"
        onclick="toggleContent('duplicate_frame_methodology', 'What is duplicate frame detection? &#x25BC;', 'What is duplicate frame detection? &#x25B2;')"
-       style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+       style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
        What is duplicate frame detection? &#x25BC;</a>
-    <div id="duplicate_frame_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px;
-         margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+    <div id="duplicate_frame_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px;
+         margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
         <p style="margin: 0 0 10px 0;">
             <strong>Duplicate frame detection</strong> identifies runs of repeated frames likely caused by
             TBC or framesync error concealment during digitization. The detection pipeline:
@@ -5902,23 +5985,23 @@ def generate_duplicate_frame_html(frame_outputs):
     html += """
     <table style="border-collapse: collapse; margin: 10px 0; font-size: 13px;">
         <tr style="background-color: #f0ebe4;">
-            <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: left;">#</th>
-            <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: left;">Start</th>
-            <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: left;">End</th>
-            <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">Frozen frames</th>
-            <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">Est. loss (s)</th>
-            <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">YDIF avg</th>
-            <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">VREP</th>
-            <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">OpenCV MSE</th>
-            <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: center;">First frame</th>
-            <th style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: center;">Last frame</th>
+            <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: left;">#</th>
+            <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: left;">Start</th>
+            <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: left;">End</th>
+            <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">Frozen frames</th>
+            <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">Est. loss (s)</th>
+            <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">YDIF avg</th>
+            <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">VREP</th>
+            <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">OpenCV MSE</th>
+            <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: center;">First frame</th>
+            <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: center;">Last frame</th>
         </tr>
     """
 
     if not runs:
         html += """
         <tr>
-            <td colspan="10" style="padding: 12px; border: 1px solid #d0c0b0;
+            <td colspan="10" style="padding: 12px; border: 1px solid var(--report-border);
                 text-align: center; color: #666; font-style: italic;">
                 No duplicate frame runs detected.
             </td>
@@ -5938,7 +6021,7 @@ def generate_duplicate_frame_html(frame_outputs):
                     encoded = b64encode(fh.read()).decode()
                 return (
                     f'<img src="data:image/jpeg;base64,{encoded}" '
-                    f'style="max-width: 220px; height: auto; border: 1px solid #d0c0b0;" />'
+                    f'style="max-width: 220px; height: auto; border: 1px solid var(--report-border);" />'
                 )
             except Exception as e:
                 logger.warning(f"Could not embed duplicate frame thumbnail {thumb_path}: {e}")
@@ -5960,16 +6043,16 @@ def generate_duplicate_frame_html(frame_outputs):
             mse_cell = f"{cv_mse:.2f}" if isinstance(cv_mse, (int, float)) else "&mdash;"
             html += f"""
             <tr>
-                <td style="padding: 6px 12px; border: 1px solid #d0c0b0;">{i}</td>
-                <td style="padding: 6px 12px; border: 1px solid #d0c0b0; font-family: monospace;">{start_tc}</td>
-                <td style="padding: 6px 12px; border: 1px solid #d0c0b0; font-family: monospace;">{end_tc}</td>
-                <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{frozen}</td>
-                <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{est_loss:.3f}</td>
-                <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{avg_ydif:.3f}</td>
-                <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{avg_vrep:.2f}</td>
-                <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: right;">{mse_cell}</td>
-                <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: center;">{_embed_thumb(first_thumb)}</td>
-                <td style="padding: 6px 12px; border: 1px solid #d0c0b0; text-align: center;">{_embed_thumb(last_thumb)}</td>
+                <td style="padding: 6px 12px; border: 1px solid var(--report-border);">{i}</td>
+                <td style="padding: 6px 12px; border: 1px solid var(--report-border); font-family: monospace;">{start_tc}</td>
+                <td style="padding: 6px 12px; border: 1px solid var(--report-border); font-family: monospace;">{end_tc}</td>
+                <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{frozen}</td>
+                <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{est_loss:.3f}</td>
+                <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{avg_ydif:.3f}</td>
+                <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{avg_vrep:.2f}</td>
+                <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{mse_cell}</td>
+                <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: center;">{_embed_thumb(first_thumb)}</td>
+                <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: center;">{_embed_thumb(last_thumb)}</td>
             </tr>
             """
 
@@ -6065,10 +6148,10 @@ def _read_mkvalidator_summary(summary_path):
 _MKVALIDATOR_METHODOLOGY_HTML = """
     <a id="link_mkvalidator_methodology" href="javascript:void(0);"
        onclick="toggleContent('mkvalidator_methodology', 'What is mkvalidator? &#x25BC;', 'What is mkvalidator? &#x25B2;')"
-       style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+       style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
        What is mkvalidator? &#x25BC;</a>
-    <div id="mkvalidator_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px;
-         margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+    <div id="mkvalidator_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px;
+         margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
         <p style="margin: 0 0 10px 0;">
             <strong>mkvalidator</strong> (from the Matroska project) parses the file's Matroska/EBML
             structure and reports whether it is well-formed. AV Spex surfaces that verdict as the
@@ -6159,7 +6242,7 @@ def make_mkvalidator_html(summary_path, clusters_csv_path, video_path=None):
     status_html = (
         f'<p style="margin-top: 0; font-size: 1.15em;">Result: '
         f'<strong style="color: {status_color};">{status_text}</strong></p>'
-        f'<p style="margin: 0; color: #4d2b12;">{verdict}</p>'
+        f'<p style="margin: 0; color: var(--report-ink);">{verdict}</p>'
     )
 
     # Optional WRN0C2 timecode-warnings table (only when the clusters CSV has rows).
@@ -6176,8 +6259,8 @@ def make_mkvalidator_html(summary_path, clusters_csv_path, video_path=None):
         if data_rows:
             # Optional approximate file-timecode column (only when we can derive it).
             to_timecode = _mkvalidator_timecode_mapper(video_path)
-            td = 'padding: 4px 12px; border: 1px solid #4d2b12;'
-            th = ('padding: 6px 12px; border: 1px solid #4d2b12; '
+            td = 'padding: 4px 12px; border: 1px solid var(--report-ink);'
+            th = ('padding: 6px 12px; border: 1px solid var(--report-ink); '
                   'background-color: #fbe4eb; position: sticky; top: 0;')
 
             def _row(cells):
@@ -6196,7 +6279,7 @@ def make_mkvalidator_html(summary_path, clusters_csv_path, video_path=None):
             clusters_html = f"""
         <p style="margin-bottom: 6px;"><strong>{len(data_rows)}</strong> non-incrementing
         cluster timecode warning(s) (<code>WRN0C2</code>, informational &mdash; may be intentional).</p>
-        <div style="max-width: {table_width}; max-height: 360px; overflow-y: auto; border: 1px solid #4d2b12;">
+        <div style="max-width: {table_width}; max-height: 360px; overflow-y: auto; border: 1px solid var(--report-ink);">
             <table style="border-collapse: collapse; width: 100%; background-color: #ffffff;">
                 <tr>
                     <th style="{th}">Cluster #</th>
@@ -6209,7 +6292,7 @@ def make_mkvalidator_html(summary_path, clusters_csv_path, video_path=None):
 
     return f"""
     {_MKVALIDATOR_METHODOLOGY_HTML}
-    <div style="background-color: #f5e9e3; padding: 20px 30px; margin-top: 10px; border-radius: 6px;">
+    <div style="background-color: var(--report-paper); padding: 20px 30px; margin-top: 10px; border-radius: 6px;">
         {status_html}
         <div style="margin-top: 16px;">
         {clusters_html}
@@ -6218,816 +6301,21 @@ def make_mkvalidator_html(summary_path, clusters_csv_path, video_path=None):
     """
 
 
-def generate_final_report(video_id, source_directory, report_directory, destination_directory,
-                         video_path=None, check_cancelled=None, signals=None):
-    """
-    Generate final HTML report if configured.
-    
-    Args:
-        video_id (str): Unique identifier for the video
-        source_directory (str): Source directory for the video
-        report_directory (str): Directory containing report files
-        destination_directory (str): Destination directory for output files
-        video_path (str, optional): Path to the video file for thumbnail generation
-        check_cancelled (callable, optional): Function to check if cancelled
-        signals (object, optional): Signals for GUI updates
-        
-    Returns:
-        str or None: Path to the generated HTML report, or None
-    """
-    
-    checks_config = config_mgr.get_config('checks', ChecksConfig)
-
-    if not checks_config.outputs.report:
-        return None
-
-    try:
-        html_report_path = os.path.join(source_directory, f'{video_id}_avspex_report.html')
-        
-        # Generate HTML report with video path (no frame_analysis parameter needed)
-        write_html_report(video_id, report_directory, destination_directory, html_report_path,
-                         video_path=video_path, check_cancelled=check_cancelled, signals=signals)
-        
-        logger.info(f"HTML report generated: {html_report_path}\n")
-        if signals:
-            signals.step_completed.emit("Generate Report")
-        return html_report_path
-
-    except Exception as e:
-        logger.critical(f"Error generating HTML report: {e}")
-        import traceback
-        logger.critical(f"Traceback: {traceback.format_exc()}")
-        return None
-
-
-def write_html_report(video_id, report_directory, destination_directory, html_report_path, video_path=None, check_cancelled=None, signals=None):
-
-    if signals:
-        signals.report_progress.emit(0)
-
-    qctools_colorbars_duration_output, qctools_bars_eval_check_output, colorbars_values_output, windowed_colorbars_values, qctools_content_check_outputs, qctools_profile_check_output, profile_fails_csv, tags_check_output, tag_fails_csv, colorbars_eval_fails_csv, audio_clipping_csv, channel_imbalance_csv, identical_channels_csv, audible_timecode_csv, audio_dropout_csv, clamped_levels_csv, clamped_traces_csv, chroma_phase_summary_csv, chroma_phase_events_csv, tone_leak_summary_csv, tone_leak_events_csv, difference_csv = find_report_csvs(report_directory)
-
-    # CLAMS bars-detection durations CSV (filename matches the writer in
-    # checks/bars_detection_clams.py); present only when the parallel detector ran.
-    clams_bars_durations_csv = os.path.join(report_directory, "clams_bars_colorbars_durations.csv")
-    if not os.path.isfile(clams_bars_durations_csv):
-        clams_bars_durations_csv = None
-
-    # CLAMS tone-detection durations CSV (filename matches the writer in
-    # checks/tone_detection_clams.py); present only when the detector ran.
-    clams_tone_durations_csv = os.path.join(report_directory, "clams_tone_detection_durations.csv")
-    if not os.path.isfile(clams_tone_durations_csv):
-        clams_tone_durations_csv = None
-
-    # mkvalidator sidecars (filenames match the writers in checks/mkvalidator_check.py).
-    # Unlike the qct-parse/CLAMS sidecars these live in the _qc_metadata directory
-    # (destination_directory), not the report dir, because the mkvalidator check runs
-    # before the report dir exists. The summary sidecar holds the validity verdict and
-    # is written whenever the check ran; the clusters CSV holds the WRN0C2 byte offsets
-    # and is present only when at least one WRN0C2 was found.
-    mkvalidator_summary_path = os.path.join(destination_directory, f"{video_id}_mkvalidator_summary.txt")
-    if not os.path.isfile(mkvalidator_summary_path):
-        mkvalidator_summary_path = None
-
-    mkvalidator_clusters_csv = os.path.join(destination_directory, f"{video_id}_mkvalidator_clusters.csv")
-    if not os.path.isfile(mkvalidator_clusters_csv):
-        mkvalidator_clusters_csv = None
-
-    if check_cancelled():
-        return
-    
-    # Create thumbPath if it doesn't exist
-    thumbPath = os.path.join(report_directory, "ThumbExports")
-    if not os.path.exists(thumbPath):
-        os.makedirs(thumbPath)
-    
-    # Collect all thumbnail tasks across all failure types, then generate with progress
-    generated_thumbs = {}
-    thumbnail_tasks = []
-
-    if profile_fails_csv and video_path:
-        profile_fails_csv_path = os.path.join(report_directory, profile_fails_csv)
-        failureInfoSummary_profile = summarize_failures(profile_fails_csv_path)
-        for timestamp, info_list in failureInfoSummary_profile.items():
-            for info in info_list:
-                thumbnail_tasks.append((info['tag'], info['tagValue'], timestamp, 'threshold_profile'))
-
-    if tag_fails_csv and video_path:
-        tag_fails_csv_path = os.path.join(report_directory, tag_fails_csv)
-        failureInfoSummary_tags = summarize_failures(tag_fails_csv_path)
-        for timestamp, info_list in failureInfoSummary_tags.items():
-            for info in info_list:
-                thumbnail_tasks.append((info['tag'], info['tagValue'], timestamp, 'tag_check'))
-
-    # Color bars evaluation thumbnails illustrate the peaks of the failure
-    # timeline, so they are picked by failure-cluster density rather than by
-    # worst value (summarize_failures).
-    colorbars_peaks = []
-    eval_video_duration = None
-    eval_video_fps = None
-    if colorbars_eval_fails_csv and video_path:
-        colorbars_eval_fails_csv_path = os.path.join(report_directory, colorbars_eval_fails_csv)
-        eval_video_duration = _get_video_duration(video_path)
-        eval_video_fps = _get_video_frame_rate(video_path)
-        colorbars_peaks = select_failure_peaks(colorbars_eval_fails_csv_path, duration=eval_video_duration)
-        for peak in colorbars_peaks:
-            thumbnail_tasks.append((peak['tag'], peak['tagValue'], peak['timestamp'], 'color_bars_evaluation'))
-
-    total_thumbs = len(thumbnail_tasks)
-    for i, (tag, tagValue, timestamp, profile_name) in enumerate(thumbnail_tasks):
-        thumb_path = generate_thumbnail_for_failure(
-            video_path,
-            tag,
-            tagValue,
-            timestamp,
-            profile_name,
-            thumbPath
-        )
-        if thumb_path:
-            thumb_key = f"Failed frame \n\n{tag}:{tagValue}\n\n{timestamp}"
-            generated_thumbs[thumb_key] = (thumb_path, tag, timestamp)
-        if signals and total_thumbs > 0:
-            signals.report_progress.emit(1 + int(9 * (i + 1) / total_thumbs))
-
-    # Attach the generated thumbnail paths to their peaks for the eval-bars timeline
-    for peak in colorbars_peaks:
-        thumb_key = f"Failed frame \n\n{peak['tag']}:{peak['tagValue']}\n\n{peak['timestamp']}"
-        if thumb_key in generated_thumbs:
-            peak['thumb_path'] = generated_thumbs[thumb_key][0]
-
-    # Merge with existing thumbs (for things like color bars detection)
-    existing_thumbs = find_qct_thumbs(report_directory)
-    thumbs_dict = {**existing_thumbs, **generated_thumbs}
-
-    if signals:
-        signals.report_progress.emit(10)
-
-    # Sort thumbs_dict as before
-    sorted_thumbs_dict = {}
-    for key in sorted(thumbs_dict.keys(), key=lambda x: (parse_profile(thumbs_dict[x][1]), parse_timestamp(thumbs_dict[x][2]))):
-        sorted_thumbs_dict[key] = thumbs_dict[key]
-
-    if check_cancelled():
-        return
-    
-    # Modified to get MediaConch policy content
-    (exiftool_output_path, mediainfo_output_path, ffprobe_output_path,
-     mediaconch_csv, fixity_sidecar, fixity_summary_json,
-     mediaconch_policy_content,
-     mediaconch_policy_name) = find_qc_metadata(destination_directory)
-
-    if check_cancelled():
-        return
-
-    if signals:
-        signals.report_progress.emit(15)
-
-    # Find frame analysis outputs
-    frame_outputs = find_frame_analysis_outputs(
-        os.path.dirname(html_report_path),  # source_directory
-        destination_directory,
-        video_id
-    )
-    
-    # Generate frame analysis HTML section
-    frame_analysis_html = generate_frame_analysis_html(frame_outputs, video_id) if frame_outputs else ""
-
-    # Initialize and create html from 
-    mc_csv_html, mediaconch_csv_filename = prepare_file_section(mediaconch_csv, lambda path: csv_to_html_table(path, style_mismatched=False, mismatch_color="#ffbaba", match_color="#d2ffed", check_fail=True))
-    diff_csv_html, difference_csv_filename = prepare_file_section(difference_csv, lambda path: csv_to_html_table(path, style_mismatched=True, mismatch_color="#ffbaba", match_color="#d2ffed", check_fail=False))
-    exif_file_content, exif_file_filename = prepare_file_section(exiftool_output_path)
-    mi_file_content, mi_file_filename = prepare_file_section(mediainfo_output_path)
-    ffprobe_file_content, ffprobe_file_filename = prepare_file_section(ffprobe_output_path)
-    fixity_file_content, fixity_file_filename = prepare_file_section(fixity_sidecar)
-    fixity_html = make_fixity_section_html(fixity_summary_json, fixity_file_content)
-
-    # Get qct-parse thumbs if they exists
-    thumbs_dict = find_qct_thumbs(report_directory)
-
-    if profile_fails_csv:
-        profile_fails_csv_path = os.path.join(report_directory, profile_fails_csv)
-        failureInfoSummary_profile = summarize_failures(profile_fails_csv_path)
-    else:
-        failureInfoSummary_profile = None
-
-    if tag_fails_csv:
-        tag_fails_csv_path = os.path.join(report_directory, tag_fails_csv)
-        failureInfoSummary_tags = summarize_failures(tag_fails_csv_path)
-    else:
-        failureInfoSummary_tags = None
-
-    if colorbars_eval_fails_csv:
-        colorbars_eval_fails_csv_path = os.path.join(report_directory, colorbars_eval_fails_csv)
-        failureInfoSummary_colorbars = summarize_failures(colorbars_eval_fails_csv_path)
-    else:
-        failureInfoSummary_colorbars = None
-
-    if check_cancelled():
-        return
-
-    # Detected bars runs (head + additional). These are the regions the bars
-    # evaluation skips, so the timeline shades them; the windowed graphs below
-    # reuse the same parse for their timecode labels.
-    qct_duration_runs = _parse_bars_durations_csv(qctools_colorbars_duration_output)
-    bars_regions = [(bars_start, bars_end) for _, bars_start, bars_end in qct_duration_runs]
-
-    # Create graphs for all existing csv files (existing code...)
-    # The timeline renders as its own titled section below the evaluation pies,
-    # so it stays a separate variable rather than being folded into
-    # colorbars_eval_html.
-    colorbars_timeline_html = None
-    if qctools_bars_eval_check_output and failureInfoSummary_colorbars:
-        # Pies summarize the per-tag failure share; the timeline below them
-        # carries the failure specifics (distribution + peak thumbnails)
-        colorbars_eval_html = make_profile_piecharts(qctools_bars_eval_check_output, thumbs_dict, failureInfoSummary_colorbars, video_id, failure_csv_path=colorbars_eval_fails_csv_path, check_cancelled=check_cancelled, failure_details=False)
-        colorbars_timeline_html = make_eval_bars_timeline_html(
-            colorbars_eval_fails_csv_path, video_id, peaks=colorbars_peaks,
-            video_duration=eval_video_duration, frame_rate=eval_video_fps,
-            analysis_periods=get_frame_analysis_periods(frame_outputs),
-            black_segments=get_frame_analysis_black_segments(frame_outputs),
-            bars_regions=bars_regions)
-    elif qctools_bars_eval_check_output and failureInfoSummary_colorbars is None:
-       color_bars_segment = f"""
-        <div style="display: flex; flex-direction: column; align-items: start; background-color: #f5e9e3; padding: 10px;"> 
-            <p><b>All QCTools values of the video file are within the median values of the color bars.</b></p>
-        </div>
-        """
-       colorbars_eval_html = f"""
-        <div style="display:inline-block; margin-right: 10px; padding-bottom: 20px;">  
-            {color_bars_segment}
-        </div>
-        """
-    else:
-        colorbars_eval_html = None
-
-    # How the color-bars evaluation graded content, which drives the section
-    # headers and whether an info box accompanies the graph:
-    #   - "detected" reference, bars found -> detected-vs-SMPTE graph only
-    #   - "detected" reference, no bars    -> SMPTE fallback, info box only
-    #   - "smpte" reference, bars found    -> graph + "SMPTE selected" info box
-    #   - "smpte" reference, no bars       -> "SMPTE selected" info box only
-    # smpte_reference: SMPTE values were the evaluation reference (drives the
-    # "Values relative to ... thresholds" header). colorbars_box_only: the
-    # colorbars_html is just an info box with no graph (drives the graph
-    # section header).
-    smpte_selected_box = """
-                <div style="background-color: #fff3cd; padding: 15px; border: 1px solid #856404; margin: 10px 0; border-radius: 5px;">
-                    <p style="margin: 0; color: #856404;">Evaluation was performed against standard SMPTE color bar values (selected reference).</p>
-                </div>
-                """
-    smpte_reference = False
-    colorbars_box_only = False
-    if colorbars_values_output:
-        try:
-            with open(colorbars_values_output, 'r') as f:
-                first_line = f.readline().strip()
-            if first_line == "SMPTE_FALLBACK":
-                smpte_reference = True
-                colorbars_box_only = True
-                colorbars_html = """
-                <div style="background-color: #fff3cd; padding: 15px; border: 1px solid #856404; margin: 10px 0; border-radius: 5px;">
-                    <p style="margin: 0; color: #856404;"><strong>No color bars detected.</strong> Evaluation was performed using standard SMPTE color bar values.</p>
-                </div>
-                """
-            elif first_line == "SMPTE_SELECTED":
-                smpte_reference = True
-                colorbars_box_only = True
-                colorbars_html = smpte_selected_box
-            else:
-                # Real detected-vs-SMPTE comparison CSV -> render the graph.
-                graph_html = make_color_bars_graphs(video_id, qctools_colorbars_duration_output, colorbars_values_output, thumbs_dict)
-                evaluate_reference = config_mgr.get_config('checks', ChecksConfig).tools.qct_parse.evaluateBarsReference
-                if evaluate_reference == 'smpte':
-                    # SMPTE was the evaluation reference but bars were detected:
-                    # show the informational graph with the "SMPTE selected" box
-                    # below it.
-                    smpte_reference = True
-                    colorbars_html = (graph_html or "") + smpte_selected_box
-                else:
-                    colorbars_html = graph_html
-        except Exception as e:
-            logger.error(f"Error reading colorbars values file: {e}")
-            colorbars_html = None
-    else:
-        colorbars_html = None
-
-    # Render bar graphs for windowed (mid-file) bars regions.
-    # Build a lookup of region label → duration string from the qct-parse
-    # bars durations CSV (parsed above) so each graph shows the correct timecodes.
-    windowed_duration_lookup = {}
-    for label, start_s, end_s in qct_duration_runs:
-        def _fmt(seconds):
-            h = int(seconds // 3600)
-            m = int((seconds % 3600) // 60)
-            s = seconds - (h * 3600) - (m * 60)
-            return f"{h:02d}:{m:02d}:{s:06.3f}"
-        windowed_duration_lookup[label] = f"{_fmt(start_s)} - {_fmt(end_s)}"
-
-    windowed_colorbars_html_list = []
-    for wv_path in sorted(windowed_colorbars_values):
-        try:
-            region_name = os.path.basename(wv_path).replace("qct-parse_colorbars_values_", "").replace(".csv", "")
-            dur_str = windowed_duration_lookup.get(region_name)
-            idx_str = region_name.replace("additional-", "")
-            wv_html = make_color_bars_graphs(
-                video_id, qctools_colorbars_duration_output, wv_path, thumbs_dict,
-                duration_override=dur_str,
-                bars_label=f'{video_id} Additional Bars',
-                thumb_profile_filter=f'additional_bars_{idx_str}',
-            )
-            if wv_html:
-                windowed_colorbars_html_list.append((region_name, wv_html))
-        except Exception as e:
-            logger.error(f"Error rendering windowed bars graph for {wv_path}: {e}")
-
-    if qctools_profile_check_output and failureInfoSummary_profile:
-        profile_summary_html = make_profile_piecharts(qctools_profile_check_output, thumbs_dict, failureInfoSummary_profile, video_id, failure_csv_path=profile_fails_csv_path, check_cancelled=check_cancelled)
-    else:
-        profile_summary_html = None
-
-    if qctools_content_check_outputs:
-        content_summary_html_list = []
-        for output_csv in qctools_content_check_outputs:
-            content_summary_html = make_content_summary_html(output_csv, thumbs_dict, paper_bgcolor='#f5e9e3')
-            content_summary_html_list.append(content_summary_html)
-    else:
-        content_summary_html_list = None
-
-    if tags_check_output and failureInfoSummary_tags:
-        tags_summary_html = make_profile_piecharts(tags_check_output, thumbs_dict, failureInfoSummary_tags, video_id, failure_csv_path=tag_fails_csv_path, check_cancelled=check_cancelled)
-    else:
-        tags_summary_html = None
-
-    # Side-by-side comparison of qct-parse and CLAMS bars detectors. None
-    # unless at least one of the two CSVs is present.
-    bars_comparison_html = make_bars_detection_comparison_html(
-        qctools_colorbars_duration_output,
-        clams_bars_durations_csv,
-    ) if clams_bars_durations_csv else None
-
-    # CLAMS tone detection results.
-    tone_detection_html = make_tone_detection_html(clams_tone_durations_csv)
-    mkvalidator_html = make_mkvalidator_html(mkvalidator_summary_path, mkvalidator_clusters_csv, video_path)
-
-    audio_clipping_html = make_audio_clipping_html(audio_clipping_csv) if audio_clipping_csv else None
-    channel_imbalance_html = make_channel_imbalance_html(channel_imbalance_csv) if channel_imbalance_csv else None
-    identical_channels_html = make_identical_channels_html(identical_channels_csv) if identical_channels_csv else None
-    audible_timecode_html = make_audible_timecode_html(audible_timecode_csv) if audible_timecode_csv else None
-    audio_dropout_html = make_audio_dropout_html(audio_dropout_csv) if audio_dropout_csv else None
-    clamped_levels_html = make_clamped_levels_html(clamped_levels_csv, clamped_traces_csv) if clamped_levels_csv else None
-    chroma_phase_html = make_chroma_phase_html(chroma_phase_summary_csv, chroma_phase_events_csv) if chroma_phase_summary_csv else None
-    tone_leak_html = make_tone_leak_html(tone_leak_summary_csv, tone_leak_events_csv) if tone_leak_summary_csv else None
-    dropped_sample_html = generate_dropped_sample_html(frame_outputs) if frame_outputs else ""
-    duplicate_frame_html = generate_duplicate_frame_html(frame_outputs) if frame_outputs else ""
-    bitplane_html = generate_bitplane_html(frame_outputs) if frame_outputs else ""
-
-    existing_thumbs = find_qct_thumbs(report_directory)
-    no_qct_parse_files = (
-        not profile_fails_csv and
-        not tag_fails_csv and
-        not colorbars_eval_fails_csv and
-        not audio_clipping_csv and
-        not channel_imbalance_csv and
-        not identical_channels_csv and
-        not audible_timecode_csv and
-        not audio_dropout_csv and
-        not clamped_levels_csv and
-        not chroma_phase_summary_csv and
-        not tone_leak_summary_csv and
-        not existing_thumbs
-    )
-
-    if check_cancelled():
-        return
-
-    # Embed logo as a data URI so the report renders self-contained.
-    logo_image_path = image_to_data_uri(config_mgr.get_logo_path('av_spex_the_logo.png'))
-    if signals:
-        signals.report_progress.emit(20)
-
-    # Generate a color strip from the video, fall back to the static eq image
-    color_strip_b64 = None
-    if video_path:
-        color_strip_b64 = generate_color_strip_base64(video_path, signals=signals, progress_start=22, progress_end=25)
-    if signals:
-        signals.report_progress.emit(25)
- 
-    if color_strip_b64:
-        # Store the data URI once in a hidden element, reference it via JS
-        color_strip_src = f"data:image/jpeg;base64,{color_strip_b64}"
-        color_strip_store = (
-            f'<img id="color-strip-data" src="{color_strip_src}" '
-            f'alt="Color strip" class="color-strip-divider">'
-        )
-        # Subsequent uses clone the src from the stored element
-        color_strip_divider = (
-            '<img class="color-strip-divider color-strip-clone" alt="Color strip">'
-        )
-        color_strip_init_script = """
-        <script>
-        (function() {
-            var src = document.getElementById('color-strip-data').src;
-            var clones = document.getElementsByClassName('color-strip-clone');
-            for (var i = 0; i < clones.length; i++) { clones[i].src = src; }
-        })();
-        </script>"""
-    else:
-        # Fallback: use the static eq image as before
-        eq_image_path = image_to_data_uri(config_mgr.get_logo_path('germfree_eq.png'))
-        color_strip_src = eq_image_path
-        color_strip_store = (
-            f'<img src="{eq_image_path}" alt="AV Spex Graphic EQ Logo" '
-            f'style="width: 10%">'
-        )
-        color_strip_divider = color_strip_store
-        color_strip_init_script = ""
-
-    # Generate audio waveform
-    waveform_b64 = None
-    if video_path:
-        waveform_b64 = generate_audio_waveform_base64(video_path, signals=signals, progress_start=25, progress_end=95)
-
-    if waveform_b64:
-        # Note: Using class "waveform-data-store" to target via JS
-        waveform_store = (
-            f'<img class="waveform-data-store" src="data:image/jpeg;base64,{waveform_b64}" '
-            f'style="display: none;">'
-        )
-        
-        # Divider: The placeholder that will be cloned by the script
-        waveform_divider = (
-            '<div style="margin: 20px 0; text-align: center;">'
-            '<img class="waveform-clone" style="width: 100%; height: auto; border: 1px solid #378d6a;">'
-            '</div>'
-        )
-        
-        # JavaScript: Finds all clones and populates them with the source data
-        waveform_init_script = """
-        <script>
-        (function() {
-            var src = document.querySelector('.waveform-data-store').src;
-            var clones = document.querySelectorAll('.waveform-clone');
-            for (var i = 0; i < clones.length; i++) {
-                clones[i].src = src;
-            }
-        })();
-        </script>"""
-    else:
-        # Fallback: If generation fails, use the static logo as a divider (similar to eq_image_path)
-        eq_image_path = image_to_data_uri(config_mgr.get_logo_path('germfree_eq.png'))
-        waveform_store = f'<img src="{eq_image_path}" alt="AV Spex Logo" style="width: 10%; display: none;">'
-        waveform_divider = f'<div style="text-align: center;"><img src="{eq_image_path}" style="width: 10%;"></div>'
-        waveform_init_script = ""
-
-    # Build a "Jump to section" table of contents from the conditional flags
-    # computed above. Each entry is (anchor_id, label). Order matches the
-    # render order below, so sections are listed the way they appear.
-    _has_audio_results = bool(
-        audio_clipping_html or channel_imbalance_html
-        or identical_channels_html
-        or audible_timecode_html or audio_dropout_html
-        or tone_leak_html
-    )
-    toc_entries = []
-    if fixity_html:
-        toc_entries.append(('section-fixity', 'Fixity'))
-    if mediaconch_csv:
-        toc_entries.append(('section-mediaconch-csv', 'MediaConch CSV'))
-    if mediaconch_policy_content and mediaconch_policy_name:
-        toc_entries.append(('section-mediaconch-policy', 'MediaConch Policy'))
-    if mkvalidator_html:
-        toc_entries.append(('section-mkvalidator', 'mkvalidator'))
-    if frame_analysis_html:
-        # Link to the individual frame-analysis subsections rather than the
-        # section heading; only list the ones that were actually rendered
-        frame_subsections = [
-            ('section-border-detection', 'Border Detection'),
-            ('section-signalstats', 'Signalstats Analysis'),
-            ('section-brng-analysis', 'BRNG Violation Analysis'),
-        ]
-        rendered = [
-            (anchor, label) for anchor, label in frame_subsections
-            if f"id='{anchor}'" in frame_analysis_html
-        ]
-        if rendered:
-            toc_entries.extend(rendered)
-        else:
-            toc_entries.append(('section-frame-analysis', 'Frame Analysis Results'))
-    if bitplane_html:
-        toc_entries.append(('section-bitplane', 'Bitplane Check'))
-    if duplicate_frame_html:
-        toc_entries.append(('section-duplicate-frame', 'Duplicate Frame Detection'))
-    if no_qct_parse_files:
-        toc_entries.append(('section-qct-parse-notice', 'QCT-Parse Analysis'))
-    if colorbars_html:
-        toc_entries.append(('section-colorbars', 'Color Bars Detection'))
-    for region_name, _ in windowed_colorbars_html_list:
-        toc_entries.append((f'section-colorbars-{region_name}', 'Additional Color Bars'))
-    if bars_comparison_html or tone_detection_html:
-        toc_entries.append(('section-clams-detection', 'CLAMS Detection'))
-    if colorbars_eval_html:
-        toc_entries.append(('section-colorbars-eval', 'Colorbars Threshold Evaluation'))
-    if colorbars_timeline_html:
-        toc_entries.append(('section-timeline', 'Timeline of Signal Distribution'))
-    if clamped_levels_html:
-        toc_entries.append(('section-clamped-levels', 'Clamped Levels Detection'))
-    if chroma_phase_html:
-        toc_entries.append(('section-chroma-phase', 'Chroma Phase Detection'))
-    if _has_audio_results:
-        toc_entries.append(('section-audio-analysis', 'Audio Analysis Results'))
-    if dropped_sample_html:
-        toc_entries.append(('section-dropped-sample', 'Dropped Sample Detection'))
-    if difference_csv:
-        toc_entries.append(('section-difference-csv', 'Difference CSV'))
-    if profile_summary_html:
-        toc_entries.append(('section-profile-summary', 'QCT-Parse Profile Summary'))
-    if tags_summary_html:
-        toc_entries.append(('section-tags-summary', 'QCT-Parse Tag Check Summary'))
-    if content_summary_html_list:
-        toc_entries.append(('section-content-summary', 'QCT-Parse Content Detection'))
-    if exiftool_output_path:
-        toc_entries.append(('section-exiftool', 'ExifTool Output'))
-    if mediainfo_output_path:
-        toc_entries.append(('section-mediainfo', 'MediaInfo Output'))
-    if ffprobe_output_path:
-        toc_entries.append(('section-ffprobe', 'FFprobe Output'))
-
-    if toc_entries:
-        toc_links = ''.join(
-            f'<li style="margin: 0;">'
-            f'<a class="toc-pill" href="#{anchor}">{label}</a></li>'
-            for anchor, label in toc_entries
-        )
-        toc_html = (
-            '<nav aria-label="Report sections" '
-            'style="background-color: #f5e9e3; border: 1px solid #4d2b12; '
-            'border-radius: 4px; padding: 14px 18px; margin: 18px 0;">'
-            '<p style="font-weight: bold; margin: 0 0 10px 0; color: #4d2b12; '
-            'font-size: 14px;">Jump to section</p>'
-            '<ul style="list-style: none; padding: 0; margin: 0; '
-            'display: flex; flex-wrap: wrap; gap: 8px;">'
-            f'{toc_links}'
-            '</ul></nav>'
-        )
-    else:
-        toc_html = ''
-
-    # HTML template with JavaScript functions
-    html_template = f"""
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>AV Spex Report</title>
-        <style>
-            body {{
-                font-family: Arial, sans-serif;
-                background-color: #fcfdff;
-                color: #011054;
-                margin: 30px;
-            }}
-            h1 {{
-                font-size: 24px;
-                text-align: center;
-                margin-top: 20px;
-                color: #378d6a;
-            }}
-            h2 {{
-                font-size: 20px;
-                font-weight: bold;
-                margin-top: 30px;
-                color: #0a5f1c;
-                text-decoration: underline;
-            }}
-            h3 {{
-                font-size: 18px;
-                margin-top: 20px;
-                color: #bf971b;
-            }}
-            table {{
-                border-collapse: collapse;
-                margin-top: 10px;
-                margin-bottom: 20px;
-                border: 2px solid #4d2b12;
-            }}
-            th, td {{
-                border: 1.5px solid #4d2b12;
-                padding: 8px;
-                text-align: left;
-            }}
-            th {{
-                background-color: #fbe4eb;
-                font-weight: bold;
-            }}
-            pre {{
-                background-color: #f5e9e3;
-                border: 1px solid #4d2b12;
-                padding: 10px;
-                white-space: pre-wrap;
-                word-wrap: break-word;
-            }}
-            .xml-content {{
-                background-color: #f8f9fa;
-                border: 1px solid #6c757d;
-                padding: 15px;
-                white-space: pre-wrap;
-                word-wrap: break-word;
-                font-family: 'Courier New', monospace;
-                font-size: 12px;
-                max-height: 400px;
-                overflow-y: auto;
-            }}
-            .metadata-content {{
-                background-color: #f5e9e3;
-                border: 1px solid #4d2b12;
-                padding: 10px;
-                white-space: pre-wrap;
-                word-wrap: break-word;
-                font-family: monospace;
-                max-height: 400px;
-                overflow-y: auto;
-            }}
-            .color-strip-divider {{
-                display: block;
-                width: 100%;
-                height: auto;
-                margin: 25px 0;
-                border-radius: 3px;
-                image-rendering: pixelated;          /* Chrome/Edge */
-                image-rendering: crisp-edges;         /* Firefox */
-                -ms-interpolation-mode: nearest-neighbor; /* legacy IE */
-            }}
-            .cell-match {{
-                background-color: #d2ffed;
-            }}
-            .cell-mismatch {{
-                background-color: #ff9999;
-            }}
-            [id^="section-"] {{
-                scroll-margin-top: 16px;
-            }}
-            .toc-pill {{
-                display: inline-block;
-                padding: 6px 14px;
-                background-color: #fcfdff;
-                color: #378d6a;
-                border: 1px solid #378d6a;
-                border-radius: 999px;
-                text-decoration: none;
-                font-size: 13px;
-                font-weight: 500;
-                transition: background-color 0.15s ease, color 0.15s ease;
-            }}
-            .toc-pill:hover,
-            .toc-pill:focus {{
-                background-color: #378d6a;
-                color: #fcfdff;
-                outline: none;
-            }}
-        </style>
-        <script>
-        function openImage(imgData, caption) {{
-            var newWindow = window.open('', '_blank');
-            newWindow.document.write('<html><head><title>' + caption + '</title></head><body style="margin:0; background:#000; display:flex; align-items:center; justify-content:center; height:100vh;">');
-            newWindow.document.write('<img src="' + imgData + '" style="max-width:100%; max-height:100%; object-fit:contain;">');
-            newWindow.document.write('</body></html>');
-            newWindow.document.close();
-        }}
-
-        function toggleTable(tagId) {{
-            var table = document.getElementById('table_' + tagId);
-            var link = document.getElementById('link_' + tagId);
-            if (table.style.display === 'none') {{
-                table.style.display = 'block';
-                link.textContent = 'Hide all failures ▲';
-            }} else {{
-                table.style.display = 'none';
-                link.textContent = 'Show all failures ▼';
-            }}
-        }}
-
-        function toggleContent(contentId, showText, hideText) {{
-            var content = document.getElementById(contentId);
-            var link = document.getElementById('link_' + contentId);
-            if (content.style.display === 'none') {{
-                content.style.display = 'block';
-                link.textContent = hideText;
-            }} else {{
-                content.style.display = 'none';
-                link.textContent = showText;
-            }}
-        }}
-        </script>
-        <img src="{logo_image_path}" alt="AV Spex Logo" style="display: block; margin-left: auto; margin-right: auto; width: 25%; margin-top: 20px;">
-    </head>
-    <body>
-        <h1>AV Spex Report</h1>
-        <h2>{video_id}</h2>
-        {color_strip_store}
-        {waveform_store}
-        {toc_html}
-    """
-
-    if check_cancelled():
-        return
-
-    if fixity_html:
-        html_template += f"""
-        <h3 id="section-fixity">Fixity</h3>
-        {fixity_html}
-        """
-
-    if mediaconch_csv:
-        html_template += f"""
-        <h3 id="section-mediaconch-csv">{mediaconch_csv_filename}</h3>
-        {mc_csv_html}
-        """
-
-    # Add MediaConch policy section if available - NOW WITH COLLAPSIBLE FUNCTIONALITY
-    if mediaconch_policy_content and mediaconch_policy_name:
-        html_template += f"""
-        <h3 id="section-mediaconch-policy">MediaConch Policy File: {mediaconch_policy_name}</h3>
-        <a id="link_mediaconch_policy" href="javascript:void(0);" onclick="toggleContent('mediaconch_policy', 'Show policy content ▼', 'Hide policy content ▲')" style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block;">Show policy content ▼</a>
-        <div id="mediaconch_policy" class="xml-content" style="display: none;">{mediaconch_policy_content}</div>
-        """
-
-    if mkvalidator_html:
-        html_template += f"""
-        <h3 id="section-mkvalidator">mkvalidator</h3>
-        {mkvalidator_html}
-        """
-
-    if frame_analysis_html:
-        html_template += frame_analysis_html
-
-    # Bitplane check and duplicate frame detection render side-by-side so
-    # each fills the vertical space of the taller section.
-    if bitplane_html or duplicate_frame_html:
-        html_template += (
-            '<div style="display: flex; flex-wrap: wrap; gap: 24px; '
-            'align-items: flex-start; margin-top: 20px;">'
-        )
-        if bitplane_html:
-            html_template += (
-                '<div id="section-bitplane" style="flex: 1 1 380px; min-width: 0;">'
-                f'{bitplane_html}</div>'
-            )
-        if duplicate_frame_html:
-            html_template += (
-                '<div id="section-duplicate-frame" '
-                'style="flex: 2 1 600px; min-width: 0; overflow-x: auto;">'
-                f'{duplicate_frame_html}</div>'
-            )
-        html_template += '</div>'
-
-    if frame_analysis_html or bitplane_html or duplicate_frame_html:
-        html_template += color_strip_divider
-
-    # Rest of the HTML template remains the same...
-    if no_qct_parse_files:
-        html_template += """
-        <h3 id="section-qct-parse-notice">QCT-Parse Analysis</h3>
-        <div style="background-color: #fff3cd; padding: 15px; border: 1px solid #856404; margin: 10px 0; border-radius: 5px;">
-            <p style="margin: 0; color: #856404;"><strong>Information:</strong> QCT-Parse analysis was not performed for this video. Quality control analysis sections are not available in this report.</p>
-        </div>
-        """
-
-    if colorbars_html or windowed_colorbars_html_list:
-        html_template += '<div style="display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start;">'
-        if colorbars_html:
-            if colorbars_box_only:
-                colorbars_header = "Color Bars Detection"
-            else:
-                colorbars_header = f"SMPTE Colorbars vs {video_id} Colorbars"
-            html_template += f"""
-            <div id="section-colorbars" style="flex: 1 1 720px; max-width: 100%; min-width: 0; overflow: hidden;">
-                <h3>{colorbars_header}</h3>
-                {colorbars_html}
-            </div>"""
-        for region_name, wv_html in windowed_colorbars_html_list:
-            html_template += f"""
-            <div id="section-colorbars-{region_name}" style="flex: 1 1 720px; max-width: 100%; min-width: 0; overflow: hidden;">
-                <h3>SMPTE Colorbars vs Additional {video_id} Colorbars</h3>
-                {wv_html}
-            </div>"""
-        html_template += '</div>'
-
-    if bars_comparison_html or tone_detection_html:
-        html_template += '<h3 id="section-clams-detection">CLAMS Detection</h3>'
-        html_template += """
+# Static methodology copy for the CLAMS Detection section. Held as a module
+# constant rather than inline so the assembly code below stays readable.
+CLAMS_METHODOLOGY_HTML = """
         <a id="link_clams_methodology" href="javascript:void(0);"
            onclick="toggleContent('clams_methodology', 'What is CLAMS Detection? ▼', 'What is CLAMS Detection? ▲')"
-           style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
+           style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block; font-size: 13px;">
            What is CLAMS Detection? ▼</a>
-        <div id="clams_methodology" style="display: none; background-color: #f8f6f3; padding: 14px 16px;
-             margin: 0 0 16px 0; border: 1px solid #e0d0c0; border-radius: 4px; font-size: 13px; line-height: 1.5;">
+        <div id="clams_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px;
+             margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
             <p style="margin: 0 0 10px 0;">
                 <strong>CLAMS</strong> (Computational Linguistics Applications for Multimedia Services) is an
                 open-source project led by Brandeis University that builds reusable tools for analyzing
                 audiovisual collections. AV Spex adapts two CLAMS apps —
-                <a href="https://github.com/clamsproject/app-barsdetection" style="color: #378d6a;">app-barsdetection</a>
-                and <a href="https://github.com/clamsproject/app-tonedetection" style="color: #378d6a;">app-tonedetection</a> —
+                <a href="https://github.com/clamsproject/app-barsdetection" style="color: var(--report-accent);">app-barsdetection</a>
+                and <a href="https://github.com/clamsproject/app-tonedetection" style="color: var(--report-accent);">app-tonedetection</a> —
                 porting just their detection cores into the AV Spex pipeline. Both upstream apps are
                 distributed under the Apache License 2.0.
             </p>
@@ -7100,188 +6388,1171 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
                 the head re-check and the consensus arbitration read.
             </p>
         </div>
-        """
-        if bars_comparison_html:
-            html_template += f"""
-            <h4 style="font-size: 16px; margin-top: 16px; color: #4d2b12;">Bars Detection (qct-parse vs CLAMS SSIM)</h4>
-            {bars_comparison_html}
-            """
-        if tone_detection_html:
-            html_template += f"""
-            <h4 style="font-size: 16px; margin-top: 16px; color: #4d2b12;">Tone Detection</h4>
-            {tone_detection_html}
-            """
+"""
 
-    if colorbars_eval_html:
-        if smpte_reference:
+
+def _build_toc_html(toc_entries):
+    """Render the "Jump to section" nav from (anchor, label) pairs."""
+    if toc_entries:
+        toc_links = ''.join(
+            f'<li style="margin: 0;">'
+            f'<a class="toc-pill" href="#{anchor}">{label}</a></li>'
+            for anchor, label in toc_entries
+        )
+        toc_html = (
+            '<nav aria-label="Report sections" '
+            'style="background-color: var(--report-paper); border: 1px solid var(--report-ink); '
+            'border-radius: 4px; padding: 14px 18px; margin: 18px 0;">'
+            '<p style="font-weight: bold; margin: 0 0 10px 0; color: var(--report-ink); '
+            'font-size: 14px;">Jump to section</p>'
+            '<ul style="list-style: none; padding: 0; margin: 0; '
+            'display: flex; flex-wrap: wrap; gap: 8px;">'
+            f'{toc_links}'
+            '</ul></nav>'
+        )
+    else:
+        toc_html = ''
+    return toc_html
+
+
+def _undefined_style_tokens(html):
+    """Palette tokens referenced by the markup but never defined in :root.
+
+    An undefined CSS variable does not error — the declaration is simply
+    dropped and the element inherits, so a typo'd token name is a silent
+    cosmetic failure. This catches that the same way _dangling_toc_anchors
+    catches a nav link pointing nowhere.
+    """
+    root = re.search(r':root \{(.*?)\}', html, re.S)
+    defined = set(re.findall(r'--(report-[\w-]+)\s*:', root.group(1))) if root else set()
+    used = set(re.findall(r'var\(--(report-[\w-]+)\)', html))
+    return sorted(used - defined)
+
+
+def _dangling_toc_anchors(sections):
+    """TOC anchors with no matching element id anywhere in the assembled body.
+
+    Building the nav from the section list guarantees the two agree on order
+    and on which sections appear. It cannot guarantee that an anchor *string*
+    matches the id actually written into that section's markup — a typo in
+    either half still produces a link that scrolls nowhere. This catches that.
+    """
+    body = ''.join(section.html for section in sections)
+    return [
+        anchor
+        for section in sections
+        for anchor, _label in section.toc
+        if f'id="{anchor}"' not in body and f"id='{anchor}'" not in body
+    ]
+
+
+def _report_head_html(video_id, logo_image_path, color_strip_store, waveform_store, toc_html):
+    """The document head: styles, scripts, masthead and the TOC nav."""
+    return f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>AV Spex Report</title>
+        <style>
+            /* Report palette. Defined once here and referenced as var(...)
+               from the section markup, so a color change is a one-line edit.
+               Plotly figure colors are passed to the charting library as
+               config rather than CSS, so those stay literal — see
+               _WAVEFORM_CHANNEL_COLORS and the *_status_colors helpers. */
+            :root {{
+                --report-accent: #378d6a;
+                --report-border: #d0c0b0;
+                --report-border-soft: #e0d0c0;
+                --report-danger: #dc3545;
+                --report-gold: #bf971b;
+                --report-ink: #4d2b12;
+                --report-notice-bg: #fff3cd;
+                --report-notice-ink: #856404;
+                --report-panel: #f8f6f3;
+                --report-paper: #f5e9e3;
+                --report-success: #0a5f1c;
+                --report-surface: #f2f2f2;
+            }}
+            body {{
+                font-family: Arial, sans-serif;
+                background-color: #fcfdff;
+                color: #011054;
+                margin: 30px;
+            }}
+            h1 {{
+                font-size: 24px;
+                text-align: center;
+                margin-top: 20px;
+                color: var(--report-accent);
+            }}
+            h2 {{
+                font-size: 20px;
+                font-weight: bold;
+                margin-top: 30px;
+                color: var(--report-success);
+                text-decoration: underline;
+            }}
+            h3 {{
+                font-size: 18px;
+                margin-top: 20px;
+                color: var(--report-gold);
+            }}
+            table {{
+                border-collapse: collapse;
+                margin-top: 10px;
+                margin-bottom: 20px;
+                border: 2px solid var(--report-ink);
+            }}
+            th, td {{
+                border: 1.5px solid var(--report-ink);
+                padding: 8px;
+                text-align: left;
+            }}
+            th {{
+                background-color: #fbe4eb;
+                font-weight: bold;
+            }}
+            pre {{
+                background-color: var(--report-paper);
+                border: 1px solid var(--report-ink);
+                padding: 10px;
+                white-space: pre-wrap;
+                word-wrap: break-word;
+            }}
+            .xml-content {{
+                background-color: #f8f9fa;
+                border: 1px solid #6c757d;
+                padding: 15px;
+                white-space: pre-wrap;
+                word-wrap: break-word;
+                font-family: 'Courier New', monospace;
+                font-size: 12px;
+                max-height: 400px;
+                overflow-y: auto;
+            }}
+            .metadata-content {{
+                background-color: var(--report-paper);
+                border: 1px solid var(--report-ink);
+                padding: 10px;
+                white-space: pre-wrap;
+                word-wrap: break-word;
+                font-family: monospace;
+                max-height: 400px;
+                overflow-y: auto;
+            }}
+            .color-strip-divider {{
+                display: block;
+                width: 100%;
+                height: auto;
+                margin: 25px 0;
+                border-radius: 3px;
+                image-rendering: pixelated;          /* Chrome/Edge */
+                image-rendering: crisp-edges;         /* Firefox */
+                -ms-interpolation-mode: nearest-neighbor; /* legacy IE */
+            }}
+            .cell-match {{
+                background-color: #d2ffed;
+            }}
+            .cell-mismatch {{
+                background-color: #ff9999;
+            }}
+            [id^="section-"] {{
+                scroll-margin-top: 16px;
+            }}
+            .toc-pill {{
+                display: inline-block;
+                padding: 6px 14px;
+                background-color: #fcfdff;
+                color: var(--report-accent);
+                border: 1px solid var(--report-accent);
+                border-radius: 999px;
+                text-decoration: none;
+                font-size: 13px;
+                font-weight: 500;
+                transition: background-color 0.15s ease, color 0.15s ease;
+            }}
+            .toc-pill:hover,
+            .toc-pill:focus {{
+                background-color: var(--report-accent);
+                color: #fcfdff;
+                outline: none;
+            }}
+        </style>
+        <script>
+        function openImage(imgData, caption) {{
+            var newWindow = window.open('', '_blank');
+            newWindow.document.write('<html><head><title>' + caption + '</title></head><body style="margin:0; background:#000; display:flex; align-items:center; justify-content:center; height:100vh;">');
+            newWindow.document.write('<img src="' + imgData + '" style="max-width:100%; max-height:100%; object-fit:contain;">');
+            newWindow.document.write('</body></html>');
+            newWindow.document.close();
+        }}
+
+        function toggleTable(tagId) {{
+            var table = document.getElementById('table_' + tagId);
+            var link = document.getElementById('link_' + tagId);
+            if (table.style.display === 'none') {{
+                table.style.display = 'block';
+                link.textContent = 'Hide all failures ▲';
+            }} else {{
+                table.style.display = 'none';
+                link.textContent = 'Show all failures ▼';
+            }}
+        }}
+
+        function toggleContent(contentId, showText, hideText) {{
+            var content = document.getElementById(contentId);
+            var link = document.getElementById('link_' + contentId);
+            if (content.style.display === 'none') {{
+                content.style.display = 'block';
+                link.textContent = hideText;
+            }} else {{
+                content.style.display = 'none';
+                link.textContent = showText;
+            }}
+        }}
+        </script>
+        <img src="{logo_image_path}" alt="AV Spex Logo" style="display: block; margin-left: auto; margin-right: auto; width: 25%; margin-top: 20px;">
+    </head>
+    <body>
+        <h1>AV Spex Report</h1>
+        <h2>{video_id}</h2>
+        {color_strip_store}
+        {waveform_store}
+        {toc_html}
+    """
+
+
+def generate_final_report(video_id, source_directory, report_directory, destination_directory,
+                         video_path=None, check_cancelled=None, signals=None):
+    """
+    Generate final HTML report if configured.
+    
+    Args:
+        video_id (str): Unique identifier for the video
+        source_directory (str): Source directory for the video
+        report_directory (str): Directory containing report files
+        destination_directory (str): Destination directory for output files
+        video_path (str, optional): Path to the video file for thumbnail generation
+        check_cancelled (callable, optional): Function to check if cancelled
+        signals (object, optional): Signals for GUI updates
+        
+    Returns:
+        str or None: Path to the generated HTML report, or None
+    """
+    
+    checks_config = config_mgr.get_config('checks', ChecksConfig)
+
+    if not checks_config.outputs.report:
+        return None
+
+    try:
+        html_report_path = os.path.join(source_directory, f'{video_id}_avspex_report.html')
+        
+        # Generate HTML report with video path (no frame_analysis parameter needed)
+        write_html_report(video_id, report_directory, destination_directory, html_report_path,
+                         video_path=video_path, check_cancelled=check_cancelled, signals=signals)
+        
+        logger.info(f"HTML report generated: {html_report_path}\n")
+        if signals:
+            signals.step_completed.emit("Generate Report")
+        return html_report_path
+
+    except Exception as e:
+        logger.critical(f"Error generating HTML report: {e}")
+        import traceback
+        logger.critical(f"Traceback: {traceback.format_exc()}")
+        return None
+
+
+@dataclass
+class ReportInputs:
+    """Everything the report discovers on disk before any markup is built.
+
+    Produced by _gather_report_inputs(); consumed by _build_section_html()
+    and, for a few paths, by the section list itself."""
+    artifacts: Any = None
+    colorbars_peaks: Any = None
+    eval_video_duration: Any = None
+    eval_video_fps: Any = None
+    exiftool_output_path: Any = None
+    ffprobe_output_path: Any = None
+    fixity_sidecar: Any = None
+    fixity_summary_json: Any = None
+    frame_outputs: Any = None
+    mediaconch_csv: Any = None
+    mediaconch_policy_content: Any = None
+    mediaconch_policy_name: Any = None
+    mediainfo_output_path: Any = None
+
+
+@dataclass
+class ReportPieces:
+    """Rendered fragments and page assets that the section list assembles.
+
+    Produced by _build_section_html(). Each field is either a markup string
+    or a small value the section list needs in order to lay the page out."""
+    audible_timecode_html: Any = None
+    audio_clipping_html: Any = None
+    audio_dropout_html: Any = None
+    bars_comparison_html: Any = None
+    bitplane_html: Any = None
+    channel_imbalance_html: Any = None
+    chroma_phase_html: Any = None
+    clamped_levels_html: Any = None
+    color_strip_divider: Any = None
+    color_strip_init_script: Any = None
+    color_strip_store: Any = None
+    colorbars_box_only: Any = None
+    colorbars_eval_html: Any = None
+    colorbars_html: Any = None
+    colorbars_timeline_html: Any = None
+    content_summary_html_list: Any = None
+    diff_csv_html: Any = None
+    difference_csv_filename: Any = None
+    dropped_sample_html: Any = None
+    duplicate_frame_html: Any = None
+    exif_file_content: Any = None
+    exif_file_filename: Any = None
+    ffprobe_file_content: Any = None
+    ffprobe_file_filename: Any = None
+    fixity_html: Any = None
+    frame_analysis_html: Any = None
+    identical_channels_html: Any = None
+    logo_image_path: Any = None
+    mc_csv_html: Any = None
+    mediaconch_csv_filename: Any = None
+    mi_file_content: Any = None
+    mi_file_filename: Any = None
+    mkvalidator_html: Any = None
+    no_qct_parse_files: Any = None
+    profile_summary_html: Any = None
+    smpte_reference: Any = None
+    tags_summary_html: Any = None
+    tone_detection_html: Any = None
+    tone_leak_html: Any = None
+    waveform_divider: Any = None
+    waveform_init_script: Any = None
+    waveform_store: Any = None
+    windowed_colorbars_html_list: Any = None
+
+
+def _gather_report_inputs(video_path, report_directory, destination_directory,
+                          video_id, html_report_path, check_cancelled, signals):
+    """Locate the report's inputs and generate its failure thumbnails.
+
+    Returns None when processing was cancelled part-way.
+    """
+    if signals:
+        signals.report_progress.emit(0)
+
+    artifacts = find_report_csvs(report_directory, destination_directory, video_id)
+
+    if check_cancelled():
+        return
+
+    # Create thumbPath if it doesn't exist
+    thumbPath = os.path.join(report_directory, "ThumbExports")
+    if not os.path.exists(thumbPath):
+        os.makedirs(thumbPath)
+
+    # Collect all thumbnail tasks across all failure types, then generate with progress
+    generated_thumbs = {}
+    thumbnail_tasks = []
+
+    if artifacts.profile_fails_csv and video_path:
+        profile_fails_csv_path = os.path.join(report_directory, artifacts.profile_fails_csv)
+        failureInfoSummary_profile = summarize_failures(profile_fails_csv_path)
+        for timestamp, info_list in failureInfoSummary_profile.items():
+            for info in info_list:
+                thumbnail_tasks.append((info['tag'], info['tagValue'], timestamp, 'threshold_profile'))
+
+    if artifacts.tag_fails_csv and video_path:
+        tag_fails_csv_path = os.path.join(report_directory, artifacts.tag_fails_csv)
+        failureInfoSummary_tags = summarize_failures(tag_fails_csv_path)
+        for timestamp, info_list in failureInfoSummary_tags.items():
+            for info in info_list:
+                thumbnail_tasks.append((info['tag'], info['tagValue'], timestamp, 'tag_check'))
+
+    # Color bars evaluation thumbnails illustrate the peaks of the failure
+    # timeline, so they are picked by failure-cluster density rather than by
+    # worst value (summarize_failures).
+    colorbars_peaks = []
+    eval_video_duration = None
+    eval_video_fps = None
+    if artifacts.colorbars_eval_fails_csv and video_path:
+        colorbars_eval_fails_csv_path = os.path.join(report_directory, artifacts.colorbars_eval_fails_csv)
+        eval_video_duration = _get_video_duration(video_path)
+        eval_video_fps = _get_video_frame_rate(video_path)
+        colorbars_peaks = select_failure_peaks(colorbars_eval_fails_csv_path, duration=eval_video_duration)
+        for peak in colorbars_peaks:
+            thumbnail_tasks.append((peak['tag'], peak['tagValue'], peak['timestamp'], 'color_bars_evaluation'))
+
+    total_thumbs = len(thumbnail_tasks)
+    for i, (tag, tagValue, timestamp, profile_name) in enumerate(thumbnail_tasks):
+        thumb_path = generate_thumbnail_for_failure(
+            video_path,
+            tag,
+            tagValue,
+            timestamp,
+            profile_name,
+            thumbPath
+        )
+        if thumb_path:
+            thumb_key = f"Failed frame \n\n{tag}:{tagValue}\n\n{timestamp}"
+            generated_thumbs[thumb_key] = (thumb_path, tag, timestamp)
+        if signals and total_thumbs > 0:
+            signals.report_progress.emit(1 + int(9 * (i + 1) / total_thumbs))
+
+    # Attach the generated thumbnail paths to their peaks for the eval-bars timeline
+    for peak in colorbars_peaks:
+        thumb_key = f"Failed frame \n\n{peak['tag']}:{peak['tagValue']}\n\n{peak['timestamp']}"
+        if thumb_key in generated_thumbs:
+            peak['thumb_path'] = generated_thumbs[thumb_key][0]
+
+    # Merge with existing thumbs (for things like color bars detection)
+    existing_thumbs = find_qct_thumbs(report_directory)
+    thumbs_dict = {**existing_thumbs, **generated_thumbs}
+
+    if signals:
+        signals.report_progress.emit(10)
+
+    # Sort thumbs_dict as before
+    sorted_thumbs_dict = {}
+    for key in sorted(thumbs_dict.keys(), key=lambda x: (parse_profile(thumbs_dict[x][1]), parse_timestamp(thumbs_dict[x][2]))):
+        sorted_thumbs_dict[key] = thumbs_dict[key]
+
+    if check_cancelled():
+        return
+
+    # Modified to get MediaConch policy content
+    (exiftool_output_path, mediainfo_output_path, ffprobe_output_path,
+     mediaconch_csv, fixity_sidecar, fixity_summary_json,
+     mediaconch_policy_content,
+     mediaconch_policy_name) = find_qc_metadata(destination_directory)
+
+    if check_cancelled():
+        return
+
+    if signals:
+        signals.report_progress.emit(15)
+
+    # Find frame analysis outputs
+    frame_outputs = find_frame_analysis_outputs(
+        os.path.dirname(html_report_path),  # source_directory
+        destination_directory,
+        video_id
+    )
+    return ReportInputs(
+        artifacts=artifacts,
+        colorbars_peaks=colorbars_peaks,
+        eval_video_duration=eval_video_duration,
+        eval_video_fps=eval_video_fps,
+        exiftool_output_path=exiftool_output_path,
+        ffprobe_output_path=ffprobe_output_path,
+        fixity_sidecar=fixity_sidecar,
+        fixity_summary_json=fixity_summary_json,
+        frame_outputs=frame_outputs,
+        mediaconch_csv=mediaconch_csv,
+        mediaconch_policy_content=mediaconch_policy_content,
+        mediaconch_policy_name=mediaconch_policy_name,
+        mediainfo_output_path=mediainfo_output_path,
+    )
+
+
+def _build_section_html(inputs, video_id, video_path, report_directory,
+                        destination_directory, check_cancelled, signals):
+    """Turn the gathered inputs into rendered markup and page assets.
+
+    Returns None when processing was cancelled part-way.
+    """
+
+    frame_analysis_html = generate_frame_analysis_html(inputs.frame_outputs, video_id) if inputs.frame_outputs else ""
+
+    # Initialize and create html from 
+    mc_csv_html, mediaconch_csv_filename = prepare_file_section(inputs.mediaconch_csv, lambda path: csv_to_html_table(path, style_mismatched=False, mismatch_color="#ffbaba", match_color="#d2ffed", check_fail=True))
+    diff_csv_html, difference_csv_filename = prepare_file_section(inputs.artifacts.difference_csv, lambda path: csv_to_html_table(path, style_mismatched=True, mismatch_color="#ffbaba", match_color="#d2ffed", check_fail=False))
+    exif_file_content, exif_file_filename = prepare_file_section(inputs.exiftool_output_path)
+    mi_file_content, mi_file_filename = prepare_file_section(inputs.mediainfo_output_path)
+    ffprobe_file_content, ffprobe_file_filename = prepare_file_section(inputs.ffprobe_output_path)
+    fixity_file_content, fixity_file_filename = prepare_file_section(inputs.fixity_sidecar)
+    fixity_html = make_fixity_section_html(inputs.fixity_summary_json, fixity_file_content)
+
+    # Get qct-parse thumbs if they exists
+    thumbs_dict = find_qct_thumbs(report_directory)
+
+    if inputs.artifacts.profile_fails_csv:
+        profile_fails_csv_path = os.path.join(report_directory, inputs.artifacts.profile_fails_csv)
+        failureInfoSummary_profile = summarize_failures(profile_fails_csv_path)
+    else:
+        failureInfoSummary_profile = None
+
+    if inputs.artifacts.tag_fails_csv:
+        tag_fails_csv_path = os.path.join(report_directory, inputs.artifacts.tag_fails_csv)
+        failureInfoSummary_tags = summarize_failures(tag_fails_csv_path)
+    else:
+        failureInfoSummary_tags = None
+
+    if inputs.artifacts.colorbars_eval_fails_csv:
+        colorbars_eval_fails_csv_path = os.path.join(report_directory, inputs.artifacts.colorbars_eval_fails_csv)
+        failureInfoSummary_colorbars = summarize_failures(colorbars_eval_fails_csv_path)
+    else:
+        failureInfoSummary_colorbars = None
+
+    if check_cancelled():
+        return
+
+    # Detected bars runs (head + additional). These are the regions the bars
+    # evaluation skips, so the timeline shades them; the windowed graphs below
+    # reuse the same parse for their timecode labels.
+    qct_duration_runs = _parse_bars_durations_csv(inputs.artifacts.qctools_colorbars_duration_output)
+    bars_regions = [(bars_start, bars_end) for _, bars_start, bars_end in qct_duration_runs]
+
+    # Create graphs for all existing csv files (existing code...)
+    # The timeline renders as its own titled section below the evaluation pies,
+    # so it stays a separate variable rather than being folded into
+    # colorbars_eval_html.
+    colorbars_timeline_html = None
+    if inputs.artifacts.qctools_bars_eval_check_output and failureInfoSummary_colorbars:
+        # Pies summarize the per-tag failure share; the timeline below them
+        # carries the failure specifics (distribution + peak thumbnails)
+        colorbars_eval_html = make_profile_piecharts(inputs.artifacts.qctools_bars_eval_check_output, thumbs_dict, failureInfoSummary_colorbars, video_id, failure_csv_path=colorbars_eval_fails_csv_path, check_cancelled=check_cancelled, failure_details=False)
+        colorbars_timeline_html = make_eval_bars_timeline_html(
+            colorbars_eval_fails_csv_path, video_id, peaks=inputs.colorbars_peaks,
+            video_duration=inputs.eval_video_duration, frame_rate=inputs.eval_video_fps,
+            analysis_periods=get_frame_analysis_periods(inputs.frame_outputs),
+            black_segments=get_frame_analysis_black_segments(inputs.frame_outputs),
+            bars_regions=bars_regions)
+    elif inputs.artifacts.qctools_bars_eval_check_output and failureInfoSummary_colorbars is None:
+       color_bars_segment = f"""
+        <div style="display: flex; flex-direction: column; align-items: start; background-color: var(--report-paper); padding: 10px;"> 
+            <p><b>All QCTools values of the video file are within the median values of the color bars.</b></p>
+        </div>
+        """
+       colorbars_eval_html = f"""
+        <div style="display:inline-block; margin-right: 10px; padding-bottom: 20px;">  
+            {color_bars_segment}
+        </div>
+        """
+    else:
+        colorbars_eval_html = None
+
+    # How the color-bars evaluation graded content, which drives the section
+    # headers and whether an info box accompanies the graph:
+    #   - "detected" reference, bars found -> detected-vs-SMPTE graph only
+    #   - "detected" reference, no bars    -> SMPTE fallback, info box only
+    #   - "smpte" reference, bars found    -> graph + "SMPTE selected" info box
+    #   - "smpte" reference, no bars       -> "SMPTE selected" info box only
+    # smpte_reference: SMPTE values were the evaluation reference (drives the
+    # "Values relative to ... thresholds" header). colorbars_box_only: the
+    # colorbars_html is just an info box with no graph (drives the graph
+    # section header).
+    smpte_selected_box = """
+                <div style="background-color: var(--report-notice-bg); padding: 15px; border: 1px solid var(--report-notice-ink); margin: 10px 0; border-radius: 5px;">
+                    <p style="margin: 0; color: var(--report-notice-ink);">Evaluation was performed against standard SMPTE color bar values (selected reference).</p>
+                </div>
+                """
+    smpte_reference = False
+    colorbars_box_only = False
+    if inputs.artifacts.colorbars_values_output:
+        try:
+            with open(inputs.artifacts.colorbars_values_output, 'r') as f:
+                first_line = f.readline().strip()
+            if first_line == "SMPTE_FALLBACK":
+                smpte_reference = True
+                colorbars_box_only = True
+                colorbars_html = """
+                <div style="background-color: var(--report-notice-bg); padding: 15px; border: 1px solid var(--report-notice-ink); margin: 10px 0; border-radius: 5px;">
+                    <p style="margin: 0; color: var(--report-notice-ink);"><strong>No color bars detected.</strong> Evaluation was performed using standard SMPTE color bar values.</p>
+                </div>
+                """
+            elif first_line == "SMPTE_SELECTED":
+                smpte_reference = True
+                colorbars_box_only = True
+                colorbars_html = smpte_selected_box
+            else:
+                # Real detected-vs-SMPTE comparison CSV -> render the graph.
+                graph_html = make_color_bars_graphs(video_id, inputs.artifacts.qctools_colorbars_duration_output, inputs.artifacts.colorbars_values_output, thumbs_dict)
+                evaluate_reference = config_mgr.get_config('checks', ChecksConfig).tools.qct_parse.evaluateBarsReference
+                if evaluate_reference == 'smpte':
+                    # SMPTE was the evaluation reference but bars were detected:
+                    # show the informational graph with the "SMPTE selected" box
+                    # below it.
+                    smpte_reference = True
+                    colorbars_html = (graph_html or "") + smpte_selected_box
+                else:
+                    colorbars_html = graph_html
+        except Exception as e:
+            logger.error(f"Error reading colorbars values file: {e}")
+            colorbars_html = None
+    else:
+        colorbars_html = None
+
+    # Render bar graphs for windowed (mid-file) bars regions.
+    # Build a lookup of region label → duration string from the qct-parse
+    # bars durations CSV (parsed above) so each graph shows the correct timecodes.
+    windowed_duration_lookup = {}
+    for label, start_s, end_s in qct_duration_runs:
+        def _fmt(seconds):
+            h = int(seconds // 3600)
+            m = int((seconds % 3600) // 60)
+            s = seconds - (h * 3600) - (m * 60)
+            return f"{h:02d}:{m:02d}:{s:06.3f}"
+        windowed_duration_lookup[label] = f"{_fmt(start_s)} - {_fmt(end_s)}"
+
+    windowed_colorbars_html_list = []
+    for wv_path in sorted(inputs.artifacts.windowed_colorbars_values):
+        try:
+            region_name = os.path.basename(wv_path).replace("qct-parse_colorbars_values_", "").replace(".csv", "")
+            dur_str = windowed_duration_lookup.get(region_name)
+            idx_str = region_name.replace("additional-", "")
+            wv_html = make_color_bars_graphs(
+                video_id, inputs.artifacts.qctools_colorbars_duration_output, wv_path, thumbs_dict,
+                duration_override=dur_str,
+                bars_label=f'{video_id} Additional Bars',
+                thumb_profile_filter=f'additional_bars_{idx_str}',
+            )
+            if wv_html:
+                windowed_colorbars_html_list.append((region_name, wv_html))
+        except Exception as e:
+            logger.error(f"Error rendering windowed bars graph for {wv_path}: {e}")
+
+    if inputs.artifacts.qctools_profile_check_output and failureInfoSummary_profile:
+        profile_summary_html = make_profile_piecharts(inputs.artifacts.qctools_profile_check_output, thumbs_dict, failureInfoSummary_profile, video_id, failure_csv_path=profile_fails_csv_path, check_cancelled=check_cancelled)
+    else:
+        profile_summary_html = None
+
+    if inputs.artifacts.qctools_content_check_outputs:
+        content_summary_html_list = []
+        for output_csv in inputs.artifacts.qctools_content_check_outputs:
+            content_summary_html = make_content_summary_html(output_csv, thumbs_dict, paper_bgcolor='#f5e9e3')
+            content_summary_html_list.append(content_summary_html)
+    else:
+        content_summary_html_list = None
+
+    if inputs.artifacts.tags_check_output and failureInfoSummary_tags:
+        tags_summary_html = make_profile_piecharts(inputs.artifacts.tags_check_output, thumbs_dict, failureInfoSummary_tags, video_id, failure_csv_path=tag_fails_csv_path, check_cancelled=check_cancelled)
+    else:
+        tags_summary_html = None
+
+    # Side-by-side comparison of qct-parse and CLAMS bars detectors. None
+    # unless at least one of the two CSVs is present.
+    bars_comparison_html = make_bars_detection_comparison_html(
+        inputs.artifacts.qctools_colorbars_duration_output,
+        inputs.artifacts.clams_bars_durations_csv,
+    ) if inputs.artifacts.clams_bars_durations_csv else None
+
+    # CLAMS tone detection results.
+    tone_detection_html = make_tone_detection_html(inputs.artifacts.clams_tone_durations_csv)
+    mkvalidator_html = make_mkvalidator_html(inputs.artifacts.mkvalidator_summary_path, inputs.artifacts.mkvalidator_clusters_csv, video_path)
+
+    audio_clipping_html = make_audio_clipping_html(inputs.artifacts.audio_clipping_csv) if inputs.artifacts.audio_clipping_csv else None
+    channel_imbalance_html = make_channel_imbalance_html(inputs.artifacts.channel_imbalance_csv) if inputs.artifacts.channel_imbalance_csv else None
+    identical_channels_html = make_identical_channels_html(inputs.artifacts.identical_channels_csv) if inputs.artifacts.identical_channels_csv else None
+    audible_timecode_html = make_audible_timecode_html(inputs.artifacts.audible_timecode_csv) if inputs.artifacts.audible_timecode_csv else None
+    audio_dropout_html = make_audio_dropout_html(inputs.artifacts.audio_dropout_csv) if inputs.artifacts.audio_dropout_csv else None
+    clamped_levels_html = make_clamped_levels_html(inputs.artifacts.clamped_levels_csv, inputs.artifacts.clamped_traces_csv) if inputs.artifacts.clamped_levels_csv else None
+    chroma_phase_html = make_chroma_phase_html(inputs.artifacts.chroma_phase_summary_csv, inputs.artifacts.chroma_phase_events_csv) if inputs.artifacts.chroma_phase_summary_csv else None
+    tone_leak_html = make_tone_leak_html(inputs.artifacts.tone_leak_summary_csv, inputs.artifacts.tone_leak_events_csv) if inputs.artifacts.tone_leak_summary_csv else None
+    dropped_sample_html = generate_dropped_sample_html(inputs.frame_outputs) if inputs.frame_outputs else ""
+    duplicate_frame_html = generate_duplicate_frame_html(inputs.frame_outputs) if inputs.frame_outputs else ""
+    bitplane_html = generate_bitplane_html(inputs.frame_outputs) if inputs.frame_outputs else ""
+
+    existing_thumbs = find_qct_thumbs(report_directory)
+    no_qct_parse_files = (
+        not inputs.artifacts.profile_fails_csv and
+        not inputs.artifacts.tag_fails_csv and
+        not inputs.artifacts.colorbars_eval_fails_csv and
+        not inputs.artifacts.audio_clipping_csv and
+        not inputs.artifacts.channel_imbalance_csv and
+        not inputs.artifacts.identical_channels_csv and
+        not inputs.artifacts.audible_timecode_csv and
+        not inputs.artifacts.audio_dropout_csv and
+        not inputs.artifacts.clamped_levels_csv and
+        not inputs.artifacts.chroma_phase_summary_csv and
+        not inputs.artifacts.tone_leak_summary_csv and
+        not existing_thumbs
+    )
+
+    if check_cancelled():
+        return
+
+    # Embed logo as a data URI so the report renders self-contained.
+    logo_image_path = image_to_data_uri(config_mgr.get_logo_path('av_spex_the_logo.png'))
+    if signals:
+        signals.report_progress.emit(20)
+
+    # Generate a color strip from the video, fall back to the static eq image
+    color_strip_b64 = None
+    if video_path:
+        color_strip_b64 = generate_color_strip_base64(video_path, signals=signals, progress_start=22, progress_end=25)
+    if signals:
+        signals.report_progress.emit(25)
+
+    if color_strip_b64:
+        # Store the data URI once in a hidden element, reference it via JS
+        color_strip_src = f"data:image/jpeg;base64,{color_strip_b64}"
+        color_strip_store = (
+            f'<img id="color-strip-data" src="{color_strip_src}" '
+            f'alt="Color strip" class="color-strip-divider">'
+        )
+        # Subsequent uses clone the src from the stored element
+        color_strip_divider = (
+            '<img class="color-strip-divider color-strip-clone" alt="Color strip">'
+        )
+        color_strip_init_script = """
+        <script>
+        (function() {
+            var src = document.getElementById('color-strip-data').src;
+            var clones = document.getElementsByClassName('color-strip-clone');
+            for (var i = 0; i < clones.length; i++) { clones[i].src = src; }
+        })();
+        </script>"""
+    else:
+        # Fallback: use the static eq image as before
+        eq_image_path = image_to_data_uri(config_mgr.get_logo_path('germfree_eq.png'))
+        color_strip_src = eq_image_path
+        color_strip_store = (
+            f'<img src="{eq_image_path}" alt="AV Spex Graphic EQ Logo" '
+            f'style="width: 10%">'
+        )
+        color_strip_divider = color_strip_store
+        color_strip_init_script = ""
+
+    # Generate audio waveform
+    waveform_b64 = None
+    if video_path:
+        waveform_b64 = generate_audio_waveform_base64(video_path, signals=signals, progress_start=25, progress_end=95)
+
+    if waveform_b64:
+        # Note: Using class "waveform-data-store" to target via JS
+        waveform_store = (
+            f'<img class="waveform-data-store" src="data:image/jpeg;base64,{waveform_b64}" '
+            f'style="display: none;">'
+        )
+
+        # Divider: The placeholder that will be cloned by the script
+        waveform_divider = (
+            '<div style="margin: 20px 0; text-align: center;">'
+            '<img class="waveform-clone" style="width: 100%; height: auto; border: 1px solid var(--report-accent);">'
+            '</div>'
+        )
+
+        # JavaScript: Finds all clones and populates them with the source data
+        waveform_init_script = """
+        <script>
+        (function() {
+            var src = document.querySelector('.waveform-data-store').src;
+            var clones = document.querySelectorAll('.waveform-clone');
+            for (var i = 0; i < clones.length; i++) {
+                clones[i].src = src;
+            }
+        })();
+        </script>"""
+    else:
+        # Fallback: If generation fails, use the static logo as a divider (similar to eq_image_path)
+        eq_image_path = image_to_data_uri(config_mgr.get_logo_path('germfree_eq.png'))
+        waveform_store = f'<img src="{eq_image_path}" alt="AV Spex Logo" style="width: 10%; display: none;">'
+        waveform_divider = f'<div style="text-align: center;"><img src="{eq_image_path}" style="width: 10%;"></div>'
+        waveform_init_script = ""
+    return ReportPieces(
+        audible_timecode_html=audible_timecode_html,
+        audio_clipping_html=audio_clipping_html,
+        audio_dropout_html=audio_dropout_html,
+        bars_comparison_html=bars_comparison_html,
+        bitplane_html=bitplane_html,
+        channel_imbalance_html=channel_imbalance_html,
+        chroma_phase_html=chroma_phase_html,
+        clamped_levels_html=clamped_levels_html,
+        color_strip_divider=color_strip_divider,
+        color_strip_init_script=color_strip_init_script,
+        color_strip_store=color_strip_store,
+        colorbars_box_only=colorbars_box_only,
+        colorbars_eval_html=colorbars_eval_html,
+        colorbars_html=colorbars_html,
+        colorbars_timeline_html=colorbars_timeline_html,
+        content_summary_html_list=content_summary_html_list,
+        diff_csv_html=diff_csv_html,
+        difference_csv_filename=difference_csv_filename,
+        dropped_sample_html=dropped_sample_html,
+        duplicate_frame_html=duplicate_frame_html,
+        exif_file_content=exif_file_content,
+        exif_file_filename=exif_file_filename,
+        ffprobe_file_content=ffprobe_file_content,
+        ffprobe_file_filename=ffprobe_file_filename,
+        fixity_html=fixity_html,
+        frame_analysis_html=frame_analysis_html,
+        identical_channels_html=identical_channels_html,
+        logo_image_path=logo_image_path,
+        mc_csv_html=mc_csv_html,
+        mediaconch_csv_filename=mediaconch_csv_filename,
+        mi_file_content=mi_file_content,
+        mi_file_filename=mi_file_filename,
+        mkvalidator_html=mkvalidator_html,
+        no_qct_parse_files=no_qct_parse_files,
+        profile_summary_html=profile_summary_html,
+        smpte_reference=smpte_reference,
+        tags_summary_html=tags_summary_html,
+        tone_detection_html=tone_detection_html,
+        tone_leak_html=tone_leak_html,
+        waveform_divider=waveform_divider,
+        waveform_init_script=waveform_init_script,
+        waveform_store=waveform_store,
+        windowed_colorbars_html_list=windowed_colorbars_html_list,
+    )
+
+
+def write_html_report(video_id, report_directory, destination_directory, html_report_path, video_path=None, check_cancelled=None, signals=None):
+
+    inputs = _gather_report_inputs(video_path, report_directory, destination_directory,
+                                   video_id, html_report_path, check_cancelled, signals)
+    if inputs is None:
+        return
+    
+    # Generate frame analysis HTML section
+    pieces = _build_section_html(inputs, video_id, video_path, report_directory,
+                                 destination_directory, check_cancelled, signals)
+    if pieces is None:
+        return
+
+    # ------------------------------------------------------------------
+    # Section assembly
+    #
+    # Each block of the report owns both its markup and the TOC entries that
+    # point into it, and both outputs are derived from this one ordered list.
+    # That is the whole point of the structure: the "Jump to section" nav can
+    # no longer drift out of order or out of sync with the body, because it is
+    # not restated alongside the body — it is read off the same sequence.
+    #
+    # A block whose markup is empty contributes nothing to either output, so
+    # availability is expressed once, where the markup is built.
+    # ------------------------------------------------------------------
+    sections: List[ReportSection] = []
+
+    def add_section(html, *toc_entries):
+        """Append a rendered block plus any TOC entries pointing into it."""
+        if html:
+            sections.append(ReportSection(html=html, toc=tuple(toc_entries)))
+
+    if pieces.fixity_html:
+        add_section(f"""
+        <h3 id="section-fixity">Fixity</h3>
+        {pieces.fixity_html}
+        """, ('section-fixity', 'Fixity'))
+
+    if inputs.mediaconch_csv:
+        add_section(f"""
+        <h3 id="section-mediaconch-csv">{pieces.mediaconch_csv_filename}</h3>
+        {pieces.mc_csv_html}
+        """, ('section-mediaconch-csv', 'MediaConch CSV'))
+
+    # MediaConch policy is collapsible
+    if inputs.mediaconch_policy_content and inputs.mediaconch_policy_name:
+        add_section(f"""
+        <h3 id="section-mediaconch-policy">MediaConch Policy File: {inputs.mediaconch_policy_name}</h3>
+        <a id="link_mediaconch_policy" href="javascript:void(0);" onclick="toggleContent('mediaconch_policy', 'Show policy content ▼', 'Hide policy content ▲')" style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block;">Show policy content ▼</a>
+        <div id="mediaconch_policy" class="xml-content" style="display: none;">{inputs.mediaconch_policy_content}</div>
+        """, ('section-mediaconch-policy', 'MediaConch Policy'))
+
+    if pieces.mkvalidator_html:
+        add_section(f"""
+        <h3 id="section-mkvalidator">mkvalidator</h3>
+        {pieces.mkvalidator_html}
+        """, ('section-mkvalidator', 'mkvalidator'))
+
+    # Frame analysis brings its own headings, so it is passed through whole and
+    # its TOC entries are read back out of the markup — only the subsections
+    # that actually rendered are listed, falling back to the section heading.
+    if pieces.frame_analysis_html:
+        frame_subsections = [
+            ('section-border-detection', 'Border Detection'),
+            ('section-signalstats', 'Signalstats Analysis'),
+            ('section-brng-analysis', 'BRNG Violation Analysis'),
+        ]
+        rendered = [
+            (anchor, label) for anchor, label in frame_subsections
+            if f"id='{anchor}'" in pieces.frame_analysis_html
+        ]
+        add_section(pieces.frame_analysis_html,
+                    *(rendered or [('section-frame-analysis', 'Frame Analysis Results')]))
+
+    # Bitplane check and duplicate frame detection render side-by-side so
+    # each fills the vertical space of the taller section.
+    if pieces.bitplane_html or pieces.duplicate_frame_html:
+        block = (
+            '<div style="display: flex; flex-wrap: wrap; gap: 24px; '
+            'align-items: flex-start; margin-top: 20px;">'
+        )
+        block_toc = []
+        if pieces.bitplane_html:
+            block += (
+                '<div id="section-bitplane" style="flex: 1 1 380px; min-width: 0;">'
+                f'{pieces.bitplane_html}</div>'
+            )
+            block_toc.append(('section-bitplane', 'Bitplane Check'))
+        if pieces.duplicate_frame_html:
+            block += (
+                '<div id="section-duplicate-frame" '
+                'style="flex: 2 1 600px; min-width: 0; overflow-x: auto;">'
+                f'{pieces.duplicate_frame_html}</div>'
+            )
+            block_toc.append(('section-duplicate-frame', 'Duplicate Frame Detection'))
+        block += '</div>'
+        add_section(block, *block_toc)
+
+    # Divider closing out the frame-analysis group. Carries no TOC entry.
+    if pieces.frame_analysis_html or pieces.bitplane_html or pieces.duplicate_frame_html:
+        add_section(pieces.color_strip_divider)
+
+    if pieces.no_qct_parse_files:
+        add_section("""
+        <h3 id="section-qct-parse-notice">QCT-Parse Analysis</h3>
+        <div style="background-color: var(--report-notice-bg); padding: 15px; border: 1px solid var(--report-notice-ink); margin: 10px 0; border-radius: 5px;">
+            <p style="margin: 0; color: var(--report-notice-ink);"><strong>Information:</strong> QCT-Parse analysis was not performed for this video. Quality control analysis sections are not available in this report.</p>
+        </div>
+        """, ('section-qct-parse-notice', 'QCT-Parse Analysis'))
+
+    # Head bars graph plus one graph per additional (mid-file) bars region,
+    # laid out in a single wrapping flex row.
+    if pieces.colorbars_html or pieces.windowed_colorbars_html_list:
+        block = '<div style="display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start;">'
+        block_toc = []
+        if pieces.colorbars_html:
+            if pieces.colorbars_box_only:
+                colorbars_header = "Color Bars Detection"
+            else:
+                colorbars_header = f"SMPTE Colorbars vs {video_id} Colorbars"
+            block += f"""
+            <div id="section-colorbars" style="flex: 1 1 720px; max-width: 100%; min-width: 0; overflow: hidden;">
+                <h3>{colorbars_header}</h3>
+                {pieces.colorbars_html}
+            </div>"""
+            block_toc.append(('section-colorbars', 'Color Bars Detection'))
+        for region_name, wv_html in pieces.windowed_colorbars_html_list:
+            block += f"""
+            <div id="section-colorbars-{region_name}" style="flex: 1 1 720px; max-width: 100%; min-width: 0; overflow: hidden;">
+                <h3>SMPTE Colorbars vs Additional {video_id} Colorbars</h3>
+                {wv_html}
+            </div>"""
+            block_toc.append((f'section-colorbars-{region_name}', 'Additional Color Bars'))
+        block += '</div>'
+        add_section(block, *block_toc)
+
+    if pieces.bars_comparison_html or pieces.tone_detection_html:
+        block = '<h3 id="section-clams-detection">CLAMS Detection</h3>'
+        block += CLAMS_METHODOLOGY_HTML
+        if pieces.bars_comparison_html:
+            block += f"""
+            <h4 style="font-size: 16px; margin-top: 16px; color: var(--report-ink);">Bars Detection (qct-parse vs CLAMS SSIM)</h4>
+            {pieces.bars_comparison_html}
+            """
+        if pieces.tone_detection_html:
+            block += f"""
+            <h4 style="font-size: 16px; margin-top: 16px; color: var(--report-ink);">Tone Detection</h4>
+            {pieces.tone_detection_html}
+            """
+        add_section(block, ('section-clams-detection', 'CLAMS Detection'))
+
+    if pieces.colorbars_eval_html:
+        if pieces.smpte_reference:
             eval_header = "Values relative to SMPTE colorbar's thresholds"
         else:
             eval_header = "Values relative to colorbar's thresholds"
-        html_template += f"""
+        add_section(f"""
         <h3 id="section-colorbars-eval">{eval_header}</h3>
-        {colorbars_eval_html}
-        """
+        {pieces.colorbars_eval_html}
+        """, ('section-colorbars-eval', 'Colorbars Threshold Evaluation'))
 
-    if colorbars_timeline_html:
-        html_template += f"""
+    if pieces.colorbars_timeline_html:
+        add_section(f"""
         <h3 id="section-timeline">Timeline of Signal Distribution</h3>
-        {colorbars_timeline_html}
-        """
+        {pieces.colorbars_timeline_html}
+        """, ('section-timeline', 'Timeline of Signal Distribution'))
 
-    if clamped_levels_html:
-        html_template += f"""
+    if pieces.clamped_levels_html:
+        add_section(f"""
         <h3 id="section-clamped-levels">Clamped Levels Detection</h3>
-        {clamped_levels_html}
-        """
+        {pieces.clamped_levels_html}
+        """, ('section-clamped-levels', 'Clamped Levels Detection'))
 
-    if chroma_phase_html:
-        html_template += f"""
+    if pieces.chroma_phase_html:
+        add_section(f"""
         <h3 id="section-chroma-phase">Chroma Phase Detection</h3>
-        {chroma_phase_html}
-        """
+        {pieces.chroma_phase_html}
+        """, ('section-chroma-phase', 'Chroma Phase Detection'))
 
+    # Audio results render as one banner-led group: the per-channel
+    # comparisons two-up, then timecode/dropout two-up, then tone leak full
+    # width, bracketed by waveform dividers. One TOC entry covers the group.
     has_audio_results = bool(
-        audio_clipping_html or channel_imbalance_html
-        or identical_channels_html
-        or audible_timecode_html or audio_dropout_html
-        or tone_leak_html
+        pieces.audio_clipping_html or pieces.channel_imbalance_html
+        or pieces.identical_channels_html
+        or pieces.audible_timecode_html or pieces.audio_dropout_html
+        or pieces.tone_leak_html
     )
 
     if has_audio_results:
-        html_template += (
-            '<h2 id="section-audio-analysis" style="color: #0a5f1c; '
+        block = (
+            '<h2 id="section-audio-analysis" style="color: var(--report-success); '
             'text-decoration: underline; margin-top: 30px;">'
             'Audio Analysis Results</h2>'
         )
-        html_template += waveform_divider
+        block += pieces.waveform_divider
 
-        # Clipping + Channel Imbalance + Identical Channels — the per-channel
-        # comparisons, wrapping two-up
-        if audio_clipping_html or channel_imbalance_html or identical_channels_html:
-            html_template += (
+        if pieces.audio_clipping_html or pieces.channel_imbalance_html or pieces.identical_channels_html:
+            block += (
                 '<div style="display: flex; flex-wrap: wrap; gap: 24px; '
                 'align-items: flex-start; margin: 16px 0;">'
             )
-            if audio_clipping_html:
-                html_template += f"""
+            if pieces.audio_clipping_html:
+                block += f"""
                 <div style="flex: 1 1 420px; min-width: 0;">
                     <h3>Audio Clipping Detection</h3>
-                    {audio_clipping_html}
+                    {pieces.audio_clipping_html}
                 </div>
                 """
-            if channel_imbalance_html:
-                html_template += f"""
+            if pieces.channel_imbalance_html:
+                block += f"""
                 <div style="flex: 1 1 420px; min-width: 0;">
                     <h3>Channel Imbalance Analysis</h3>
-                    {channel_imbalance_html}
+                    {pieces.channel_imbalance_html}
                 </div>
                 """
-            if identical_channels_html:
-                html_template += f"""
+            if pieces.identical_channels_html:
+                block += f"""
                 <div id="section-identical-channels" style="flex: 1 1 420px; min-width: 0;">
                     <h3>Identical Channels</h3>
-                    {identical_channels_html}
+                    {pieces.identical_channels_html}
                 </div>
                 """
-            html_template += '</div>'
+            block += '</div>'
 
-        # Audible Timecode + Audio Dropout side-by-side
-        if audible_timecode_html or audio_dropout_html:
-            html_template += (
+        if pieces.audible_timecode_html or pieces.audio_dropout_html:
+            block += (
                 '<div style="display: flex; flex-wrap: wrap; gap: 24px; '
                 'align-items: flex-start; margin: 16px 0;">'
             )
-            if audible_timecode_html:
-                html_template += f"""
+            if pieces.audible_timecode_html:
+                block += f"""
                 <div style="flex: 1 1 420px; min-width: 0;">
                     <h3>Audible Timecode Detection</h3>
-                    {audible_timecode_html}
+                    {pieces.audible_timecode_html}
                 </div>
                 """
-            if audio_dropout_html:
-                html_template += f"""
+            if pieces.audio_dropout_html:
+                block += f"""
                 <div style="flex: 1 1 420px; min-width: 0;">
                     <h3>Audio Dropout Detection</h3>
-                    {audio_dropout_html}
+                    {pieces.audio_dropout_html}
                 </div>
                 """
-            html_template += '</div>'
+            block += '</div>'
 
         # Tone Leak Detection (full width - the per-channel table is wide)
-        if tone_leak_html:
-            html_template += f"""
+        if pieces.tone_leak_html:
+            block += f"""
             <div id="section-tone-leak" style="margin: 16px 0;">
                 <h3>Tone Leak Detection</h3>
-                {tone_leak_html}
+                {pieces.tone_leak_html}
             </div>
             """
 
-        html_template += waveform_divider
+        block += pieces.waveform_divider
+        add_section(block, ('section-audio-analysis', 'Audio Analysis Results'))
 
-    if dropped_sample_html:
-        html_template += f'<div id="section-dropped-sample">{dropped_sample_html}</div>'
+    if pieces.dropped_sample_html:
+        add_section(f'<div id="section-dropped-sample">{pieces.dropped_sample_html}</div>',
+                    ('section-dropped-sample', 'Dropped Sample Detection'))
 
-    if difference_csv:
-        html_template += f"""
-        <h3 id="section-difference-csv">{difference_csv_filename}</h3>
-        {diff_csv_html}
-        """
+    if inputs.artifacts.difference_csv:
+        add_section(f"""
+        <h3 id="section-difference-csv">{pieces.difference_csv_filename}</h3>
+        {pieces.diff_csv_html}
+        """, ('section-difference-csv', 'Difference CSV'))
 
-    if profile_summary_html:
-        html_template += f"""
+    if pieces.profile_summary_html:
+        add_section(f"""
         <h3 id="section-profile-summary">qct-parse Profile Summary</h3>
         <div style="white-space: nowrap;">
-            {profile_summary_html}
+            {pieces.profile_summary_html}
         </div>
-        """
+        """, ('section-profile-summary', 'QCT-Parse Profile Summary'))
 
-    if tags_summary_html:
-        html_template += f"""
+    if pieces.tags_summary_html:
+        add_section(f"""
         <h3 id="section-tags-summary">qct-parse Tag Check Summary</h3>
         <div style="white-space: nowrap;">
-            {tags_summary_html}
+            {pieces.tags_summary_html}
         </div>
-        """
+        """, ('section-tags-summary', 'QCT-Parse Tag Check Summary'))
 
-    if content_summary_html_list:
-        for idx, content_summary_html in enumerate(content_summary_html_list):
-            # Only first content-detection block gets the anchor id so TOC
+    if pieces.content_summary_html_list:
+        block = ''
+        for idx, content_summary_html in enumerate(pieces.content_summary_html_list):
+            # Only the first content-detection block gets the anchor id, so TOC
             # links resolve even when multiple blocks render.
             heading_id = ' id="section-content-summary"' if idx == 0 else ''
-            html_template += f"""
+            block += f"""
             <h3{heading_id}>qct-parse Content Detection</h3>
             <div style="white-space: nowrap;">
                 {content_summary_html}
             </div>
             """
+        add_section(block, ('section-content-summary', 'QCT-Parse Content Detection'))
 
-    # Modified sections with collapsible functionality
-    if exiftool_output_path:
-        html_template += f"""
-        <h3 id="section-exiftool">{exif_file_filename}</h3>
-        <a id="link_exiftool" href="javascript:void(0);" onclick="toggleContent('exiftool', 'Show content ▼', 'Hide content ▲')" style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block;">Show content ▼</a>
-        <div id="exiftool" class="metadata-content" style="display: none;">{exif_file_content}</div>
-        """
+    # Raw tool output, each collapsible
+    if inputs.exiftool_output_path:
+        add_section(f"""
+        <h3 id="section-exiftool">{pieces.exif_file_filename}</h3>
+        <a id="link_exiftool" href="javascript:void(0);" onclick="toggleContent('exiftool', 'Show content ▼', 'Hide content ▲')" style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block;">Show content ▼</a>
+        <div id="exiftool" class="metadata-content" style="display: none;">{pieces.exif_file_content}</div>
+        """, ('section-exiftool', 'ExifTool Output'))
 
-    if mediainfo_output_path:
-        html_template += f"""
-        <h3 id="section-mediainfo">{mi_file_filename}</h3>
-        <a id="link_mediainfo" href="javascript:void(0);" onclick="toggleContent('mediainfo', 'Show content ▼', 'Hide content ▲')" style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block;">Show content ▼</a>
-        <div id="mediainfo" class="metadata-content" style="display: none;">{mi_file_content}</div>
-        """
+    if inputs.mediainfo_output_path:
+        add_section(f"""
+        <h3 id="section-mediainfo">{pieces.mi_file_filename}</h3>
+        <a id="link_mediainfo" href="javascript:void(0);" onclick="toggleContent('mediainfo', 'Show content ▼', 'Hide content ▲')" style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block;">Show content ▼</a>
+        <div id="mediainfo" class="metadata-content" style="display: none;">{pieces.mi_file_content}</div>
+        """, ('section-mediainfo', 'MediaInfo Output'))
 
-    if ffprobe_output_path:
-        html_template += f"""
-        <h3 id="section-ffprobe">{ffprobe_file_filename}</h3>
-        <a id="link_ffprobe" href="javascript:void(0);" onclick="toggleContent('ffprobe', 'Show content ▼', 'Hide content ▲')" style="color: #378d6a; text-decoration: underline; margin-bottom: 10px; display: block;">Show content ▼</a>
-        <div id="ffprobe" class="metadata-content" style="display: none;">{ffprobe_file_content}</div>
-        """
+    if inputs.ffprobe_output_path:
+        add_section(f"""
+        <h3 id="section-ffprobe">{pieces.ffprobe_file_filename}</h3>
+        <a id="link_ffprobe" href="javascript:void(0);" onclick="toggleContent('ffprobe', 'Show content ▼', 'Hide content ▲')" style="color: var(--report-accent); text-decoration: underline; margin-bottom: 10px; display: block;">Show content ▼</a>
+        <div id="ffprobe" class="metadata-content" style="display: none;">{pieces.ffprobe_file_content}</div>
+        """, ('section-ffprobe', 'FFprobe Output'))
 
     if check_cancelled():
         return
 
-    html_template += color_strip_init_script
-    html_template += waveform_init_script   
+    # ------------------------------------------------------------------
+    # Emit: TOC and body both come from `sections`, in the same order.
+    # ------------------------------------------------------------------
+    undefined_tokens = _undefined_style_tokens(
+        ''.join(section.html for section in sections) + _report_head_html(
+            video_id, '', '', '', ''))
+    if undefined_tokens:
+        logger.warning(
+            f"Report markup references undefined palette tokens: {', '.join(undefined_tokens)}"
+        )
+
+    dangling = _dangling_toc_anchors(sections)
+    if dangling:
+        logger.warning(
+            f"Report TOC links point at section ids that were never rendered: {', '.join(dangling)}"
+        )
+
+    toc_html = _build_toc_html([entry for section in sections for entry in section.toc])
+
+    html_template = _report_head_html(
+        video_id, pieces.logo_image_path, pieces.color_strip_store, pieces.waveform_store, toc_html)
+
+    for section in sections:
+        html_template += section.html
+
+    html_template += pieces.color_strip_init_script
+    html_template += pieces.waveform_init_script
     html_template += """
     </body>
     </html>

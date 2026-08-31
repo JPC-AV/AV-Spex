@@ -30,6 +30,7 @@ import numpy as np
 from scipy.ndimage import uniform_filter
 
 from AV_Spex.utils.log_setup import logger
+from AV_Spex.utils import ffprobe_probe
 
 
 def structural_similarity(im1, im2, win_size=7, data_range=255.0,
@@ -99,31 +100,10 @@ def _resolve_reference_path() -> str:
     return path
 
 
+
 def get_video_fps(video_path: str) -> Optional[float]:
-    """Read the video stream's frame rate via ffprobe. Returns None on failure."""
-    cmd = [
-        "ffprobe", "-v", "error",
-        "-select_streams", "v:0",
-        "-show_entries", "stream=r_frame_rate,avg_frame_rate",
-        "-of", "json",
-        video_path,
-    ]
-    try:
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        data = json.loads(result.stdout)
-        stream = data["streams"][0]
-        for key in ("r_frame_rate", "avg_frame_rate"):
-            value = stream.get(key, "")
-            if "/" in value:
-                num, den = value.split("/")
-                num, den = float(num), float(den)
-                if den > 0:
-                    return num / den
-            elif value:
-                return float(value)
-    except (subprocess.SubprocessError, json.JSONDecodeError, KeyError, IndexError, ValueError):
-        pass
-    return None
+    """Video frame rate, or None on failure. See utils.ffprobe_probe."""
+    return ffprobe_probe.frame_rate(video_path)
 
 
 def _format_timestamp(seconds: float) -> str:
