@@ -89,3 +89,105 @@ def test_unrecognized_pdf_structure_fails_open(tmp_path):
     path.write_bytes(b"%PDF-1.4\n<compressed object stream>\n%%EOF\n")
 
     assert _console_pdf_looks_truncated(str(path), PAGE_HEIGHT_300_DPI) is False
+
+
+# ---------------------------------------------------------------------------
+# The plain-text copy
+#
+# The PDF is the good-looking artifact but the fragile one. `toPlainText()`
+# involves no layout engine, so the text copy written beside it cannot come up
+# short — it is what the user falls back on when the PDF does.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def console_window(qapp, monkeypatch):
+    """A ProcessingWindow with a short console and no blocking dialogs."""
+    QtWidgets = pytest.importorskip("PyQt6.QtWidgets")
+    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", lambda self: None)
+
+    from AV_Spex.gui.gui_processing_window import ProcessingWindow
+    from AV_Spex.gui.gui_processing_window_console import MessageType
+
+    window = ProcessingWindow()
+    for i in range(50):
+        window.details_text.append_message(f"line {i:03d}", MessageType.NORMAL)
+    yield window
+    window.close()
+
+
+def collect_status(window, monkeypatch):
+    """Capture what the console was told about the export."""
+    messages = []
+    monkeypatch.setattr(type(window), "update_status",
+                        lambda self, msg, msg_type=None: messages.append((msg_type, msg)))
+    return messages
+
+
+def choose_file(monkeypatch, path, file_filter):
+    """Stand in for the user picking a path and a format in the save dialog."""
+    QtWidgets = pytest.importorskip("PyQt6.QtWidgets")
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName",
+                        staticmethod(lambda *a, **k: (str(path), file_filter)))
+
+
+def test_text_export_keeps_every_console_line(console_window, tmp_path):
+    out = tmp_path / "console.txt"
+
+    console_window._write_console_text(str(out))
+
+    lines = out.read_text(encoding="utf-8").splitlines()
+    assert "line 000" in lines
+    assert "line 049" in lines
+
+
+def test_text_export_can_start_partway_through(console_window, tmp_path):
+    """The per-video slicing offset behaves like the PDF path's."""
+    out = tmp_path / "tail.txt"
+    full = console_window.details_text.toPlainText()
+    offset = full.index("line 025")
+
+    console_window._write_console_text(str(out), offset)
+
+    written = out.read_text(encoding="utf-8")
+    assert written.startswith("line 025")
+    assert "line 024" not in written
+
+
+def test_pdf_export_also_writes_a_text_copy(console_window, tmp_path, monkeypatch):
+    choose_file(monkeypatch, tmp_path / "console.pdf", "PDF Files (*.pdf)")
+    messages = collect_status(console_window, monkeypatch)
+
+    console_window.save_console_as_pdf()
+
+    assert (tmp_path / "console.pdf").stat().st_size > 0
+    assert "line 049" in (tmp_path / "console.txt").read_text(encoding="utf-8")
+    assert "plain-text copy" in messages[-1][1]
+
+
+def test_text_filter_exports_text_only(console_window, tmp_path, monkeypatch):
+    """Picking Text Files skips the PDF entirely — no truncation risk at all."""
+    choose_file(monkeypatch, tmp_path / "console", "Text Files (*.txt)")
+    collect_status(console_window, monkeypatch)
+
+    console_window.save_console_as_pdf()
+
+    assert (tmp_path / "console.txt").exists()
+    assert not (tmp_path / "console.pdf").exists()
+
+
+def test_a_pdf_that_could_not_be_written_is_not_called_a_success(console_window, tmp_path, monkeypatch):
+    """QPdfWriter silently no-ops on an unwritable path; that must not read as saved."""
+    from AV_Spex.gui.gui_processing_window_console import MessageType
+
+    unwritable = tmp_path / "locked"
+    unwritable.mkdir()
+    unwritable.chmod(0o500)
+    choose_file(monkeypatch, unwritable / "console.pdf", "PDF Files (*.pdf)")
+    messages = collect_status(console_window, monkeypatch)
+    try:
+        console_window.save_console_as_pdf()
+    finally:
+        unwritable.chmod(0o700)
+
+    assert any(kind is MessageType.ERROR for kind, _ in messages)
+    assert not any(kind is MessageType.SUCCESS for kind, _ in messages)

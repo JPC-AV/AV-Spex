@@ -165,7 +165,10 @@ class ProcessingWindow(QMainWindow, ThemeableMixin):
 
         # Save as PDF button - exports the console contents, preserving styling
         self.save_pdf_button = QPushButton("Save as PDF")
-        self.save_pdf_button.setToolTip("Save the console output to a PDF file")
+        self.save_pdf_button.setToolTip(
+            "Save the console output to a PDF file (a plain-text copy is "
+            "saved alongside it), or to a text file"
+        )
         self.save_pdf_button.clicked.connect(self.save_console_as_pdf)
         zoom_layout.addWidget(self.save_pdf_button)
 
@@ -254,13 +257,19 @@ class ProcessingWindow(QMainWindow, ThemeableMixin):
             self.details_text.append_message("Console cleared", MessageType.INFO)
             
     def save_console_as_pdf(self):
-        """Export the console output to a PDF, preserving its styling.
+        """Export the console output, as a styled PDF or as plain text.
 
         The console (`details_text`) is already a fully formatted
         QTextDocument, so we print that document straight to PDF. This keeps
         the exact colors, bold, monospace font, and spacing seen on screen.
         NORMAL text carries no explicit color, so it renders black on the
         white page; the colored message types keep their console colors.
+
+        The PDF is the nice-looking artifact but it is the one that can lose
+        content (see CONSOLE_PDF_RESOLUTION), so a plain-text copy is written
+        next to it every time — no layout engine is involved in
+        `toPlainText()`, so it cannot truncate. Choosing the Text Files filter
+        exports only that copy.
         """
         # Nothing to export if the console is empty
         if not self.details_text.toPlainText().strip():
@@ -276,24 +285,65 @@ class ProcessingWindow(QMainWindow, ThemeableMixin):
         default_name = f"AVSpex_console_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.pdf"
         default_path = os.path.join(os.path.expanduser("~"), default_name)
 
-        file_path, _ = QFileDialog.getSaveFileName(
-            self, "Save Console Output as PDF", default_path, "PDF Files (*.pdf)"
+        file_path, selected_filter = QFileDialog.getSaveFileName(
+            self, "Save Console Output", default_path,
+            "PDF Files (*.pdf);;Text Files (*.txt)"
         )
         if not file_path:
             return  # user cancelled
+
+        # A typed extension wins; otherwise the chosen filter decides
+        wants_text = (file_path.lower().endswith(".txt")
+                      or (not file_path.lower().endswith(".pdf")
+                          and "*.txt" in selected_filter))
+        if wants_text:
+            if not file_path.lower().endswith(".txt"):
+                file_path += ".txt"
+            try:
+                self._write_console_text(file_path)
+                self.update_status(f"Console output saved to {file_path}", MessageType.SUCCESS)
+            except OSError as e:
+                self.update_status(f"Failed to save text file: {str(e)}", MessageType.ERROR)
+                msg_box = QMessageBox(self)
+                msg_box.setWindowTitle("Save Failed")
+                msg_box.setText("Could not save the console output to a text file.")
+                msg_box.setInformativeText(str(e))
+                msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+                msg_box.setStyleSheet(self.get_message_box_style())
+                msg_box.exec()
+            return
+
         if not file_path.lower().endswith(".pdf"):
             file_path += ".pdf"
+
+        # Insurance against the PDF losing content: a copy that can't truncate.
+        # A failure here is reported but never blocks the PDF export.
+        text_path = os.path.splitext(file_path)[0] + ".txt"
+        try:
+            self._write_console_text(text_path)
+        except OSError as e:
+            text_path = None
+            self.update_status(
+                f"Could not save the plain-text copy of the console: {str(e)}",
+                MessageType.WARNING
+            )
 
         try:
             complete = self._write_console_pdf(file_path)
             if complete:
-                self.update_status(f"Console output saved to {file_path}", MessageType.SUCCESS)
+                saved_to = file_path
+                if text_path:
+                    saved_to = f"{file_path} (with a plain-text copy at {text_path})"
+                self.update_status(f"Console output saved to {saved_to}", MessageType.SUCCESS)
             else:
+                fallback = (f"The complete log is in {text_path}."
+                            if text_path else
+                            "Select all the console text and paste it into a text "
+                            "file to keep the full log.")
                 self.update_status(
                     f"Console output saved to {file_path}, but it is incomplete — "
-                    "the console is too long for a single PDF and the export was "
-                    "cut short. Select all the console text and paste it into a "
-                    "text file to keep the full log.",
+                    f"the console is too long for a single PDF and the export was "
+                    f"cut short. {fallback}",
                     MessageType.WARNING
                 )
                 msg_box = QMessageBox(self)
@@ -302,9 +352,13 @@ class ProcessingWindow(QMainWindow, ThemeableMixin):
                 msg_box.setText("The PDF was written but is missing the end of the console.")
                 msg_box.setInformativeText(
                     "This console is longer than a PDF can hold, so the export "
-                    "stops partway through. The on-screen console still has "
-                    "everything: select all of it (Cmd+A, Cmd+C) and paste it "
-                    "into a text file to keep the complete log."
+                    "stops partway through. " +
+                    (f"Nothing is lost — the full console output was also saved as "
+                     f"plain text at {text_path}."
+                     if text_path else
+                     "The on-screen console still has everything: select all of it "
+                     "(Cmd+A, Cmd+C) and paste it into a text file to keep the "
+                     "complete log.")
                 )
                 msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
                 msg_box.setStyleSheet(self.get_message_box_style())
@@ -318,6 +372,24 @@ class ProcessingWindow(QMainWindow, ThemeableMixin):
             msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
             msg_box.setStyleSheet(self.get_message_box_style())
             msg_box.exec()
+
+    def _write_console_text(self, file_path, start_position=0):
+        """Write the console output (or a tail of it) to a plain-text file.
+
+        The styling is lost, but so is every way the export could come up
+        short: this is a straight dump of the same text the user would get by
+        selecting the console and copying it.
+
+        Args:
+            file_path (str): Destination .txt path
+            start_position (int): Character position to start from, matching
+                _write_console_pdf()'s slicing of a single video's output.
+        """
+        text = self.details_text.toPlainText()
+        if start_position > 0:
+            text = text[start_position:]
+        with open(file_path, 'w', encoding='utf-8') as text_file:
+            text_file.write(text)
 
     def _write_console_pdf(self, file_path, start_position=0):
         """Print the console document (or a tail of it) to a PDF file.
@@ -356,6 +428,12 @@ class ProcessingWindow(QMainWindow, ThemeableMixin):
             cursor.removeSelectedText()
 
         doc.print(writer)
+
+        # QPdfWriter reports nothing when it cannot open the destination — the
+        # print is simply a no-op — so an unwritable path would otherwise be
+        # announced as a successful save.
+        if os.path.getsize(file_path) == 0:
+            raise OSError(f"Nothing could be written to {file_path}")
 
         return not _console_pdf_looks_truncated(file_path, writer.height())
 
