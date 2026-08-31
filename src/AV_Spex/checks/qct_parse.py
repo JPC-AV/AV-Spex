@@ -1101,21 +1101,40 @@ def extract_report_mkv(startObj, qctools_output_path):
         os.remove(report_file_output)
 
     # Run ffmpeg command to extract xml.gz report
+    # stderr is captured (rather than silenced with -loglevel panic) so a failed
+    # extraction is diagnosable from the user's log - the reason is usually
+    # "no attachment stream in the mkv" or "cannot write to the report folder".
     full_command = [
         'ffmpeg', 
         '-hide_banner', 
-        '-loglevel', 'panic', 
+        '-loglevel', 'error', 
         '-dump_attachment:t:0', report_file_output, 
         '-i', qctools_output_path
     ]
     logger.info(f'Extracting qctools.xml.gz report from {os.path.basename(qctools_output_path)}\n')
     logger.debug(f'Running command: {" ".join(full_command)}\n')
-    subprocess.run(full_command)
+    try:
+        result = subprocess.run(full_command, capture_output=True, text=True)
+    except (OSError, subprocess.SubprocessError) as e:
+        logger.critical(f'Unable to run ffmpeg to extract XML from QCTools mkv report file: {e}\n')
+        return None
+
+    ffmpeg_stderr = (result.stderr or '').strip()
 
     if os.path.isfile(report_file_output):
+        if ffmpeg_stderr:
+            logger.debug(f'ffmpeg reported while extracting the QCTools report:\n{ffmpeg_stderr}\n')
         startObj = report_file_output
     else:
         logger.critical(f'Unable to extract XML from QCTools mkv report file\n')
+        if ffmpeg_stderr:
+            logger.error(f'ffmpeg error:\n{ffmpeg_stderr}\n')
+        else:
+            logger.error(
+                f'ffmpeg exited with code {result.returncode} and no error output. '
+                f'The QCTools mkv may have no attachment stream, or '
+                f'{os.path.dirname(report_file_output)} may not be writable.\n'
+            )
         startObj = None
     
     return startObj
@@ -4200,6 +4219,14 @@ def run_qctparse(video_path, qctools_output_path, report_directory, check_cancel
 
     if qctools_ext.lower().endswith('mkv'):
         startObj = extract_report_mkv(startObj, qctools_output_path)
+        if startObj is None:
+            # Extraction failed (reason logged by extract_report_mkv). Skip
+            # qct-parse rather than taking down the rest of output processing.
+            logger.critical(
+                "Skipping qct-parse: could not read the QCTools report "
+                f"{os.path.basename(qctools_output_path)}\n"
+            )
+            return None
 
     # Initalize circular buffer for efficient xml parsing
     buffSize = int(11)
