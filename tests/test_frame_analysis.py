@@ -889,6 +889,116 @@ def test_ffprobe_video_properties_derives_frame_count_from_duration(monkeypatch)
     assert props["total_frames"] == 2997
 
 
+# OpenCV derives CAP_PROP_FRAME_COUNT from the container duration; when the
+# container has none, it hands back AV_NOPTS_VALUE scaled to seconds instead of
+# failing. This is the exact value JPC_AV_03569 produced.
+_NOPTS_SECONDS = -9223372036854775.808
+
+
+def _live_no_duration():
+    """cv2 opens the file and geometry is right, but the timing is the sentinel."""
+    import cv2
+    return _LiveCapture({
+        cv2.CAP_PROP_FRAME_WIDTH: 720.0,
+        cv2.CAP_PROP_FRAME_HEIGHT: 486.0,
+        cv2.CAP_PROP_FPS: 30000 / 1001,
+        cv2.CAP_PROP_FRAME_COUNT: _NOPTS_SECONDS * (30000 / 1001),
+    })
+
+
+def test_probe_video_properties_rejects_opencv_nopts_frame_count(monkeypatch):
+    """A missing container duration must not become a negative duration.
+
+    Unchecked, this reached _select_analysis_periods as
+    `available_duration = -9223372036854856.0` and then ffmpeg as
+    `-t -9223372036854856.0`, which exits 222.
+    """
+    monkeypatch.setattr(fa.cv2, "VideoCapture", lambda *a, **kw: _live_no_duration())
+    monkeypatch.setattr(fa, "_ffprobe_video_properties", lambda p: None)
+
+    props = fa.probe_video_properties("/v/in.mkv")
+
+    assert props["duration"] == 0, "0 is the 'unknown' value guards already check"
+    assert props["total_frames"] == 0
+    assert props["duration"] >= 0 and props["total_frames"] >= 0
+
+
+def test_probe_video_properties_keeps_opencv_geometry_when_timing_is_bad(monkeypatch):
+    """cv2 can still decode frames, so border detection must not be given up."""
+    monkeypatch.setattr(fa.cv2, "VideoCapture", lambda *a, **kw: _live_no_duration())
+    monkeypatch.setattr(fa, "_ffprobe_video_properties", lambda p: None)
+
+    props = fa.probe_video_properties("/v/in.mkv")
+
+    assert (props["width"], props["height"]) == (720, 486)
+    assert props["opencv_usable"] is True
+
+
+def test_probe_video_properties_recovers_timing_from_ffprobe(monkeypatch):
+    """Geometry from cv2, timing from ffprobe — the file stays fully analyzable."""
+    monkeypatch.setattr(fa.cv2, "VideoCapture", lambda *a, **kw: _live_no_duration())
+    monkeypatch.setattr(fa, "_ffprobe_video_properties", lambda p: {
+        "width": 720, "height": 486, "fps": 30000 / 1001,
+        "total_frames": 11307, "duration": 377.31,
+    })
+
+    props = fa.probe_video_properties("/v/in.mkv")
+
+    assert props["duration"] == pytest.approx(377.31)
+    assert props["total_frames"] == 11307
+    assert props["fps"] == pytest.approx(29.97, abs=0.01)
+    assert props["opencv_usable"] is True
+
+
+def test_probe_video_properties_rejects_nan_fps(monkeypatch):
+    """A non-finite fps poisons the same arithmetic a negative one does."""
+    import cv2 as _cv2
+    cap = _LiveCapture({
+        _cv2.CAP_PROP_FRAME_WIDTH: 720.0,
+        _cv2.CAP_PROP_FRAME_HEIGHT: 486.0,
+        _cv2.CAP_PROP_FPS: float("nan"),
+        _cv2.CAP_PROP_FRAME_COUNT: 53489.0,
+    })
+    monkeypatch.setattr(fa.cv2, "VideoCapture", lambda *a, **kw: cap)
+    monkeypatch.setattr(fa, "_ffprobe_video_properties", lambda p: None)
+
+    props = fa.probe_video_properties("/v/in.mkv")
+
+    assert props["fps"] == 0.0
+    assert props["duration"] == 0
+
+
+def test_ffprobe_video_properties_rejects_nopts_duration(monkeypatch):
+    """ffprobe can report the sentinel too; a failed candidate must not survive."""
+    completed = MagicMock()
+    completed.stdout = (
+        '{"streams": [{"width": 720, "height": 486, '
+        '"avg_frame_rate": "30000/1001", "duration": "-9223372036854775.808"}], '
+        '"format": {"duration": "-9223372036854775.808"}}'
+    )
+    monkeypatch.setattr(fa.subprocess, "run", lambda *a, **kw: completed)
+
+    props = fa._ffprobe_video_properties("/v/in.mkv")
+
+    assert props["duration"] == 0
+    assert props["total_frames"] == 0
+
+
+def test_ffprobe_video_properties_ignores_na_nb_frames(monkeypatch):
+    """nb_frames of 'N/A' falls through to the duration-derived count."""
+    completed = MagicMock()
+    completed.stdout = (
+        '{"streams": [{"width": 720, "height": 486, "nb_frames": "N/A", '
+        '"avg_frame_rate": "30000/1001", "duration": "100.0"}], '
+        '"format": {"duration": "100.0"}}'
+    )
+    monkeypatch.setattr(fa.subprocess, "run", lambda *a, **kw: completed)
+
+    props = fa._ffprobe_video_properties("/v/in.mkv")
+
+    assert props["total_frames"] == 2997
+
+
 def test_ffprobe_video_properties_returns_none_on_bad_dimensions(monkeypatch):
     completed = MagicMock()
     completed.stdout = '{"streams": [{"width": 0, "height": 0}]}'

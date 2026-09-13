@@ -7,6 +7,7 @@ Combines the efficiency of the refactored version with the sophistication of the
 import os
 import sys
 import json
+import math
 import gzip
 import time
 import cv2
@@ -808,6 +809,76 @@ class QCToolsParser:
         return runs, thresholds
 
 
+def _positive_finite(value) -> Optional[float]:
+    """Return `value` as a float when it is a real positive number, else None.
+
+    OpenCV does not fail when a container carries no duration — it derives
+    CAP_PROP_FRAME_COUNT from `ic->duration`, so an unfinalized capture (one
+    whose writer died before the Segment Info Duration was written back) hands
+    back AV_NOPTS_VALUE scaled to seconds: -9.223372036854776e+15. That is a
+    perfectly ordinary float, so every downstream calculation accepted it and
+    the analysis periods came out as `(50.03, -9223372036854856.0)`, reaching
+    ffmpeg as `-t -9223372036854856.0` (exit status 222). Non-finite values are
+    rejected for the same reason: fps of nan or inf poisons the same arithmetic.
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number <= 0:
+        return None
+    return number
+
+
+def _timing_from_ffprobe(video_path: str, raw_fps, raw_frames,
+                         cv_fps: Optional[float] = None,
+                         cv_frames: Optional[float] = None) -> Dict[str, Any]:
+    """Recover fps/total_frames/duration from ffprobe for an OpenCV-readable file.
+
+    Only the *timing* numbers are in question here: OpenCV opened the file and
+    reported sane geometry, so it can still decode frames. Callers therefore
+    keep `opencv_usable` True and only the numbers that failed validation are
+    replaced — a file with no container duration still gets border detection and
+    duplicate-frame verification, which need frames rather than a duration.
+
+    `cv_fps`/`cv_frames` are OpenCV's values *after* validation, passed in so
+    the half it got right is kept: the two fail independently (a file can have
+    a sound fps and a sentinel frame count), and ffprobe is only asked to cover
+    the half that failed.
+
+    Returns zeros when ffprobe cannot supply the timing either. Zero is the
+    "unknown" value by convention: callers already guard on `duration > 0`,
+    and a zero cannot silently produce a plausible-looking negative window.
+    """
+    logger.warning(
+        f"OpenCV reported unusable timing for {os.path.basename(video_path)} "
+        f"(fps={raw_fps}, frame count={raw_frames}) — the container is most "
+        f"likely missing its duration. Recovering timing from ffprobe."
+    )
+
+    probed = _ffprobe_video_properties(video_path) or {}
+    fps = cv_fps or _positive_finite(probed.get('fps'))
+    total_frames = cv_frames or _positive_finite(probed.get('total_frames'))
+    duration = _positive_finite(probed.get('duration'))
+    if not duration and fps and total_frames:
+        duration = total_frames / fps
+
+    if fps and duration:
+        logger.warning(
+            f"  Recovered from ffprobe: {duration:.3f}s @ {fps:.3f} fps"
+        )
+    else:
+        logger.error(
+            "  ffprobe could not supply a duration either. Analyses that need "
+            "one (signalstats periods, BRNG) cannot run on this file; "
+            "frame-reading analyses are unaffected."
+        )
+
+    return {'fps': fps or 0.0,
+            'total_frames': int(total_frames or 0),
+            'duration': duration or 0.0}
+
+
 def _ffprobe_video_properties(video_path: str) -> Optional[Dict[str, Any]]:
     """Read width/height/fps/frame count from ffprobe, or None if that fails."""
     try:
@@ -840,21 +911,23 @@ def _ffprobe_video_properties(video_path: str) -> Optional[Dict[str, Any]]:
                     fps = num / den
                     break
 
+        # Each candidate has to survive validation on its own: assigning the
+        # loop variable first meant a candidate that failed the `> 0` test was
+        # still the value that fell out of the loop, so ffprobe's own
+        # -9223372036854775.808 (AV_NOPTS_VALUE in seconds) became the duration.
         duration = 0.0
         for candidate in (stream.get('duration'),
                           (probe.get('format') or {}).get('duration')):
-            try:
-                duration = float(candidate)
-            except (TypeError, ValueError):
-                continue
-            if duration > 0:
+            seconds = _positive_finite(candidate)
+            if seconds:
+                duration = seconds
                 break
 
-        try:
-            total_frames = int(stream.get('nb_frames'))
-        except (TypeError, ValueError):
+        total_frames = _positive_finite(stream.get('nb_frames'))
+        if total_frames is None:
             # Matroska usually omits nb_frames; derive it from duration instead
-            total_frames = int(duration * fps) if duration > 0 and fps > 0 else 0
+            total_frames = duration * fps if duration > 0 and fps > 0 else 0
+        total_frames = int(total_frames)
 
         return {'width': width, 'height': height, 'fps': fps,
                 'total_frames': total_frames,
@@ -877,6 +950,15 @@ def probe_video_properties(video_path) -> Dict[str, Any]:
     The returned `opencv_usable` flag says whether frame *reading* is possible:
     ffprobe can supply metadata, but only cv2 hands back decoded frames, so
     callers that read frames must check it rather than assume.
+
+    Geometry and timing are validated separately, because they fail separately.
+    A file whose container never got a duration written (a capture cut short)
+    opens fine and reports correct dimensions, while cv2's frame count comes
+    back as a scaled AV_NOPTS_VALUE — a large *negative* number that arithmetic
+    accepts without complaint. So fps and frame count are checked for being
+    positive and finite; when they are not, the geometry and `opencv_usable`
+    stand and only the timing is re-read from ffprobe. `duration` of 0 means
+    unknown; callers must treat it as such rather than computing with it.
     """
     path = str(video_path)
     cap = cv2.VideoCapture(path)
@@ -884,13 +966,24 @@ def probe_video_properties(video_path) -> Dict[str, Any]:
         if cap.isOpened():
             width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            raw_fps = cap.get(cv2.CAP_PROP_FPS)
+            raw_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
             if width > 0 and height > 0:
-                return {'width': width, 'height': height, 'fps': fps,
-                        'total_frames': total_frames,
-                        'duration': total_frames / fps if fps > 0 else 0,
-                        'opencv_usable': True}
+                fps = _positive_finite(raw_fps)
+                total_frames = _positive_finite(raw_frames)
+                if fps and total_frames:
+                    return {'width': width, 'height': height, 'fps': fps,
+                            'total_frames': int(total_frames),
+                            'duration': total_frames / fps,
+                            'opencv_usable': True}
+                # Geometry is good but the timing is not. OpenCV can still
+                # decode frames, so this is not the fallback case below: keep
+                # cv2's geometry, take the timing from ffprobe.
+                props = {'width': width, 'height': height, 'opencv_usable': True}
+                props.update(_timing_from_ffprobe(path, raw_fps, raw_frames,
+                                                  cv_fps=fps,
+                                                  cv_frames=total_frames))
+                return props
     finally:
         cap.release()
 
