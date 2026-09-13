@@ -117,10 +117,18 @@ class BRNGAnalysisResult:
 
 @dataclass
 class SignalstatsResult:
-    """Results from signalstats analysis"""
-    violation_percentage: float
-    max_brng: float
-    avg_brng: float
+    """Results from signalstats analysis.
+
+    The three aggregate stats are None when the analysis could not run (no
+    analyzable period, or no duration to place one). None is deliberate: a
+    could-not-run result that reported 0.0% would be indistinguishable from a
+    clean file, so consumers must render/log it as unmeasured rather than
+    substituting a zero. `diagnosis` then carries the reason and `severity` is
+    'warning'.
+    """
+    violation_percentage: Optional[float]
+    max_brng: Optional[float]
+    avg_brng: Optional[float]
     analysis_periods: List[Dict]
     diagnosis: str
     used_qctools: bool
@@ -807,6 +815,18 @@ class QCToolsParser:
             logger.error(traceback.format_exc())
 
         return runs, thresholds
+
+
+# Said whenever an analysis is skipped for want of a duration. A file can reach
+# us with no duration at all: an unfinalized capture writes no Segment Info
+# Duration, ffprobe then reports none and OpenCV hands back a scaled
+# AV_NOPTS_VALUE. Sampling-based analyses (signalstats, BRNG) choose *where* to
+# look from the duration, so without one they cannot run — which is a different
+# statement from "we looked and found nothing", and has to read differently.
+DURATION_UNKNOWN_REASON = (
+    "video duration unknown — the container reports none and ffprobe could not "
+    "supply one"
+)
 
 
 def _positive_finite(value) -> Optional[float]:
@@ -1815,7 +1835,8 @@ class DifferentialBRNGAnalyzer:
                                        qctools_violations: List[FrameViolation] = None,
                                        analysis_periods: List[Tuple[float, int]] = None,
                                        upstream_context: 'UpstreamAnalysisContext' = None,
-                                       period_confidence_note: str = None) -> BRNGAnalysisResult:
+                                       period_confidence_note: str = None,
+                                       no_periods_reason: str = None) -> BRNGAnalysisResult:
         """
         Perform differential BRNG detection by creating highlighted and original versions.
         Now supports analyzing specific periods from signalstats.
@@ -1825,6 +1846,10 @@ class DifferentialBRNGAnalyzer:
                 inform sensitivity, sampling density, and thumbnail selection.
             period_confidence_note: Set when period selection had to fall back to a
                 mostly-black window; recorded on the result so the report can caveat it.
+            no_periods_reason: Why `analysis_periods` is empty, when the caller
+                knows. Only the caller can tell "no duration to place periods
+                with" from "every candidate overlapped black content", and the
+                operator needs the right one.
         """
         output_dir = Path(output_dir)
         output_dir.mkdir(exist_ok=True)
@@ -1977,16 +2002,22 @@ class DifferentialBRNGAnalyzer:
 
             logger.info(f"  Analyzed {len(violations)} frames with potential violations across all periods\n")
         else:
-            # No periods survived selection. _validate_periods_against_black_segments
-            # already tried to shift each candidate away from black content and then
-            # to shrink it into the largest non-black gap, so an empty list means the
-            # file has no analyzable non-black window at all — a finding, not an edge
-            # case. Analyzing an arbitrary fixed window here would measure the very
-            # black content period selection just rejected.
+            # No periods survived selection — a finding, not an edge case, and
+            # never a clean result. Usually that is black content:
+            # _validate_periods_against_black_segments already tried to shift each
+            # candidate away from it and then to shrink it into the largest
+            # non-black gap, so an empty list means no analyzable non-black window
+            # exists. It can also mean there was no duration to place periods with,
+            # which only the caller knows — hence no_periods_reason. Either way,
+            # analyzing an arbitrary fixed window here would measure exactly what
+            # period selection just rejected.
+            reason = no_periods_reason or (
+                "every candidate overlapped black content and could not be "
+                "shifted or shrunk to fit"
+            )
             logger.warning(
-                "  No analyzable periods: every candidate overlapped black content and "
-                "could not be shifted or shrunk to fit. BRNG analysis is skipped for this "
-                "file — this is NOT a clean result, nothing was examined."
+                f"  No analyzable periods: {reason}. BRNG analysis is skipped for "
+                f"this file — this is NOT a clean result, nothing was examined."
             )
             self._emit_progress(100)
             return None
@@ -3295,6 +3326,36 @@ class IntegratedSignalstatsAnalyzer:
             black_segments=black_segments
         )
         
+        # No periods means nothing will be measured. Falling through would hit
+        # the "No data available" aggregate below, which reports 0.0% violations
+        # and 0.00% max BRNG — indistinguishable from a file that was examined
+        # and found clean. Say which of the two it is, and say it in the result
+        # so the report can render it amber rather than green.
+        if not analysis_periods:
+            if self.duration <= 0:
+                reason = (
+                    f"Signalstats could not run: {DURATION_UNKNOWN_REASON}. "
+                    f"No frames were examined — this is NOT a clean result, no "
+                    f"conclusion can be drawn about out-of-range values."
+                )
+            else:
+                reason = (
+                    "Signalstats could not run: no analyzable period could be "
+                    "placed (every candidate window overlapped black content). "
+                    "No frames were examined — this is NOT a clean result."
+                )
+            logger.error(f"  {reason}")
+            self._emit_progress(100)
+            return SignalstatsResult(
+                violation_percentage=None,
+                max_brng=None,
+                avg_brng=None,
+                analysis_periods=[],
+                diagnosis=reason,
+                used_qctools=False,
+                severity='warning',
+            )
+
         # Log analysis configuration
         logger.info(f"  Running {len(analysis_periods)} analysis periods:")
         for i, (start_time, duration) in enumerate(analysis_periods):
@@ -3583,6 +3644,18 @@ class IntegratedSignalstatsAnalyzer:
         effective_start = max(content_start, color_bars_end or 0) + 10
         
         logger.debug(f"  Content starts at {effective_start:.1f}s (after color bars at {color_bars_end:.1f}s)\n")
+
+        # Every placement strategy below except QCTools periods measures back
+        # from self.duration, so an unknown (0) duration produced periods like
+        # (50.03, -80.03) — a negative length that reached ffmpeg as a negative
+        # `-t`. Refuse to place periods instead of inventing a window.
+        if self.duration <= 0 and not qctools_periods:
+            logger.error(
+                f"  Cannot place analysis periods: {DURATION_UNKNOWN_REASON}. "
+                f"Period placement measures back from the end of the file, so "
+                f"there is no window to sample."
+            )
+            return []
         
         # PRIORITY 1: Use QCTools-based periods if available (already validated upstream)
         if qctools_periods:
@@ -4890,6 +4963,7 @@ class EnhancedFrameAnalysis:
         
         # Step 5: BRNG analysis (conditional)
         brng_results = None
+        brng_no_periods_reason = None
         if self.check_cancelled():
             return results
         if brng_analysis_enabled:
@@ -4912,6 +4986,20 @@ class EnhancedFrameAnalysis:
                                 start_time = content_start + spacing * (i + 1)
                                 analysis_periods.append((start_time, period_duration))
                             logger.debug(f"Created {len(analysis_periods)} evenly distributed analysis periods\n")
+                    else:
+                        # Same refusal as period selection: spacing periods across
+                        # the content window needs an end to measure back from.
+                        # Leaving the list empty is what makes the analyzer report
+                        # "nothing was examined" instead of analyzing a window
+                        # computed from a duration that does not exist.
+                        brng_no_periods_reason = DURATION_UNKNOWN_REASON
+                        logger.error(
+                            f"BRNG analysis could not run: {DURATION_UNKNOWN_REASON}. "
+                            f"Analysis periods are spaced across the content window, "
+                            f"which cannot be measured without one. No frames were "
+                            f"examined — this is NOT a clean result, no conclusion can "
+                            f"be drawn about out-of-range values."
+                        )
                 
                 # Validate fallback periods against black segments and bars regions
                 if avoid_segments and analysis_periods:
@@ -4933,7 +5021,8 @@ class EnhancedFrameAnalysis:
                 qctools_violations=violations,
                 analysis_periods=analysis_periods,
                 upstream_context=upstream_context,
-                period_confidence_note=self.signalstats_analyzer.last_resort_period_note
+                period_confidence_note=self.signalstats_analyzer.last_resort_period_note,
+                no_periods_reason=brng_no_periods_reason
             )
             results['brng_analysis'] = asdict(brng_results) if brng_results else None
             

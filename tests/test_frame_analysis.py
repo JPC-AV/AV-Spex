@@ -26,6 +26,7 @@ Coverage:
 """
 
 import gzip
+import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -997,6 +998,108 @@ def test_ffprobe_video_properties_ignores_na_nb_frames(monkeypatch):
     props = fa._ffprobe_video_properties("/v/in.mkv")
 
     assert props["total_frames"] == 2997
+
+
+# ---------------------------------------------------------------------------
+# Unknown duration: signalstats/BRNG must skip, not report a clean measurement
+# ---------------------------------------------------------------------------
+
+def _signalstats_analyzer(duration):
+    """An analyzer with only the attributes period selection touches."""
+    a = fa.IntegratedSignalstatsAnalyzer.__new__(fa.IntegratedSignalstatsAnalyzer)
+    a.duration = duration
+    a.fps = 30000 / 1001
+    a.width, a.height = 720, 486
+    a.qctools_report = None
+    a.check_cancelled = lambda: False
+    a.signals = None
+    a.last_resort_period_note = None
+    return a
+
+
+def test_find_analysis_periods_refuses_unknown_duration():
+    """A 0 duration yielded (50.03, -80.03) — a negative ffmpeg -t."""
+    a = _signalstats_analyzer(duration=0.0)
+
+    periods = a._find_analysis_periods(content_start=40.03, color_bars_end=30.03,
+                                       duration=60, num_periods=3)
+
+    assert periods == []
+    assert all(length > 0 for _, length in periods), "a negative -t reaches ffmpeg"
+
+
+def test_find_analysis_periods_uses_qctools_periods_without_a_duration():
+    """QCTools periods are absolute, so they need no duration to be placed."""
+    a = _signalstats_analyzer(duration=0.0)
+
+    periods = a._find_analysis_periods(content_start=40.03, color_bars_end=30.03,
+                                       duration=60, num_periods=3,
+                                       qctools_periods=[(120.0, 60), (300.0, 60)])
+
+    assert periods == [(120.0, 60), (300.0, 60)]
+
+
+def test_signalstats_reports_unknown_duration_not_zero_percent(monkeypatch):
+    """The false-clean this fixes: 0.0% violations on a file nothing was read from."""
+    a = _signalstats_analyzer(duration=0.0)
+
+    result = a.analyze_with_signalstats(border_data=None, content_start_time=40.03,
+                                        color_bars_end_time=30.03,
+                                        analysis_duration=60, num_periods=3)
+
+    assert result.violation_percentage is None, "0.0 would render as a clean result"
+    assert result.max_brng is None and result.avg_brng is None
+    assert result.severity == "warning"
+    assert "duration unknown" in result.diagnosis
+    assert result.analysis_periods == []
+
+
+def test_signalstats_keeps_the_black_content_reason(monkeypatch):
+    """The other empty-period cause must not be relabelled as a duration problem."""
+    a = _signalstats_analyzer(duration=1784.7)
+    monkeypatch.setattr(a, "_find_analysis_periods", lambda *args, **kw: [])
+
+    result = a.analyze_with_signalstats(border_data=None, content_start_time=40.03,
+                                        color_bars_end_time=30.03,
+                                        analysis_duration=60, num_periods=3)
+
+    assert result.violation_percentage is None
+    assert "black content" in result.diagnosis
+    assert "duration unknown" not in result.diagnosis
+
+
+def test_brng_returns_none_and_names_the_reason(caplog):
+    """BRNG's could-not-run convention is None; the reason has to be the right one."""
+    analyzer = fa.DifferentialBRNGAnalyzer.__new__(fa.DifferentialBRNGAnalyzer)
+    analyzer.check_cancelled = lambda: False
+    analyzer.signals = None
+    analyzer.upstream_context = None
+
+    with caplog.at_level("WARNING"):
+        result = analyzer.analyze_with_differential_detection(
+            output_dir=Path(tempfile.mkdtemp()),
+            analysis_periods=[],
+            no_periods_reason=fa.DURATION_UNKNOWN_REASON,
+        )
+
+    assert result is None, "an empty result would render as 'no violations detected'"
+    assert "duration unknown" in caplog.text
+    assert "black content" not in caplog.text
+
+
+def test_summary_does_not_print_zero_percent_when_signalstats_could_not_run():
+    """generate_summary is what the operator reads in the console."""
+    from AV_Spex.checks import frame_analysis_report
+
+    text = frame_analysis_report.generate_summary(
+        {'qctools_report_available': True,
+         'signalstats': {'violation_percentage': None, 'max_brng': None,
+                         'avg_brng': None, 'analysis_periods': [],
+                         'diagnosis': 'Signalstats could not run: video duration unknown'}},
+        'JPC_AV_03569')
+
+    assert "0.0%" not in text and "0.00%" not in text
+    assert "could not run" in text.lower()
 
 
 def test_ffprobe_video_properties_returns_none_on_bad_dimensions(monkeypatch):
