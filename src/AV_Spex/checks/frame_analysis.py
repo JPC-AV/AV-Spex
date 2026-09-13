@@ -1856,6 +1856,12 @@ class DifferentialBRNGAnalyzer:
         
         # Store upstream context for use in submethods
         self.upstream_context = upstream_context
+
+        # Why this run produced nothing, when it produces nothing. Returning None
+        # is how "could not run" is signalled, but None carries no reason, and the
+        # report needs one to say anything more useful than silence. Cleared at
+        # the start of every run so a reason cannot outlive the run that set it.
+        self.could_not_run_reason = None
         
         # Store paths to temporary videos for thumbnail creation
         temp_video_paths = []
@@ -1982,6 +1988,10 @@ class DifferentialBRNGAnalyzer:
             # violation list here would be reported as "No BRNG violations
             # detected" — a clean bill of health for an analysis that never ran.
             if periods_failed and periods_failed == total_periods:
+                self.could_not_run_reason = (
+                    f"comparison video creation failed for all {total_periods} "
+                    f"analysis period(s), so no frames were examined"
+                )
                 logger.error(
                     f"  BRNG analysis could not run: comparison video creation failed "
                     f"for all {total_periods} period(s), so no frames were examined. "
@@ -2015,6 +2025,7 @@ class DifferentialBRNGAnalyzer:
                 "every candidate overlapped black content and could not be "
                 "shifted or shrunk to fit"
             )
+            self.could_not_run_reason = f"no analyzable period could be placed — {reason}"
             logger.warning(
                 f"  No analyzable periods: {reason}. BRNG analysis is skipped for "
                 f"this file — this is NOT a clean result, nothing was examined."
@@ -5025,6 +5036,14 @@ class EnhancedFrameAnalysis:
                 no_periods_reason=brng_no_periods_reason
             )
             results['brng_analysis'] = asdict(brng_results) if brng_results else None
+            # A missing brng_analysis renders as no section at all, which reads as
+            # "not run because it was switched off" rather than "ran and could not
+            # measure". Carry the reason so the report can say which.
+            if not brng_results:
+                results['brng_analysis_unavailable'] = (
+                    getattr(self.brng_analyzer, 'could_not_run_reason', None)
+                    or "no frames were examined"
+                )
             
             # Emit BRNG analysis completion signal
             if signals and frame_config.enable_brng_analysis:

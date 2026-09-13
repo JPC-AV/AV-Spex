@@ -1087,6 +1087,39 @@ def test_brng_returns_none_and_names_the_reason(caplog):
     assert "black content" not in caplog.text
 
 
+def test_brng_records_why_it_could_not_run():
+    """The reason has to leave the analyzer; None alone tells the report nothing."""
+    analyzer = fa.DifferentialBRNGAnalyzer.__new__(fa.DifferentialBRNGAnalyzer)
+    analyzer.check_cancelled = lambda: False
+    analyzer.signals = None
+
+    result = analyzer.analyze_with_differential_detection(
+        output_dir=Path(tempfile.mkdtemp()),
+        analysis_periods=[],
+        no_periods_reason=fa.DURATION_UNKNOWN_REASON,
+    )
+
+    assert result is None
+    assert "duration unknown" in analyzer.could_not_run_reason
+
+
+def test_brng_could_not_run_reason_does_not_outlive_its_run():
+    """A stale reason would put a could-not-run banner on a measured result."""
+    analyzer = fa.DifferentialBRNGAnalyzer.__new__(fa.DifferentialBRNGAnalyzer)
+    analyzer.check_cancelled = lambda: False
+    analyzer.signals = None
+
+    analyzer.analyze_with_differential_detection(
+        output_dir=Path(tempfile.mkdtemp()), analysis_periods=[],
+        no_periods_reason=fa.DURATION_UNKNOWN_REASON)
+    assert analyzer.could_not_run_reason is not None
+
+    # A second run that gets as far as period handling clears it first.
+    analyzer.analyze_with_differential_detection(
+        output_dir=Path(tempfile.mkdtemp()), analysis_periods=[])
+    assert "duration unknown" not in analyzer.could_not_run_reason
+
+
 def test_summary_does_not_print_zero_percent_when_signalstats_could_not_run():
     """generate_summary is what the operator reads in the console."""
     from AV_Spex.checks import frame_analysis_report

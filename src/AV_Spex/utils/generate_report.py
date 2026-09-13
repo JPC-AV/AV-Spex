@@ -250,6 +250,9 @@ def find_frame_analysis_outputs(source_directory, destination_directory, video_i
         'border_visualization': None,
         'border_data': None,
         'brng_analysis': None,
+        # Set when BRNG ran but could not measure anything; renders in place of
+        # the section instead of letting it vanish. See _render_frame_brng_html.
+        'brng_unavailable_reason': None,
         'brng_thumbnails': [],
         'signalstats_analysis': None,
         'enhanced_frame_analysis': None,
@@ -298,6 +301,9 @@ def find_frame_analysis_outputs(source_directory, destination_directory, video_i
                 brng_data = enhanced_data.get('final_brng_analysis') or enhanced_data.get('brng_analysis')
                 if brng_data:
                     frame_outputs['brng_analysis'] = brng_data  # Store as dict directly
+                else:
+                    frame_outputs['brng_unavailable_reason'] = enhanced_data.get(
+                        'brng_analysis_unavailable')
             
             # Extract bitplane check data from enhanced JSON
             if enhanced_data.get('bitplane_check'):
@@ -5127,6 +5133,26 @@ def _render_frame_brng_html(frame_outputs) -> str:
     Returns an empty string when this section has no inputs.
     """
     html = ""
+    if not frame_outputs.get('brng_analysis') and frame_outputs.get('brng_unavailable_reason'):
+        # BRNG ran and measured nothing. Omitting the section entirely (the old
+        # behaviour) is indistinguishable from the check being switched off, and
+        # an absent section is the one thing a reader cannot question. Keep the
+        # anchor identical to the measured case so the TOC entry is the same.
+        reason = frame_outputs['brng_unavailable_reason']
+        html += "<h3 id='section-brng-analysis' style='color: var(--report-gold);'>BRNG Violation Analysis</h3>"
+        html += BRNG_METHODOLOGY_HTML
+        html += f"""
+        <div style="background-color: #fff3cd; padding: 12px 16px; margin: 10px 0;
+                    border-left: 4px solid #bf971b; border-radius: 0 4px 4px 0;">
+            <p style="margin: 0; font-size: 14px;"><strong>&#x26A0; Could not run:</strong> {reason}.</p>
+            <p style="margin: 8px 0 0 0; font-size: 13px;">No frames were examined, so this is
+            <strong>not</strong> a clean result &mdash; no conclusion can be drawn about
+            out-of-range values in this file. Everything else in this report stands;
+            only broadcast-range analysis is missing.</p>
+        </div>
+        """
+        return html
+
     if frame_outputs['brng_analysis']:
         html += "<h3 id='section-brng-analysis' style='color: var(--report-gold);'>BRNG Violation Analysis</h3>"
 
@@ -5670,6 +5696,9 @@ def generate_frame_analysis_html(frame_outputs, video_id):
         frame_outputs.get('border_visualization') or
         frame_outputs.get('border_data') or
         frame_outputs.get('brng_analysis') or
+        # A BRNG run that could not measure anything is a finding, so it keeps
+        # the wrapper alive even when it is the only thing to report.
+        frame_outputs.get('brng_unavailable_reason') or
         frame_outputs.get('signalstats_analysis')
     )
     if not has_content:

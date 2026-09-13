@@ -1413,6 +1413,46 @@ def _brng_payload(**extra):
     return payload
 
 
+def test_brng_unavailable_renders_an_amber_could_not_run_section():
+    """An absent section reads as 'switched off', not 'ran and measured nothing'."""
+    outputs = {**_FRAME_OUTPUTS_BASE,
+               'brng_unavailable_reason': 'video duration unknown'}
+    html = gr.generate_frame_analysis_html(outputs, "JPC_AV_03569")
+
+    assert "BRNG Violation Analysis" in html
+    assert "Could not run" in html
+    assert "video duration unknown" in html
+    assert "not</strong> a clean result" in html
+    assert "#fff3cd" in html, "the could-not-run banner must be amber, not green"
+
+
+def test_brng_unavailable_keeps_the_toc_anchor():
+    """Same anchor as the measured case, so the TOC entry is picked up."""
+    outputs = {**_FRAME_OUTPUTS_BASE,
+               'brng_unavailable_reason': 'video duration unknown'}
+    html = gr.generate_frame_analysis_html(outputs, "JPC_AV_03569")
+
+    assert "id='section-brng-analysis'" in html
+
+
+def test_brng_unavailable_alone_still_renders_the_frame_analysis_wrapper():
+    """It is the only finding here; has_content must not drop it."""
+    outputs = {**_FRAME_OUTPUTS_BASE,
+               'brng_unavailable_reason': 'video duration unknown'}
+    assert gr.generate_frame_analysis_html(outputs, "JPC_AV_03569") != ""
+
+
+def test_brng_results_win_over_a_stale_unavailable_reason():
+    """Real results must never be replaced by the could-not-run banner."""
+    outputs = {**_FRAME_OUTPUTS_BASE,
+               'brng_analysis': _brng_payload(),
+               'brng_unavailable_reason': 'video duration unknown'}
+    html = gr.generate_frame_analysis_html(outputs, "JPC_AV_03569")
+
+    assert "Could not run" not in html
+    assert "No BRNG violations detected" in html
+
+
 def test_brng_last_resort_periods_render_a_low_confidence_caveat():
     """A mostly-black sample must not read like a normal clean result."""
     outputs = {**_FRAME_OUTPUTS_BASE, 'brng_analysis': _brng_payload(
