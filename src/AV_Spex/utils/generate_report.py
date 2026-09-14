@@ -4318,10 +4318,29 @@ SIGNALSTATS_METHODOLOGY_HTML = """
                 <strong>Signalstats analysis</strong> evaluates broadcast range compliance across sampled 
                 time periods of the video. It reads the FFmpeg 
                 <code style="background: #eee; padding: 1px 4px; border-radius: 2px;">signalstats</code> 
-                BRNG metric, which counts the number of pixels in each frame that fall outside the 
-                broadcast-legal range (luma &lt; 16 or &gt; 235, chroma &lt; 16 or &gt; 240 for 8-bit video) 
-                and divides by the total pixel count to produce a ratio from 0.0 to 1.0. AV Spex 
-                converts this ratio to a percentage for display.
+                BRNG metric, which counts the number of pixels in each frame that fall outside the
+                broadcast-legal range and divides by the total pixel count to produce a ratio from
+                0.0 to 1.0. AV Spex converts this ratio to a percentage for display.
+            </p>
+            <p style="margin: 0 0 6px 0; font-weight: bold;">What counts as a violation:</p>
+            <ul style="margin: 4px 0 10px 16px; padding: 0;">
+                <li style="margin-bottom: 4px;"><strong>Out-of-range pixel</strong> — luma below 64 or above 940,
+                    or chroma below 64 or above 960, in 10-bit code values (16–235 luma and 16–240 chroma
+                    in 8-bit video). FFmpeg applies the limits for the file's own bit depth, so values are
+                    always measured on the native scale.</li>
+                <li style="margin-bottom: 4px;"><strong>Flagged frame, full frame (QCTools)</strong> — more than
+                    1% of the frame's pixels are out of range. All-black frames are skipped first, because
+                    the sub-black noise in analog tape black would otherwise dominate the results. A frame is
+                    treated as black when, in 10-bit code values, its maximum luma (YMAX) is below 300, its
+                    90th-percentile luma (YHIGH) is below 115 and its 10th-percentile luma (YLOW) is below 97
+                    (75, 28.75 and 24.25 in 8-bit).</li>
+                <li style="margin-bottom: 4px;"><strong>Flagged frame, active area (FFprobe)</strong> — at least
+                    one pixel inside the active picture area is out of range.</li>
+            </ul>
+            <p style="margin: 0 0 10px 0;">
+                Because a single out-of-range pixel is enough to flag a frame, the share of flagged frames
+                is not a severity measure by itself. Severity is based mainly on the <em>average BRNG</em>:
+                the average percentage of out-of-range pixels per analyzed frame.
             </p>
             <p style="margin: 0 0 6px 0; font-weight: bold;">Dual-source comparison:</p>
             <p style="margin: 0 0 6px 0;">
@@ -4337,12 +4356,31 @@ SIGNALSTATS_METHODOLOGY_HTML = """
                     picture area, excluding borders</li>
             </ol>
             <p style="margin: 0 0 10px 0;">
-                Comparing these two results reveals whether violations originate from border/blanking 
-                regions or from the actual picture content. If the full frame shows significantly more 
-                violations (>5%) than the active area, violations are classified as <em>border violations</em>. 
-                If the active area itself shows >10% violations, they are classified as <em>content violations</em> 
-                that may require correction.
+                Comparing these two results reveals whether violations originate from border/blanking
+                regions or from the actual picture content. Each period is classified by its share of
+                flagged frames:
             </p>
+            <ul style="margin: 4px 0 10px 16px; padding: 0;">
+                <li style="margin-bottom: 4px;"><strong>Border violations</strong> — the full frame has more than
+                    5 percentage points more flagged frames than the active area, and fewer than 30% of
+                    active-area frames are flagged</li>
+                <li style="margin-bottom: 4px;"><strong>Content violations</strong> — otherwise, more than 10% of
+                    active-area frames are flagged; these may require correction</li>
+                <li style="margin-bottom: 4px;"><strong>Minimal violations</strong> — neither of the above</li>
+            </ul>
+            <p style="margin: 0 0 6px 0; font-weight: bold;">Overall severity:</p>
+            <ul style="margin: 4px 0 10px 16px; padding: 0;">
+                <li style="margin-bottom: 4px;"><strong>With border detection</strong> — if more periods show
+                    border violations than content violations, the result is OK. Otherwise, if any period
+                    shows content violations, an average BRNG of 10% or more is an alert; below that it is
+                    a warning when more than 50% of frames are flagged, and informational otherwise. With no
+                    border or content periods, the result is OK.</li>
+                <li style="margin-bottom: 4px;"><strong>Without border detection</strong> (full frame, borders
+                    included) — an average BRNG of 10% or more is an alert. The result is OK when fewer than
+                    10% of frames are flagged and the worst frame has under 0.1% of pixels out of range, and
+                    informational when fewer than 50% are flagged and the worst frame is under 1%. Anything
+                    else is a warning.</li>
+            </ul>
             <p style="margin: 0 0 6px 0; font-weight: bold;">Period selection priority:</p>
             <ol style="margin: 4px 0 10px 20px; padding: 0;">
                 <li style="margin-bottom: 4px;"><strong>QCTools violation clusters</strong> — periods targeting 
