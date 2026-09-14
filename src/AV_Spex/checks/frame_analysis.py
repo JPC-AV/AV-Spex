@@ -3397,8 +3397,10 @@ class IntegratedSignalstatsAnalyzer:
         
         self._emit_progress(0)
         
+        cancelled = False
         for i, (start_time, duration) in enumerate(analysis_periods):
             if self.check_cancelled():
+                cancelled = True
                 break
             logger.debug(f"  Analyzing period {i+1} ({self._seconds_to_timecode(start_time)} - {self._seconds_to_timecode(start_time + duration)}):")
             
@@ -3494,14 +3496,36 @@ class IntegratedSignalstatsAnalyzer:
         
         # Aggregate results
         if not all_results:
+            # Periods were placed and attempted, but every one came back empty.
+            # This used to return zeros with diagnosis "No data available", which
+            # the report rendered as 0.0% violations / 0.00% max BRNG — the same
+            # numbers a genuinely clean file produces. Nothing was measured, so
+            # the stats are None and the reason is stated.
             self._emit_progress(100)
+            if cancelled:
+                reason = (
+                    "Signalstats was cancelled before any analysis period could be "
+                    "measured. No frames were examined — this is not a result."
+                )
+            else:
+                sources = ("QCTools parsing and the per-period ffprobe pass"
+                           if self.qctools_report else "the per-period ffprobe pass")
+                reason = (
+                    f"Signalstats could not run: all {total_periods} analysis "
+                    f"period(s) were attempted but none returned data ({sources} "
+                    f"produced nothing). No frames were examined — this is NOT a "
+                    f"clean result, no conclusion can be drawn about out-of-range "
+                    f"values."
+                )
+            logger.error(f"  {reason}")
             return SignalstatsResult(
-                violation_percentage=0,
-                max_brng=0,
-                avg_brng=0,
+                violation_percentage=None,
+                max_brng=None,
+                avg_brng=None,
                 analysis_periods=analysis_periods,
-                diagnosis="No data available",
-                used_qctools=False
+                diagnosis=reason,
+                used_qctools=False,
+                severity='warning',
             )
         
         # Calculate aggregates

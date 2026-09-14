@@ -1087,6 +1087,63 @@ def test_brng_returns_none_and_names_the_reason(caplog):
     assert "black content" not in caplog.text
 
 
+def _analyzer_with_periods(monkeypatch, periods, qctools_report=None):
+    a = _signalstats_analyzer(duration=1784.7)
+    a.qctools_report = qctools_report
+    monkeypatch.setattr(a, "_find_analysis_periods", lambda *args, **kw: periods)
+    # Every source comes back empty: this is the "attempted but measured nothing"
+    # case, not the "no periods" case.
+    monkeypatch.setattr(a, "_parse_qctools_brng_period", lambda *args, **kw: None)
+    monkeypatch.setattr(a, "_analyze_with_ffprobe_period", lambda *args, **kw: None)
+    monkeypatch.setattr(a, "_seconds_to_timecode", lambda t: "00:00:00.000")
+    return a
+
+
+def test_signalstats_periods_that_return_nothing_are_not_zero_percent(monkeypatch):
+    """The old 'No data available' path returned 0.0% — a clean bill of health."""
+    a = _analyzer_with_periods(monkeypatch, [(100.0, 60), (300.0, 60)])
+
+    result = a.analyze_with_signalstats(border_data=None, content_start_time=40.0,
+                                        color_bars_end_time=30.0,
+                                        analysis_duration=60, num_periods=2)
+
+    assert result.violation_percentage is None
+    assert result.max_brng is None and result.avg_brng is None
+    assert result.severity == "warning"
+    assert "2 analysis period(s) were attempted" in result.diagnosis
+    assert result.diagnosis != "No data available"
+
+
+def test_signalstats_names_only_the_sources_it_had(monkeypatch):
+    """Blaming QCTools parsing when there was no QCTools report would mislead."""
+    without = _analyzer_with_periods(monkeypatch, [(100.0, 60)], qctools_report=None)
+    r1 = without.analyze_with_signalstats(border_data=None, content_start_time=40.0,
+                                          color_bars_end_time=30.0,
+                                          analysis_duration=60, num_periods=1)
+    assert "QCTools" not in r1.diagnosis
+
+    with_qct = _analyzer_with_periods(monkeypatch, [(100.0, 60)],
+                                      qctools_report="/qc/report.qctools.xml.gz")
+    r2 = with_qct.analyze_with_signalstats(border_data=None, content_start_time=40.0,
+                                           color_bars_end_time=30.0,
+                                           analysis_duration=60, num_periods=1)
+    assert "QCTools" in r2.diagnosis
+
+
+def test_signalstats_cancellation_is_not_reported_as_a_failure(monkeypatch):
+    """Cancelling is the operator's doing, not a file or tool problem."""
+    a = _analyzer_with_periods(monkeypatch, [(100.0, 60)])
+    a.check_cancelled = lambda: True
+
+    result = a.analyze_with_signalstats(border_data=None, content_start_time=40.0,
+                                        color_bars_end_time=30.0,
+                                        analysis_duration=60, num_periods=1)
+
+    assert result.violation_percentage is None, "still not a clean result"
+    assert "cancelled" in result.diagnosis
+    assert "could not run" not in result.diagnosis
+
+
 def test_brng_records_why_it_could_not_run():
     """The reason has to leave the analyzer; None alone tells the report nothing."""
     analyzer = fa.DifferentialBRNGAnalyzer.__new__(fa.DifferentialBRNGAnalyzer)
