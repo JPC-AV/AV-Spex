@@ -1099,6 +1099,71 @@ def _analyzer_with_periods(monkeypatch, periods, qctools_report=None):
     return a
 
 
+def _analyzer_measuring(monkeypatch, periods, measured_indices):
+    """An analyzer whose ffprobe pass returns data only for some periods."""
+    a = _signalstats_analyzer(duration=1784.7)
+    a.qctools_report = None
+    monkeypatch.setattr(a, "_find_analysis_periods", lambda *args, **kw: periods)
+    monkeypatch.setattr(a, "_parse_qctools_brng_period", lambda *args, **kw: None)
+    monkeypatch.setattr(a, "_seconds_to_timecode", lambda t: "00:00:00.000")
+
+    def fake_ffprobe(active_area, start_time, duration, period_num, **kw):
+        if (period_num - 1) not in measured_indices:
+            return None
+        return {'frames_analyzed': 100, 'frames_with_violations': 2,
+                'brng_values': [0.001, 0.002], 'brng_frames': [(start_time, 0.001)]}
+
+    monkeypatch.setattr(a, "_analyze_with_ffprobe_period", fake_ffprobe)
+    return a
+
+
+def test_signalstats_reports_partial_coverage(monkeypatch):
+    """Aggregates from one period must not pass as the full intended sample."""
+    a = _analyzer_measuring(monkeypatch, [(100.0, 60), (300.0, 60), (900.0, 60)],
+                            measured_indices={0})
+
+    result = a.analyze_with_signalstats(border_data=None, content_start_time=40.0,
+                                        color_bars_end_time=30.0,
+                                        analysis_duration=60, num_periods=3)
+
+    assert result.violation_percentage is not None, "the measured period is still valid"
+    assert result.periods_attempted == 3
+    assert result.periods_measured == 1
+    assert "1 of 3" in result.coverage_note
+
+
+def test_signalstats_full_coverage_sets_no_note(monkeypatch):
+    a = _analyzer_measuring(monkeypatch, [(100.0, 60), (300.0, 60)],
+                            measured_indices={0, 1})
+
+    result = a.analyze_with_signalstats(border_data=None, content_start_time=40.0,
+                                        color_bars_end_time=30.0,
+                                        analysis_duration=60, num_periods=2)
+
+    assert result.periods_measured == result.periods_attempted == 2
+    assert result.coverage_note is None
+
+
+def test_signalstats_cancellation_is_reported_as_coverage_not_failure(monkeypatch):
+    """Cancelling after some periods leaves valid numbers over a short sample."""
+    a = _analyzer_measuring(monkeypatch, [(100.0, 60), (300.0, 60), (900.0, 60)],
+                            measured_indices={0, 1, 2})
+    calls = {'n': 0}
+
+    def cancel_after_two():
+        calls['n'] += 1
+        return calls['n'] > 2   # checked once per period, at the top of the loop
+
+    a.check_cancelled = cancel_after_two
+
+    result = a.analyze_with_signalstats(border_data=None, content_start_time=40.0,
+                                        color_bars_end_time=30.0,
+                                        analysis_duration=60, num_periods=3)
+
+    assert result.periods_measured == 2
+    assert "Cancelled" in result.coverage_note
+
+
 def test_signalstats_periods_that_return_nothing_are_not_zero_percent(monkeypatch):
     """The old 'No data available' path returned 0.0% — a clean bill of health."""
     a = _analyzer_with_periods(monkeypatch, [(100.0, 60), (300.0, 60)])

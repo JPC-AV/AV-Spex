@@ -139,6 +139,15 @@ class SignalstatsResult:
     # What region the aggregate stats were measured on:
     # 'active_area' | 'full_frame' | 'mixed' ('' for legacy results)
     analyzed_region: str = ''
+    # Sampling coverage. The aggregate stats above describe only the periods
+    # that returned data, so a run where some periods came back empty reports
+    # numbers that are *valid but incomplete* — indistinguishable, without
+    # these, from a run that sampled everything it intended to. BRNG carries
+    # the same information as period_confidence='partial_coverage'.
+    # None on results predating the field; equal counts mean full coverage.
+    periods_attempted: Optional[int] = None
+    periods_measured: Optional[int] = None
+    coverage_note: Optional[str] = None
     # Example frames illustrating the aggregate stats, drawn from the same
     # per-frame BRNG values that produced avg_brng/max_brng. Times are raw
     # seconds; brng values are percentages; thumbnails are side-by-side
@@ -3398,10 +3407,12 @@ class IntegratedSignalstatsAnalyzer:
         self._emit_progress(0)
         
         cancelled = False
+        periods_attempted = 0
         for i, (start_time, duration) in enumerate(analysis_periods):
             if self.check_cancelled():
                 cancelled = True
                 break
+            periods_attempted += 1
             logger.debug(f"  Analyzing period {i+1} ({self._seconds_to_timecode(start_time)} - {self._seconds_to_timecode(start_time + duration)}):")
             
             # Calculate progress range for this period (each period gets equal share of 0-90%)
@@ -3511,7 +3522,7 @@ class IntegratedSignalstatsAnalyzer:
                 sources = ("QCTools parsing and the per-period ffprobe pass"
                            if self.qctools_report else "the per-period ffprobe pass")
                 reason = (
-                    f"Signalstats could not run: all {total_periods} analysis "
+                    f"Signalstats could not run: all {periods_attempted} analysis "
                     f"period(s) were attempted but none returned data ({sources} "
                     f"produced nothing). No frames were examined — this is NOT a "
                     f"clean result, no conclusion can be drawn about out-of-range "
@@ -3526,6 +3537,8 @@ class IntegratedSignalstatsAnalyzer:
                 diagnosis=reason,
                 used_qctools=False,
                 severity='warning',
+                periods_attempted=periods_attempted,
+                periods_measured=0,
             )
         
         # Calculate aggregates
@@ -3572,6 +3585,27 @@ class IntegratedSignalstatsAnalyzer:
         else:
             analyzed_region = 'mixed'
 
+        # Sampling coverage. all_results holds one entry per period that
+        # returned data, so a shortfall means the aggregates below describe less
+        # than the intended sample — valid, but not the whole picture. Said here
+        # rather than inferred by the reader from a period count.
+        periods_measured = len(all_results)
+        coverage_note = None
+        if cancelled:
+            coverage_note = (
+                f"Cancelled after {periods_measured} of {len(analysis_periods)} "
+                f"analysis period(s); the remaining period(s) were never examined."
+            )
+        elif periods_measured < periods_attempted:
+            coverage_note = (
+                f"Only {periods_measured} of {periods_attempted} analysis period(s) "
+                f"returned data; violations may exist in the "
+                f"{periods_attempted - periods_measured} period(s) that could not be "
+                f"examined."
+            )
+        if coverage_note:
+            logger.warning(f"  {coverage_note}")
+
         # Generate comprehensive diagnosis
         diagnosis, severity = self._generate_comprehensive_diagnosis(
             violation_pct, max_brng, avg_brng, comparison_results, active_area is not None
@@ -3603,6 +3637,9 @@ class IntegratedSignalstatsAnalyzer:
             worst_frame_time=worst_frame_time,
             worst_frame_brng=worst_frame_brng,
             worst_frame_timecode=worst_frame_timecode,
+            periods_attempted=periods_attempted,
+            periods_measured=periods_measured,
+            coverage_note=coverage_note,
         )
 
     def _generate_comprehensive_diagnosis(self, violation_pct: float, max_brng: float,

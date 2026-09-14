@@ -4822,6 +4822,30 @@ def _render_frame_signalstats_html(frame_outputs) -> str:
             avg_brng = signalstats_data.get('avg_brng')
             used_qctools = signalstats_data.get('used_qctools', False)
 
+            # ── Sampling-coverage caveat ──
+            # The stats below aggregate only the periods that returned data, so
+            # say before the reader interprets them that the sample is short.
+            # Mirrors the BRNG 'partial_coverage' caveat. Absent counts mean a
+            # result from before the field existed — say nothing rather than
+            # guess at coverage.
+            periods_attempted = signalstats_data.get('periods_attempted')
+            periods_measured = signalstats_data.get('periods_measured')
+            if (periods_attempted and periods_measured is not None
+                    and periods_measured < periods_attempted):
+                coverage_note = signalstats_data.get('coverage_note') or (
+                    f"Only {periods_measured} of {periods_attempted} analysis "
+                    f"period(s) returned data."
+                )
+                html += f"""
+            <div style="background-color: var(--report-notice-bg); padding: 12px 16px; margin: 10px 0;
+                        border-left: 4px solid var(--report-gold); border-radius: 0 4px 4px 0;">
+                <p style="margin: 0; font-size: 14px;"><strong>&#x26A0; Partial coverage:</strong> {coverage_note}</p>
+                <p style="margin: 6px 0 0 0; font-size: 13px; color: #6b5a3e;">The periods that were
+                analyzed are valid, but this is not the full intended sample &mdash; the figures below
+                describe only the parts of the file that could be measured.</p>
+            </div>
+            """
+
             if violation_pct is not None or max_brng is not None:
                 # Label the heading with the region the stats were measured on
                 # ('' for legacy results that didn't record it)

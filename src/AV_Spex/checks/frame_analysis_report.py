@@ -89,6 +89,9 @@ def generate_summary(results: Dict, video_id: str) -> str:
             lines.append(f"  Frames with violations: {stats['violation_percentage']:.1f}%")
             lines.append(f"  Max BRNG: {stats['max_brng']:.2f}%")
             lines.append(f"  Avg BRNG: {stats['avg_brng']:.2f}%")
+            # The figures above cover only the periods that returned data.
+            if stats.get('coverage_note'):
+                lines.append(f"  Partial coverage: {stats['coverage_note']}")
 
         # Add analysis period info
         periods = stats.get('analysis_periods', [])

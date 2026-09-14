@@ -1413,6 +1413,46 @@ def _brng_payload(**extra):
     return payload
 
 
+def _signalstats_payload(**extra):
+    payload = {
+        'violation_percentage': 2.5, 'max_brng': 0.4, 'avg_brng': 0.1,
+        'diagnosis': 'Broadcast-compliant', 'severity': 'ok',
+        'analyzed_region': 'active_area', 'used_qctools': True,
+        'analysis_periods': [[100.0, 60], [300.0, 60], [900.0, 60]],
+        'periods_attempted': 3, 'periods_measured': 3,
+    }
+    payload.update(extra)
+    return payload
+
+
+def test_signalstats_partial_coverage_renders_a_caveat():
+    """Stats from 1 of 3 periods must not read like stats from all 3."""
+    outputs = {**_FRAME_OUTPUTS_BASE, 'signalstats_analysis': _signalstats_payload(
+        periods_measured=1,
+        coverage_note='Only 1 of 3 analysis period(s) returned data.',
+    )}
+    html = gr.generate_frame_analysis_html(outputs, "JPC_AV_02222")
+
+    assert "Partial coverage" in html
+    assert "Only 1 of 3 analysis period(s) returned data." in html
+    assert "not the full intended sample" in html
+
+
+def test_signalstats_full_coverage_renders_no_caveat():
+    outputs = {**_FRAME_OUTPUTS_BASE, 'signalstats_analysis': _signalstats_payload()}
+    assert "Partial coverage" not in gr.generate_frame_analysis_html(outputs, "JPC_AV_02222")
+
+
+def test_signalstats_legacy_results_render_no_caveat():
+    """Results predating the counts must not be guessed at as partial."""
+    payload = _signalstats_payload()
+    del payload['periods_attempted']
+    del payload['periods_measured']
+    outputs = {**_FRAME_OUTPUTS_BASE, 'signalstats_analysis': payload}
+
+    assert "Partial coverage" not in gr.generate_frame_analysis_html(outputs, "JPC_AV_02222")
+
+
 def test_brng_unavailable_renders_an_amber_could_not_run_section():
     """An absent section reads as 'switched off', not 'ran and measured nothing'."""
     outputs = {**_FRAME_OUTPUTS_BASE,
