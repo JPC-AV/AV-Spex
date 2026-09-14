@@ -4328,14 +4328,15 @@ SIGNALSTATS_METHODOLOGY_HTML = """
                     or chroma below 64 or above 960, in 10-bit code values (16–235 luma and 16–240 chroma
                     in 8-bit video). FFmpeg applies the limits for the file's own bit depth, so values are
                     always measured on the native scale.</li>
-                <li style="margin-bottom: 4px;"><strong>Flagged frame, full frame (QCTools)</strong> — more than
-                    1% of the frame's pixels are out of range. All-black frames are skipped first, because
+                <li style="margin-bottom: 4px;"><strong>Flagged frame, full frame (QCTools)</strong> — at least
+                    one pixel anywhere in the frame is out of range. All-black frames are skipped first, because
                     the sub-black noise in analog tape black would otherwise dominate the results. A frame is
                     treated as black when, in 10-bit code values, its maximum luma (YMAX) is below 300, its
                     90th-percentile luma (YHIGH) is below 115 and its 10th-percentile luma (YLOW) is below 97
                     (75, 28.75 and 24.25 in 8-bit).</li>
                 <li style="margin-bottom: 4px;"><strong>Flagged frame, active area (FFprobe)</strong> — at least
-                    one pixel inside the active picture area is out of range.</li>
+                    one pixel inside the active picture area is out of range. Both sources use the same rule,
+                    so their shares of flagged frames can be compared directly.</li>
             </ul>
             <p style="margin: 0 0 10px 0;">
                 Because a single out-of-range pixel is enough to flag a frame, the share of flagged frames

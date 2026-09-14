@@ -12,7 +12,7 @@ Coverage:
   - _detect_bit_depth (gz + plain, success + crash-fallback)
   - _extract_frame_violations (BRNG threshold, black-frame skip, missing tags)
   - _process_violation_buffer
-  - parse_for_violations_streaming_period (time-window + max_frames cap)
+  - parse_brng_period (time-window, every-frame share, black-frame skip)
   - detect_black_segments (min_duration + gap_tolerance + end-of-file flush)
   - find_duplicate_frame_candidates (min_run_length + color-bars/black exclusions)
 * IntegratedSignalstatsAnalyzer pure-logic helpers
@@ -302,7 +302,7 @@ def test_process_violation_buffer_filters_none(tmp_path):
     assert out == [fv, fv]
 
 
-# ---- parse_for_violations_streaming_period -------------------------------
+# ---- parse_brng_period ----------------------------------------------------
 
 def test_parse_period_filters_by_time_window(tmp_path):
     """Only frames within [start_time, end_time] should be considered."""
@@ -314,22 +314,58 @@ def test_parse_period_filters_by_time_window(tmp_path):
     ]
     path = _write_qctools(tmp_path, frames)
     parser = fa.QCToolsParser(path)
-    out = parser.parse_for_violations_streaming_period(start_time=5.0, end_time=20.0, period_num=1)
-    times = [v.timestamp for v in out]
-    assert times == [12.0, 10.0]  # sorted by violation_score desc
+    out = parser.parse_brng_period(start_time=5.0, end_time=20.0, period_num=1)
+    assert out['brng_frames'] == [(10.0, 0.1), (12.0, 0.2)]
 
 
-def test_parse_period_caps_results_to_max_frames(tmp_path):
+def test_parse_period_share_counts_every_frame_not_just_violations(tmp_path):
+    """The bug: only flagged frames were returned, and the share was computed
+    over that list — so it read 100% whenever anything was flagged."""
+    frames = (
+        [{"pkt_pts_time": str(t), "tags": dict(_NORMAL_TAGS, BRNG="0.05")} for t in range(0, 2)] +
+        [{"pkt_pts_time": str(t), "tags": dict(_NORMAL_TAGS, BRNG="0")} for t in range(2, 10)]
+    )
+    parser = fa.QCToolsParser(_write_qctools(tmp_path, frames))
+    out = parser.parse_brng_period(0.0, 100.0, period_num=1)
+    assert out['frames_analyzed'] == 10
+    assert out['frames_with_violations'] == 2
+    assert len(out['brng_values']) == 10
+
+
+def test_parse_period_flags_any_out_of_range_pixel(tmp_path):
+    """Same rule as the active-area ffprobe pass (BRNG > 0), so the shares compare."""
     frames = [
-        {"pkt_pts_time": str(t), "tags": dict(_NORMAL_TAGS, BRNG=f"0.{t:02d}")}
-        for t in range(1, 10)  # 9 violation candidates
+        {"pkt_pts_time": "1.0", "tags": dict(_NORMAL_TAGS, BRNG="0.0001")},  # below the old 1% cutoff
+        {"pkt_pts_time": "2.0", "tags": dict(_NORMAL_TAGS, BRNG="0")},
     ]
-    path = _write_qctools(tmp_path, frames)
-    parser = fa.QCToolsParser(path)
-    out = parser.parse_for_violations_streaming_period(0.0, 100.0, period_num=1, max_frames=3)
-    assert len(out) == 3
-    # Top 3 by violation_score should be the highest-BRNG frames
-    assert out[0].brng_value > out[1].brng_value > out[2].brng_value
+    parser = fa.QCToolsParser(_write_qctools(tmp_path, frames))
+    assert parser.parse_brng_period(0.0, 100.0, period_num=1)['frames_with_violations'] == 1
+
+
+def test_parse_period_skips_black_frames(tmp_path):
+    frames = [
+        {"pkt_pts_time": "1.0", "tags": dict(_BLACK_TAGS, BRNG="0.5")},
+        {"pkt_pts_time": "2.0", "tags": dict(_NORMAL_TAGS, BRNG="0")},
+    ]
+    parser = fa.QCToolsParser(_write_qctools(tmp_path, frames))
+    out = parser.parse_brng_period(0.0, 100.0, period_num=1)
+    assert out['frames_analyzed'] == 1
+    assert out['frames_with_violations'] == 0
+    assert out['black_frames_skipped'] == 1
+
+
+def test_parse_period_clean_period_is_data_not_none(tmp_path):
+    """A period with zero violations is a measurement, not a missing result."""
+    frames = [{"pkt_pts_time": str(t), "tags": dict(_NORMAL_TAGS, BRNG="0")} for t in range(5)]
+    parser = fa.QCToolsParser(_write_qctools(tmp_path, frames))
+    out = parser.parse_brng_period(0.0, 100.0, period_num=1)
+    assert out['frames_analyzed'] == 5 and out['frames_with_violations'] == 0
+
+
+def test_parse_period_without_frames_returns_none(tmp_path):
+    frames = [{"pkt_pts_time": "50.0", "tags": dict(_NORMAL_TAGS, BRNG="0.1")}]
+    parser = fa.QCToolsParser(_write_qctools(tmp_path, frames))
+    assert parser.parse_brng_period(0.0, 10.0, period_num=1) is None
 
 
 def test_parse_period_handles_missing_pkt_pts_time(tmp_path):
@@ -346,8 +382,8 @@ def test_parse_period_handles_missing_pkt_pts_time(tmp_path):
     Path(path).write_text(raw)
 
     parser = fa.QCToolsParser(path)
-    out = parser.parse_for_violations_streaming_period(0.0, 100.0, period_num=1)
-    assert len(out) == 1
+    out = parser.parse_brng_period(0.0, 100.0, period_num=1)
+    assert out['frames_analyzed'] == 1
 
 
 # ---- detect_black_segments -----------------------------------------------
@@ -1115,6 +1151,50 @@ def _analyzer_measuring(monkeypatch, periods, measured_indices):
 
     monkeypatch.setattr(a, "_analyze_with_ffprobe_period", fake_ffprobe)
     return a
+
+
+def _period_frames(start_time, n_frames, n_bad, brng=0.05):
+    """A period's per-frame BRNG: the first n_bad frames out of range, the rest clean."""
+    vals = [brng] * n_bad + [0.0] * (n_frames - n_bad)
+    return [(start_time + i / 30, v) for i, v in enumerate(vals)]
+
+
+def test_content_violations_with_clean_borders_are_not_labeled_border(tmp_path, monkeypatch):
+    """25% of frames bad inside the picture, borders clean: full frame and active
+    area agree, so every period is content_violations. The QCTools share used to
+    read 100% (flagged frames divided by flagged frames), which labeled these
+    periods border_violations and the file 'broadcast-safe'."""
+    periods = [(100.0, 10), (300.0, 10)]
+    frames = []
+    for start, _ in periods:
+        frames += [{"pkt_pts_time": str(ts), "tags": dict(_NORMAL_TAGS, BRNG=str(b))}
+                   for ts, b in _period_frames(start, 100, 25)]
+    frames.sort(key=lambda f: float(f["pkt_pts_time"]))
+
+    a = _signalstats_analyzer(duration=1784.7)
+    a.qctools_report = _write_qctools(tmp_path, frames)
+    monkeypatch.setattr(a, "_find_analysis_periods", lambda *args, **kw: periods)
+    monkeypatch.setattr(a, "_seconds_to_timecode", lambda t: "00:00:00.000")
+
+    def fake_ffprobe(active_area, start_time, duration, period_num, **kw):
+        pf = _period_frames(start_time, 100, 25)
+        vals = [b for _, b in pf]
+        return {'frames_analyzed': 100, 'frames_with_violations': 25,
+                'brng_values': vals, 'brng_frames': pf}
+
+    monkeypatch.setattr(a, "_analyze_with_ffprobe_period", fake_ffprobe)
+    border = fa.BorderDetectionResult(active_area=(10, 10, 700, 466), border_regions={},
+                                      detection_method="simple", quality_frame_hints=[])
+
+    result = a.analyze_with_signalstats(border_data=border, content_start_time=40.0,
+                                        color_bars_end_time=30.0,
+                                        analysis_duration=10, num_periods=2)
+
+    for cmp in result.comparison_results:
+        assert cmp['qctools_full_frame']['violations_pct'] == pytest.approx(25.0)
+        assert cmp['diagnosis'] == 'content_violations'
+    assert result.severity != 'ok'
+    assert "active picture area" in result.diagnosis
 
 
 def test_signalstats_reports_partial_coverage(monkeypatch):
