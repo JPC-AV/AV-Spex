@@ -1413,6 +1413,86 @@ def _brng_payload(**extra):
     return payload
 
 
+def _signalstats_payload(**extra):
+    payload = {
+        'violation_percentage': 2.5, 'max_brng': 0.4, 'avg_brng': 0.1,
+        'diagnosis': 'Broadcast-compliant', 'severity': 'ok',
+        'analyzed_region': 'active_area', 'used_qctools': True,
+        'analysis_periods': [[100.0, 60], [300.0, 60], [900.0, 60]],
+        'periods_attempted': 3, 'periods_measured': 3,
+    }
+    payload.update(extra)
+    return payload
+
+
+def test_signalstats_partial_coverage_renders_a_caveat():
+    """Stats from 1 of 3 periods must not read like stats from all 3."""
+    outputs = {**_FRAME_OUTPUTS_BASE, 'signalstats_analysis': _signalstats_payload(
+        periods_measured=1,
+        coverage_note='Only 1 of 3 analysis period(s) returned data.',
+    )}
+    html = gr.generate_frame_analysis_html(outputs, "JPC_AV_02222")
+
+    assert "Partial coverage" in html
+    assert "Only 1 of 3 analysis period(s) returned data." in html
+    assert "not the full intended sample" in html
+
+
+def test_signalstats_full_coverage_renders_no_caveat():
+    outputs = {**_FRAME_OUTPUTS_BASE, 'signalstats_analysis': _signalstats_payload()}
+    assert "Partial coverage" not in gr.generate_frame_analysis_html(outputs, "JPC_AV_02222")
+
+
+def test_signalstats_legacy_results_render_no_caveat():
+    """Results predating the counts must not be guessed at as partial."""
+    payload = _signalstats_payload()
+    del payload['periods_attempted']
+    del payload['periods_measured']
+    outputs = {**_FRAME_OUTPUTS_BASE, 'signalstats_analysis': payload}
+
+    assert "Partial coverage" not in gr.generate_frame_analysis_html(outputs, "JPC_AV_02222")
+
+
+def test_brng_unavailable_renders_an_amber_could_not_run_section():
+    """An absent section reads as 'switched off', not 'ran and measured nothing'."""
+    outputs = {**_FRAME_OUTPUTS_BASE,
+               'brng_unavailable_reason': 'video duration unknown'}
+    html = gr.generate_frame_analysis_html(outputs, "JPC_AV_03569")
+
+    assert "BRNG Violation Analysis" in html
+    assert "Could not run" in html
+    assert "video duration unknown" in html
+    assert "not</strong> a clean result" in html
+    assert "#fff3cd" in html, "the could-not-run banner must be amber, not green"
+
+
+def test_brng_unavailable_keeps_the_toc_anchor():
+    """Same anchor as the measured case, so the TOC entry is picked up."""
+    outputs = {**_FRAME_OUTPUTS_BASE,
+               'brng_unavailable_reason': 'video duration unknown'}
+    html = gr.generate_frame_analysis_html(outputs, "JPC_AV_03569")
+
+    assert "id='section-brng-analysis'" in html
+
+
+def test_brng_unavailable_alone_still_renders_the_frame_analysis_wrapper():
+    """It is the only finding here; has_content must not drop it."""
+    outputs = {**_FRAME_OUTPUTS_BASE,
+               'brng_unavailable_reason': 'video duration unknown'}
+    assert gr.generate_frame_analysis_html(outputs, "JPC_AV_03569") != ""
+
+
+def test_brng_results_win_over_a_stale_unavailable_reason():
+    """Real results must never be replaced by the could-not-run banner."""
+    outputs = {**_FRAME_OUTPUTS_BASE,
+               'brng_analysis': _brng_payload(),
+               'brng_unavailable_reason': 'video duration unknown'}
+    html = gr.generate_frame_analysis_html(outputs, "JPC_AV_03569")
+
+    assert "Could not run" not in html
+    assert "No BRNG violations detected" in html
+
+
 def test_brng_last_resort_periods_render_a_low_confidence_caveat():
     """A mostly-black sample must not read like a normal clean result."""
     outputs = {**_FRAME_OUTPUTS_BASE, 'brng_analysis': _brng_payload(

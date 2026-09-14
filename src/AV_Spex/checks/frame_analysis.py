@@ -7,6 +7,7 @@ Combines the efficiency of the refactored version with the sophistication of the
 import os
 import sys
 import json
+import math
 import gzip
 import time
 import cv2
@@ -116,10 +117,18 @@ class BRNGAnalysisResult:
 
 @dataclass
 class SignalstatsResult:
-    """Results from signalstats analysis"""
-    violation_percentage: float
-    max_brng: float
-    avg_brng: float
+    """Results from signalstats analysis.
+
+    The three aggregate stats are None when the analysis could not run (no
+    analyzable period, or no duration to place one). None is deliberate: a
+    could-not-run result that reported 0.0% would be indistinguishable from a
+    clean file, so consumers must render/log it as unmeasured rather than
+    substituting a zero. `diagnosis` then carries the reason and `severity` is
+    'warning'.
+    """
+    violation_percentage: Optional[float]
+    max_brng: Optional[float]
+    avg_brng: Optional[float]
     analysis_periods: List[Dict]
     diagnosis: str
     used_qctools: bool
@@ -130,6 +139,15 @@ class SignalstatsResult:
     # What region the aggregate stats were measured on:
     # 'active_area' | 'full_frame' | 'mixed' ('' for legacy results)
     analyzed_region: str = ''
+    # Sampling coverage. The aggregate stats above describe only the periods
+    # that returned data, so a run where some periods came back empty reports
+    # numbers that are *valid but incomplete* — indistinguishable, without
+    # these, from a run that sampled everything it intended to. BRNG carries
+    # the same information as period_confidence='partial_coverage'.
+    # None on results predating the field; equal counts mean full coverage.
+    periods_attempted: Optional[int] = None
+    periods_measured: Optional[int] = None
+    coverage_note: Optional[str] = None
     # Example frames illustrating the aggregate stats, drawn from the same
     # per-frame BRNG values that produced avg_brng/max_brng. Times are raw
     # seconds; brng values are percentages; thumbnails are side-by-side
@@ -808,6 +826,88 @@ class QCToolsParser:
         return runs, thresholds
 
 
+# Said whenever an analysis is skipped for want of a duration. A file can reach
+# us with no duration at all: an unfinalized capture writes no Segment Info
+# Duration, ffprobe then reports none and OpenCV hands back a scaled
+# AV_NOPTS_VALUE. Sampling-based analyses (signalstats, BRNG) choose *where* to
+# look from the duration, so without one they cannot run — which is a different
+# statement from "we looked and found nothing", and has to read differently.
+DURATION_UNKNOWN_REASON = (
+    "video duration unknown — the container reports none and ffprobe could not "
+    "supply one"
+)
+
+
+def _positive_finite(value) -> Optional[float]:
+    """Return `value` as a float when it is a real positive number, else None.
+
+    OpenCV does not fail when a container carries no duration — it derives
+    CAP_PROP_FRAME_COUNT from `ic->duration`, so an unfinalized capture (one
+    whose writer died before the Segment Info Duration was written back) hands
+    back AV_NOPTS_VALUE scaled to seconds: -9.223372036854776e+15. That is a
+    perfectly ordinary float, so every downstream calculation accepted it and
+    the analysis periods came out as `(50.03, -9223372036854856.0)`, reaching
+    ffmpeg as `-t -9223372036854856.0` (exit status 222). Non-finite values are
+    rejected for the same reason: fps of nan or inf poisons the same arithmetic.
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number <= 0:
+        return None
+    return number
+
+
+def _timing_from_ffprobe(video_path: str, raw_fps, raw_frames,
+                         cv_fps: Optional[float] = None,
+                         cv_frames: Optional[float] = None) -> Dict[str, Any]:
+    """Recover fps/total_frames/duration from ffprobe for an OpenCV-readable file.
+
+    Only the *timing* numbers are in question here: OpenCV opened the file and
+    reported sane geometry, so it can still decode frames. Callers therefore
+    keep `opencv_usable` True and only the numbers that failed validation are
+    replaced — a file with no container duration still gets border detection and
+    duplicate-frame verification, which need frames rather than a duration.
+
+    `cv_fps`/`cv_frames` are OpenCV's values *after* validation, passed in so
+    the half it got right is kept: the two fail independently (a file can have
+    a sound fps and a sentinel frame count), and ffprobe is only asked to cover
+    the half that failed.
+
+    Returns zeros when ffprobe cannot supply the timing either. Zero is the
+    "unknown" value by convention: callers already guard on `duration > 0`,
+    and a zero cannot silently produce a plausible-looking negative window.
+    """
+    logger.warning(
+        f"OpenCV reported unusable timing for {os.path.basename(video_path)} "
+        f"(fps={raw_fps}, frame count={raw_frames}) — the container is most "
+        f"likely missing its duration. Recovering timing from ffprobe."
+    )
+
+    probed = _ffprobe_video_properties(video_path) or {}
+    fps = cv_fps or _positive_finite(probed.get('fps'))
+    total_frames = cv_frames or _positive_finite(probed.get('total_frames'))
+    duration = _positive_finite(probed.get('duration'))
+    if not duration and fps and total_frames:
+        duration = total_frames / fps
+
+    if fps and duration:
+        logger.warning(
+            f"  Recovered from ffprobe: {duration:.3f}s @ {fps:.3f} fps"
+        )
+    else:
+        logger.error(
+            "  ffprobe could not supply a duration either. Analyses that need "
+            "one (signalstats periods, BRNG) cannot run on this file; "
+            "frame-reading analyses are unaffected."
+        )
+
+    return {'fps': fps or 0.0,
+            'total_frames': int(total_frames or 0),
+            'duration': duration or 0.0}
+
+
 def _ffprobe_video_properties(video_path: str) -> Optional[Dict[str, Any]]:
     """Read width/height/fps/frame count from ffprobe, or None if that fails."""
     try:
@@ -840,21 +940,23 @@ def _ffprobe_video_properties(video_path: str) -> Optional[Dict[str, Any]]:
                     fps = num / den
                     break
 
+        # Each candidate has to survive validation on its own: assigning the
+        # loop variable first meant a candidate that failed the `> 0` test was
+        # still the value that fell out of the loop, so ffprobe's own
+        # -9223372036854775.808 (AV_NOPTS_VALUE in seconds) became the duration.
         duration = 0.0
         for candidate in (stream.get('duration'),
                           (probe.get('format') or {}).get('duration')):
-            try:
-                duration = float(candidate)
-            except (TypeError, ValueError):
-                continue
-            if duration > 0:
+            seconds = _positive_finite(candidate)
+            if seconds:
+                duration = seconds
                 break
 
-        try:
-            total_frames = int(stream.get('nb_frames'))
-        except (TypeError, ValueError):
+        total_frames = _positive_finite(stream.get('nb_frames'))
+        if total_frames is None:
             # Matroska usually omits nb_frames; derive it from duration instead
-            total_frames = int(duration * fps) if duration > 0 and fps > 0 else 0
+            total_frames = duration * fps if duration > 0 and fps > 0 else 0
+        total_frames = int(total_frames)
 
         return {'width': width, 'height': height, 'fps': fps,
                 'total_frames': total_frames,
@@ -877,6 +979,15 @@ def probe_video_properties(video_path) -> Dict[str, Any]:
     The returned `opencv_usable` flag says whether frame *reading* is possible:
     ffprobe can supply metadata, but only cv2 hands back decoded frames, so
     callers that read frames must check it rather than assume.
+
+    Geometry and timing are validated separately, because they fail separately.
+    A file whose container never got a duration written (a capture cut short)
+    opens fine and reports correct dimensions, while cv2's frame count comes
+    back as a scaled AV_NOPTS_VALUE — a large *negative* number that arithmetic
+    accepts without complaint. So fps and frame count are checked for being
+    positive and finite; when they are not, the geometry and `opencv_usable`
+    stand and only the timing is re-read from ffprobe. `duration` of 0 means
+    unknown; callers must treat it as such rather than computing with it.
     """
     path = str(video_path)
     cap = cv2.VideoCapture(path)
@@ -884,13 +995,24 @@ def probe_video_properties(video_path) -> Dict[str, Any]:
         if cap.isOpened():
             width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            raw_fps = cap.get(cv2.CAP_PROP_FPS)
+            raw_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
             if width > 0 and height > 0:
-                return {'width': width, 'height': height, 'fps': fps,
-                        'total_frames': total_frames,
-                        'duration': total_frames / fps if fps > 0 else 0,
-                        'opencv_usable': True}
+                fps = _positive_finite(raw_fps)
+                total_frames = _positive_finite(raw_frames)
+                if fps and total_frames:
+                    return {'width': width, 'height': height, 'fps': fps,
+                            'total_frames': int(total_frames),
+                            'duration': total_frames / fps,
+                            'opencv_usable': True}
+                # Geometry is good but the timing is not. OpenCV can still
+                # decode frames, so this is not the fallback case below: keep
+                # cv2's geometry, take the timing from ffprobe.
+                props = {'width': width, 'height': height, 'opencv_usable': True}
+                props.update(_timing_from_ffprobe(path, raw_fps, raw_frames,
+                                                  cv_fps=fps,
+                                                  cv_frames=total_frames))
+                return props
     finally:
         cap.release()
 
@@ -1722,7 +1844,8 @@ class DifferentialBRNGAnalyzer:
                                        qctools_violations: List[FrameViolation] = None,
                                        analysis_periods: List[Tuple[float, int]] = None,
                                        upstream_context: 'UpstreamAnalysisContext' = None,
-                                       period_confidence_note: str = None) -> BRNGAnalysisResult:
+                                       period_confidence_note: str = None,
+                                       no_periods_reason: str = None) -> BRNGAnalysisResult:
         """
         Perform differential BRNG detection by creating highlighted and original versions.
         Now supports analyzing specific periods from signalstats.
@@ -1732,12 +1855,22 @@ class DifferentialBRNGAnalyzer:
                 inform sensitivity, sampling density, and thumbnail selection.
             period_confidence_note: Set when period selection had to fall back to a
                 mostly-black window; recorded on the result so the report can caveat it.
+            no_periods_reason: Why `analysis_periods` is empty, when the caller
+                knows. Only the caller can tell "no duration to place periods
+                with" from "every candidate overlapped black content", and the
+                operator needs the right one.
         """
         output_dir = Path(output_dir)
         output_dir.mkdir(exist_ok=True)
         
         # Store upstream context for use in submethods
         self.upstream_context = upstream_context
+
+        # Why this run produced nothing, when it produces nothing. Returning None
+        # is how "could not run" is signalled, but None carries no reason, and the
+        # report needs one to say anything more useful than silence. Cleared at
+        # the start of every run so a reason cannot outlive the run that set it.
+        self.could_not_run_reason = None
         
         # Store paths to temporary videos for thumbnail creation
         temp_video_paths = []
@@ -1864,6 +1997,10 @@ class DifferentialBRNGAnalyzer:
             # violation list here would be reported as "No BRNG violations
             # detected" — a clean bill of health for an analysis that never ran.
             if periods_failed and periods_failed == total_periods:
+                self.could_not_run_reason = (
+                    f"comparison video creation failed for all {total_periods} "
+                    f"analysis period(s), so no frames were examined"
+                )
                 logger.error(
                     f"  BRNG analysis could not run: comparison video creation failed "
                     f"for all {total_periods} period(s), so no frames were examined. "
@@ -1884,16 +2021,23 @@ class DifferentialBRNGAnalyzer:
 
             logger.info(f"  Analyzed {len(violations)} frames with potential violations across all periods\n")
         else:
-            # No periods survived selection. _validate_periods_against_black_segments
-            # already tried to shift each candidate away from black content and then
-            # to shrink it into the largest non-black gap, so an empty list means the
-            # file has no analyzable non-black window at all — a finding, not an edge
-            # case. Analyzing an arbitrary fixed window here would measure the very
-            # black content period selection just rejected.
+            # No periods survived selection — a finding, not an edge case, and
+            # never a clean result. Usually that is black content:
+            # _validate_periods_against_black_segments already tried to shift each
+            # candidate away from it and then to shrink it into the largest
+            # non-black gap, so an empty list means no analyzable non-black window
+            # exists. It can also mean there was no duration to place periods with,
+            # which only the caller knows — hence no_periods_reason. Either way,
+            # analyzing an arbitrary fixed window here would measure exactly what
+            # period selection just rejected.
+            reason = no_periods_reason or (
+                "every candidate overlapped black content and could not be "
+                "shifted or shrunk to fit"
+            )
+            self.could_not_run_reason = f"no analyzable period could be placed — {reason}"
             logger.warning(
-                "  No analyzable periods: every candidate overlapped black content and "
-                "could not be shifted or shrunk to fit. BRNG analysis is skipped for this "
-                "file — this is NOT a clean result, nothing was examined."
+                f"  No analyzable periods: {reason}. BRNG analysis is skipped for "
+                f"this file — this is NOT a clean result, nothing was examined."
             )
             self._emit_progress(100)
             return None
@@ -3202,6 +3346,36 @@ class IntegratedSignalstatsAnalyzer:
             black_segments=black_segments
         )
         
+        # No periods means nothing will be measured. Falling through would hit
+        # the "No data available" aggregate below, which reports 0.0% violations
+        # and 0.00% max BRNG — indistinguishable from a file that was examined
+        # and found clean. Say which of the two it is, and say it in the result
+        # so the report can render it amber rather than green.
+        if not analysis_periods:
+            if self.duration <= 0:
+                reason = (
+                    f"Signalstats could not run: {DURATION_UNKNOWN_REASON}. "
+                    f"No frames were examined — this is NOT a clean result, no "
+                    f"conclusion can be drawn about out-of-range values."
+                )
+            else:
+                reason = (
+                    "Signalstats could not run: no analyzable period could be "
+                    "placed (every candidate window overlapped black content). "
+                    "No frames were examined — this is NOT a clean result."
+                )
+            logger.error(f"  {reason}")
+            self._emit_progress(100)
+            return SignalstatsResult(
+                violation_percentage=None,
+                max_brng=None,
+                avg_brng=None,
+                analysis_periods=[],
+                diagnosis=reason,
+                used_qctools=False,
+                severity='warning',
+            )
+
         # Log analysis configuration
         logger.info(f"  Running {len(analysis_periods)} analysis periods:")
         for i, (start_time, duration) in enumerate(analysis_periods):
@@ -3232,9 +3406,13 @@ class IntegratedSignalstatsAnalyzer:
         
         self._emit_progress(0)
         
+        cancelled = False
+        periods_attempted = 0
         for i, (start_time, duration) in enumerate(analysis_periods):
             if self.check_cancelled():
+                cancelled = True
                 break
+            periods_attempted += 1
             logger.debug(f"  Analyzing period {i+1} ({self._seconds_to_timecode(start_time)} - {self._seconds_to_timecode(start_time + duration)}):")
             
             # Calculate progress range for this period (each period gets equal share of 0-90%)
@@ -3329,14 +3507,38 @@ class IntegratedSignalstatsAnalyzer:
         
         # Aggregate results
         if not all_results:
+            # Periods were placed and attempted, but every one came back empty.
+            # This used to return zeros with diagnosis "No data available", which
+            # the report rendered as 0.0% violations / 0.00% max BRNG — the same
+            # numbers a genuinely clean file produces. Nothing was measured, so
+            # the stats are None and the reason is stated.
             self._emit_progress(100)
+            if cancelled:
+                reason = (
+                    "Signalstats was cancelled before any analysis period could be "
+                    "measured. No frames were examined — this is not a result."
+                )
+            else:
+                sources = ("QCTools parsing and the per-period ffprobe pass"
+                           if self.qctools_report else "the per-period ffprobe pass")
+                reason = (
+                    f"Signalstats could not run: all {periods_attempted} analysis "
+                    f"period(s) were attempted but none returned data ({sources} "
+                    f"produced nothing). No frames were examined — this is NOT a "
+                    f"clean result, no conclusion can be drawn about out-of-range "
+                    f"values."
+                )
+            logger.error(f"  {reason}")
             return SignalstatsResult(
-                violation_percentage=0,
-                max_brng=0,
-                avg_brng=0,
+                violation_percentage=None,
+                max_brng=None,
+                avg_brng=None,
                 analysis_periods=analysis_periods,
-                diagnosis="No data available",
-                used_qctools=False
+                diagnosis=reason,
+                used_qctools=False,
+                severity='warning',
+                periods_attempted=periods_attempted,
+                periods_measured=0,
             )
         
         # Calculate aggregates
@@ -3383,6 +3585,27 @@ class IntegratedSignalstatsAnalyzer:
         else:
             analyzed_region = 'mixed'
 
+        # Sampling coverage. all_results holds one entry per period that
+        # returned data, so a shortfall means the aggregates below describe less
+        # than the intended sample — valid, but not the whole picture. Said here
+        # rather than inferred by the reader from a period count.
+        periods_measured = len(all_results)
+        coverage_note = None
+        if cancelled:
+            coverage_note = (
+                f"Cancelled after {periods_measured} of {len(analysis_periods)} "
+                f"analysis period(s); the remaining period(s) were never examined."
+            )
+        elif periods_measured < periods_attempted:
+            coverage_note = (
+                f"Only {periods_measured} of {periods_attempted} analysis period(s) "
+                f"returned data; violations may exist in the "
+                f"{periods_attempted - periods_measured} period(s) that could not be "
+                f"examined."
+            )
+        if coverage_note:
+            logger.warning(f"  {coverage_note}")
+
         # Generate comprehensive diagnosis
         diagnosis, severity = self._generate_comprehensive_diagnosis(
             violation_pct, max_brng, avg_brng, comparison_results, active_area is not None
@@ -3414,6 +3637,9 @@ class IntegratedSignalstatsAnalyzer:
             worst_frame_time=worst_frame_time,
             worst_frame_brng=worst_frame_brng,
             worst_frame_timecode=worst_frame_timecode,
+            periods_attempted=periods_attempted,
+            periods_measured=periods_measured,
+            coverage_note=coverage_note,
         )
 
     def _generate_comprehensive_diagnosis(self, violation_pct: float, max_brng: float,
@@ -3490,6 +3716,18 @@ class IntegratedSignalstatsAnalyzer:
         effective_start = max(content_start, color_bars_end or 0) + 10
         
         logger.debug(f"  Content starts at {effective_start:.1f}s (after color bars at {color_bars_end:.1f}s)\n")
+
+        # Every placement strategy below except QCTools periods measures back
+        # from self.duration, so an unknown (0) duration produced periods like
+        # (50.03, -80.03) — a negative length that reached ffmpeg as a negative
+        # `-t`. Refuse to place periods instead of inventing a window.
+        if self.duration <= 0 and not qctools_periods:
+            logger.error(
+                f"  Cannot place analysis periods: {DURATION_UNKNOWN_REASON}. "
+                f"Period placement measures back from the end of the file, so "
+                f"there is no window to sample."
+            )
+            return []
         
         # PRIORITY 1: Use QCTools-based periods if available (already validated upstream)
         if qctools_periods:
@@ -4797,6 +5035,7 @@ class EnhancedFrameAnalysis:
         
         # Step 5: BRNG analysis (conditional)
         brng_results = None
+        brng_no_periods_reason = None
         if self.check_cancelled():
             return results
         if brng_analysis_enabled:
@@ -4819,6 +5058,20 @@ class EnhancedFrameAnalysis:
                                 start_time = content_start + spacing * (i + 1)
                                 analysis_periods.append((start_time, period_duration))
                             logger.debug(f"Created {len(analysis_periods)} evenly distributed analysis periods\n")
+                    else:
+                        # Same refusal as period selection: spacing periods across
+                        # the content window needs an end to measure back from.
+                        # Leaving the list empty is what makes the analyzer report
+                        # "nothing was examined" instead of analyzing a window
+                        # computed from a duration that does not exist.
+                        brng_no_periods_reason = DURATION_UNKNOWN_REASON
+                        logger.error(
+                            f"BRNG analysis could not run: {DURATION_UNKNOWN_REASON}. "
+                            f"Analysis periods are spaced across the content window, "
+                            f"which cannot be measured without one. No frames were "
+                            f"examined — this is NOT a clean result, no conclusion can "
+                            f"be drawn about out-of-range values."
+                        )
                 
                 # Validate fallback periods against black segments and bars regions
                 if avoid_segments and analysis_periods:
@@ -4840,9 +5093,18 @@ class EnhancedFrameAnalysis:
                 qctools_violations=violations,
                 analysis_periods=analysis_periods,
                 upstream_context=upstream_context,
-                period_confidence_note=self.signalstats_analyzer.last_resort_period_note
+                period_confidence_note=self.signalstats_analyzer.last_resort_period_note,
+                no_periods_reason=brng_no_periods_reason
             )
             results['brng_analysis'] = asdict(brng_results) if brng_results else None
+            # A missing brng_analysis renders as no section at all, which reads as
+            # "not run because it was switched off" rather than "ran and could not
+            # measure". Carry the reason so the report can say which.
+            if not brng_results:
+                results['brng_analysis_unavailable'] = (
+                    getattr(self.brng_analyzer, 'could_not_run_reason', None)
+                    or "no frames were examined"
+                )
             
             # Emit BRNG analysis completion signal
             if signals and frame_config.enable_brng_analysis:

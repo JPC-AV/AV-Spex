@@ -250,6 +250,9 @@ def find_frame_analysis_outputs(source_directory, destination_directory, video_i
         'border_visualization': None,
         'border_data': None,
         'brng_analysis': None,
+        # Set when BRNG ran but could not measure anything; renders in place of
+        # the section instead of letting it vanish. See _render_frame_brng_html.
+        'brng_unavailable_reason': None,
         'brng_thumbnails': [],
         'signalstats_analysis': None,
         'enhanced_frame_analysis': None,
@@ -298,6 +301,9 @@ def find_frame_analysis_outputs(source_directory, destination_directory, video_i
                 brng_data = enhanced_data.get('final_brng_analysis') or enhanced_data.get('brng_analysis')
                 if brng_data:
                     frame_outputs['brng_analysis'] = brng_data  # Store as dict directly
+                else:
+                    frame_outputs['brng_unavailable_reason'] = enhanced_data.get(
+                        'brng_analysis_unavailable')
             
             # Extract bitplane check data from enhanced JSON
             if enhanced_data.get('bitplane_check'):
@@ -4816,6 +4822,30 @@ def _render_frame_signalstats_html(frame_outputs) -> str:
             avg_brng = signalstats_data.get('avg_brng')
             used_qctools = signalstats_data.get('used_qctools', False)
 
+            # ── Sampling-coverage caveat ──
+            # The stats below aggregate only the periods that returned data, so
+            # say before the reader interprets them that the sample is short.
+            # Mirrors the BRNG 'partial_coverage' caveat. Absent counts mean a
+            # result from before the field existed — say nothing rather than
+            # guess at coverage.
+            periods_attempted = signalstats_data.get('periods_attempted')
+            periods_measured = signalstats_data.get('periods_measured')
+            if (periods_attempted and periods_measured is not None
+                    and periods_measured < periods_attempted):
+                coverage_note = signalstats_data.get('coverage_note') or (
+                    f"Only {periods_measured} of {periods_attempted} analysis "
+                    f"period(s) returned data."
+                )
+                html += f"""
+            <div style="background-color: var(--report-notice-bg); padding: 12px 16px; margin: 10px 0;
+                        border-left: 4px solid var(--report-gold); border-radius: 0 4px 4px 0;">
+                <p style="margin: 0; font-size: 14px;"><strong>&#x26A0; Partial coverage:</strong> {coverage_note}</p>
+                <p style="margin: 6px 0 0 0; font-size: 13px; color: #6b5a3e;">The periods that were
+                analyzed are valid, but this is not the full intended sample &mdash; the figures below
+                describe only the parts of the file that could be measured.</p>
+            </div>
+            """
+
             if violation_pct is not None or max_brng is not None:
                 # Label the heading with the region the stats were measured on
                 # ('' for legacy results that didn't record it)
@@ -5127,6 +5157,26 @@ def _render_frame_brng_html(frame_outputs) -> str:
     Returns an empty string when this section has no inputs.
     """
     html = ""
+    if not frame_outputs.get('brng_analysis') and frame_outputs.get('brng_unavailable_reason'):
+        # BRNG ran and measured nothing. Omitting the section entirely (the old
+        # behaviour) is indistinguishable from the check being switched off, and
+        # an absent section is the one thing a reader cannot question. Keep the
+        # anchor identical to the measured case so the TOC entry is the same.
+        reason = frame_outputs['brng_unavailable_reason']
+        html += "<h3 id='section-brng-analysis' style='color: var(--report-gold);'>BRNG Violation Analysis</h3>"
+        html += BRNG_METHODOLOGY_HTML
+        html += f"""
+        <div style="background-color: #fff3cd; padding: 12px 16px; margin: 10px 0;
+                    border-left: 4px solid #bf971b; border-radius: 0 4px 4px 0;">
+            <p style="margin: 0; font-size: 14px;"><strong>&#x26A0; Could not run:</strong> {reason}.</p>
+            <p style="margin: 8px 0 0 0; font-size: 13px;">No frames were examined, so this is
+            <strong>not</strong> a clean result &mdash; no conclusion can be drawn about
+            out-of-range values in this file. Everything else in this report stands;
+            only broadcast-range analysis is missing.</p>
+        </div>
+        """
+        return html
+
     if frame_outputs['brng_analysis']:
         html += "<h3 id='section-brng-analysis' style='color: var(--report-gold);'>BRNG Violation Analysis</h3>"
 
@@ -5670,6 +5720,9 @@ def generate_frame_analysis_html(frame_outputs, video_id):
         frame_outputs.get('border_visualization') or
         frame_outputs.get('border_data') or
         frame_outputs.get('brng_analysis') or
+        # A BRNG run that could not measure anything is a finding, so it keeps
+        # the wrapper alive even when it is the only thing to report.
+        frame_outputs.get('brng_unavailable_reason') or
         frame_outputs.get('signalstats_analysis')
     )
     if not has_content:

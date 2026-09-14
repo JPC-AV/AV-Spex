@@ -26,6 +26,7 @@ Coverage:
 """
 
 import gzip
+import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -887,6 +888,373 @@ def test_ffprobe_video_properties_derives_frame_count_from_duration(monkeypatch)
     assert (props["width"], props["height"]) == (720, 486)
     assert props["fps"] == pytest.approx(29.97, abs=0.01)
     assert props["total_frames"] == 2997
+
+
+# OpenCV derives CAP_PROP_FRAME_COUNT from the container duration; when the
+# container has none, it hands back AV_NOPTS_VALUE scaled to seconds instead of
+# failing. This is the exact value JPC_AV_03569 produced.
+_NOPTS_SECONDS = -9223372036854775.808
+
+
+def _live_no_duration():
+    """cv2 opens the file and geometry is right, but the timing is the sentinel."""
+    import cv2
+    return _LiveCapture({
+        cv2.CAP_PROP_FRAME_WIDTH: 720.0,
+        cv2.CAP_PROP_FRAME_HEIGHT: 486.0,
+        cv2.CAP_PROP_FPS: 30000 / 1001,
+        cv2.CAP_PROP_FRAME_COUNT: _NOPTS_SECONDS * (30000 / 1001),
+    })
+
+
+def test_probe_video_properties_rejects_opencv_nopts_frame_count(monkeypatch):
+    """A missing container duration must not become a negative duration.
+
+    Unchecked, this reached _select_analysis_periods as
+    `available_duration = -9223372036854856.0` and then ffmpeg as
+    `-t -9223372036854856.0`, which exits 222.
+    """
+    monkeypatch.setattr(fa.cv2, "VideoCapture", lambda *a, **kw: _live_no_duration())
+    monkeypatch.setattr(fa, "_ffprobe_video_properties", lambda p: None)
+
+    props = fa.probe_video_properties("/v/in.mkv")
+
+    assert props["duration"] == 0, "0 is the 'unknown' value guards already check"
+    assert props["total_frames"] == 0
+    assert props["duration"] >= 0 and props["total_frames"] >= 0
+
+
+def test_probe_video_properties_keeps_opencv_geometry_when_timing_is_bad(monkeypatch):
+    """cv2 can still decode frames, so border detection must not be given up."""
+    monkeypatch.setattr(fa.cv2, "VideoCapture", lambda *a, **kw: _live_no_duration())
+    monkeypatch.setattr(fa, "_ffprobe_video_properties", lambda p: None)
+
+    props = fa.probe_video_properties("/v/in.mkv")
+
+    assert (props["width"], props["height"]) == (720, 486)
+    assert props["opencv_usable"] is True
+
+
+def test_probe_video_properties_recovers_timing_from_ffprobe(monkeypatch):
+    """Geometry from cv2, timing from ffprobe — the file stays fully analyzable."""
+    monkeypatch.setattr(fa.cv2, "VideoCapture", lambda *a, **kw: _live_no_duration())
+    monkeypatch.setattr(fa, "_ffprobe_video_properties", lambda p: {
+        "width": 720, "height": 486, "fps": 30000 / 1001,
+        "total_frames": 11307, "duration": 377.31,
+    })
+
+    props = fa.probe_video_properties("/v/in.mkv")
+
+    assert props["duration"] == pytest.approx(377.31)
+    assert props["total_frames"] == 11307
+    assert props["fps"] == pytest.approx(29.97, abs=0.01)
+    assert props["opencv_usable"] is True
+
+
+def test_probe_video_properties_rejects_nan_fps(monkeypatch):
+    """A non-finite fps poisons the same arithmetic a negative one does."""
+    import cv2 as _cv2
+    cap = _LiveCapture({
+        _cv2.CAP_PROP_FRAME_WIDTH: 720.0,
+        _cv2.CAP_PROP_FRAME_HEIGHT: 486.0,
+        _cv2.CAP_PROP_FPS: float("nan"),
+        _cv2.CAP_PROP_FRAME_COUNT: 53489.0,
+    })
+    monkeypatch.setattr(fa.cv2, "VideoCapture", lambda *a, **kw: cap)
+    monkeypatch.setattr(fa, "_ffprobe_video_properties", lambda p: None)
+
+    props = fa.probe_video_properties("/v/in.mkv")
+
+    assert props["fps"] == 0.0
+    assert props["duration"] == 0
+
+
+def test_ffprobe_video_properties_rejects_nopts_duration(monkeypatch):
+    """ffprobe can report the sentinel too; a failed candidate must not survive."""
+    completed = MagicMock()
+    completed.stdout = (
+        '{"streams": [{"width": 720, "height": 486, '
+        '"avg_frame_rate": "30000/1001", "duration": "-9223372036854775.808"}], '
+        '"format": {"duration": "-9223372036854775.808"}}'
+    )
+    monkeypatch.setattr(fa.subprocess, "run", lambda *a, **kw: completed)
+
+    props = fa._ffprobe_video_properties("/v/in.mkv")
+
+    assert props["duration"] == 0
+    assert props["total_frames"] == 0
+
+
+def test_ffprobe_video_properties_ignores_na_nb_frames(monkeypatch):
+    """nb_frames of 'N/A' falls through to the duration-derived count."""
+    completed = MagicMock()
+    completed.stdout = (
+        '{"streams": [{"width": 720, "height": 486, "nb_frames": "N/A", '
+        '"avg_frame_rate": "30000/1001", "duration": "100.0"}], '
+        '"format": {"duration": "100.0"}}'
+    )
+    monkeypatch.setattr(fa.subprocess, "run", lambda *a, **kw: completed)
+
+    props = fa._ffprobe_video_properties("/v/in.mkv")
+
+    assert props["total_frames"] == 2997
+
+
+# ---------------------------------------------------------------------------
+# Unknown duration: signalstats/BRNG must skip, not report a clean measurement
+# ---------------------------------------------------------------------------
+
+def _signalstats_analyzer(duration):
+    """An analyzer with only the attributes period selection touches."""
+    a = fa.IntegratedSignalstatsAnalyzer.__new__(fa.IntegratedSignalstatsAnalyzer)
+    a.duration = duration
+    a.fps = 30000 / 1001
+    a.width, a.height = 720, 486
+    a.qctools_report = None
+    a.check_cancelled = lambda: False
+    a.signals = None
+    a.last_resort_period_note = None
+    return a
+
+
+def test_find_analysis_periods_refuses_unknown_duration():
+    """A 0 duration yielded (50.03, -80.03) — a negative ffmpeg -t."""
+    a = _signalstats_analyzer(duration=0.0)
+
+    periods = a._find_analysis_periods(content_start=40.03, color_bars_end=30.03,
+                                       duration=60, num_periods=3)
+
+    assert periods == []
+    assert all(length > 0 for _, length in periods), "a negative -t reaches ffmpeg"
+
+
+def test_find_analysis_periods_uses_qctools_periods_without_a_duration():
+    """QCTools periods are absolute, so they need no duration to be placed."""
+    a = _signalstats_analyzer(duration=0.0)
+
+    periods = a._find_analysis_periods(content_start=40.03, color_bars_end=30.03,
+                                       duration=60, num_periods=3,
+                                       qctools_periods=[(120.0, 60), (300.0, 60)])
+
+    assert periods == [(120.0, 60), (300.0, 60)]
+
+
+def test_signalstats_reports_unknown_duration_not_zero_percent(monkeypatch):
+    """The false-clean this fixes: 0.0% violations on a file nothing was read from."""
+    a = _signalstats_analyzer(duration=0.0)
+
+    result = a.analyze_with_signalstats(border_data=None, content_start_time=40.03,
+                                        color_bars_end_time=30.03,
+                                        analysis_duration=60, num_periods=3)
+
+    assert result.violation_percentage is None, "0.0 would render as a clean result"
+    assert result.max_brng is None and result.avg_brng is None
+    assert result.severity == "warning"
+    assert "duration unknown" in result.diagnosis
+    assert result.analysis_periods == []
+
+
+def test_signalstats_keeps_the_black_content_reason(monkeypatch):
+    """The other empty-period cause must not be relabelled as a duration problem."""
+    a = _signalstats_analyzer(duration=1784.7)
+    monkeypatch.setattr(a, "_find_analysis_periods", lambda *args, **kw: [])
+
+    result = a.analyze_with_signalstats(border_data=None, content_start_time=40.03,
+                                        color_bars_end_time=30.03,
+                                        analysis_duration=60, num_periods=3)
+
+    assert result.violation_percentage is None
+    assert "black content" in result.diagnosis
+    assert "duration unknown" not in result.diagnosis
+
+
+def test_brng_returns_none_and_names_the_reason(caplog):
+    """BRNG's could-not-run convention is None; the reason has to be the right one."""
+    analyzer = fa.DifferentialBRNGAnalyzer.__new__(fa.DifferentialBRNGAnalyzer)
+    analyzer.check_cancelled = lambda: False
+    analyzer.signals = None
+    analyzer.upstream_context = None
+
+    with caplog.at_level("WARNING"):
+        result = analyzer.analyze_with_differential_detection(
+            output_dir=Path(tempfile.mkdtemp()),
+            analysis_periods=[],
+            no_periods_reason=fa.DURATION_UNKNOWN_REASON,
+        )
+
+    assert result is None, "an empty result would render as 'no violations detected'"
+    assert "duration unknown" in caplog.text
+    assert "black content" not in caplog.text
+
+
+def _analyzer_with_periods(monkeypatch, periods, qctools_report=None):
+    a = _signalstats_analyzer(duration=1784.7)
+    a.qctools_report = qctools_report
+    monkeypatch.setattr(a, "_find_analysis_periods", lambda *args, **kw: periods)
+    # Every source comes back empty: this is the "attempted but measured nothing"
+    # case, not the "no periods" case.
+    monkeypatch.setattr(a, "_parse_qctools_brng_period", lambda *args, **kw: None)
+    monkeypatch.setattr(a, "_analyze_with_ffprobe_period", lambda *args, **kw: None)
+    monkeypatch.setattr(a, "_seconds_to_timecode", lambda t: "00:00:00.000")
+    return a
+
+
+def _analyzer_measuring(monkeypatch, periods, measured_indices):
+    """An analyzer whose ffprobe pass returns data only for some periods."""
+    a = _signalstats_analyzer(duration=1784.7)
+    a.qctools_report = None
+    monkeypatch.setattr(a, "_find_analysis_periods", lambda *args, **kw: periods)
+    monkeypatch.setattr(a, "_parse_qctools_brng_period", lambda *args, **kw: None)
+    monkeypatch.setattr(a, "_seconds_to_timecode", lambda t: "00:00:00.000")
+
+    def fake_ffprobe(active_area, start_time, duration, period_num, **kw):
+        if (period_num - 1) not in measured_indices:
+            return None
+        return {'frames_analyzed': 100, 'frames_with_violations': 2,
+                'brng_values': [0.001, 0.002], 'brng_frames': [(start_time, 0.001)]}
+
+    monkeypatch.setattr(a, "_analyze_with_ffprobe_period", fake_ffprobe)
+    return a
+
+
+def test_signalstats_reports_partial_coverage(monkeypatch):
+    """Aggregates from one period must not pass as the full intended sample."""
+    a = _analyzer_measuring(monkeypatch, [(100.0, 60), (300.0, 60), (900.0, 60)],
+                            measured_indices={0})
+
+    result = a.analyze_with_signalstats(border_data=None, content_start_time=40.0,
+                                        color_bars_end_time=30.0,
+                                        analysis_duration=60, num_periods=3)
+
+    assert result.violation_percentage is not None, "the measured period is still valid"
+    assert result.periods_attempted == 3
+    assert result.periods_measured == 1
+    assert "1 of 3" in result.coverage_note
+
+
+def test_signalstats_full_coverage_sets_no_note(monkeypatch):
+    a = _analyzer_measuring(monkeypatch, [(100.0, 60), (300.0, 60)],
+                            measured_indices={0, 1})
+
+    result = a.analyze_with_signalstats(border_data=None, content_start_time=40.0,
+                                        color_bars_end_time=30.0,
+                                        analysis_duration=60, num_periods=2)
+
+    assert result.periods_measured == result.periods_attempted == 2
+    assert result.coverage_note is None
+
+
+def test_signalstats_cancellation_is_reported_as_coverage_not_failure(monkeypatch):
+    """Cancelling after some periods leaves valid numbers over a short sample."""
+    a = _analyzer_measuring(monkeypatch, [(100.0, 60), (300.0, 60), (900.0, 60)],
+                            measured_indices={0, 1, 2})
+    calls = {'n': 0}
+
+    def cancel_after_two():
+        calls['n'] += 1
+        return calls['n'] > 2   # checked once per period, at the top of the loop
+
+    a.check_cancelled = cancel_after_two
+
+    result = a.analyze_with_signalstats(border_data=None, content_start_time=40.0,
+                                        color_bars_end_time=30.0,
+                                        analysis_duration=60, num_periods=3)
+
+    assert result.periods_measured == 2
+    assert "Cancelled" in result.coverage_note
+
+
+def test_signalstats_periods_that_return_nothing_are_not_zero_percent(monkeypatch):
+    """The old 'No data available' path returned 0.0% — a clean bill of health."""
+    a = _analyzer_with_periods(monkeypatch, [(100.0, 60), (300.0, 60)])
+
+    result = a.analyze_with_signalstats(border_data=None, content_start_time=40.0,
+                                        color_bars_end_time=30.0,
+                                        analysis_duration=60, num_periods=2)
+
+    assert result.violation_percentage is None
+    assert result.max_brng is None and result.avg_brng is None
+    assert result.severity == "warning"
+    assert "2 analysis period(s) were attempted" in result.diagnosis
+    assert result.diagnosis != "No data available"
+
+
+def test_signalstats_names_only_the_sources_it_had(monkeypatch):
+    """Blaming QCTools parsing when there was no QCTools report would mislead."""
+    without = _analyzer_with_periods(monkeypatch, [(100.0, 60)], qctools_report=None)
+    r1 = without.analyze_with_signalstats(border_data=None, content_start_time=40.0,
+                                          color_bars_end_time=30.0,
+                                          analysis_duration=60, num_periods=1)
+    assert "QCTools" not in r1.diagnosis
+
+    with_qct = _analyzer_with_periods(monkeypatch, [(100.0, 60)],
+                                      qctools_report="/qc/report.qctools.xml.gz")
+    r2 = with_qct.analyze_with_signalstats(border_data=None, content_start_time=40.0,
+                                           color_bars_end_time=30.0,
+                                           analysis_duration=60, num_periods=1)
+    assert "QCTools" in r2.diagnosis
+
+
+def test_signalstats_cancellation_is_not_reported_as_a_failure(monkeypatch):
+    """Cancelling is the operator's doing, not a file or tool problem."""
+    a = _analyzer_with_periods(monkeypatch, [(100.0, 60)])
+    a.check_cancelled = lambda: True
+
+    result = a.analyze_with_signalstats(border_data=None, content_start_time=40.0,
+                                        color_bars_end_time=30.0,
+                                        analysis_duration=60, num_periods=1)
+
+    assert result.violation_percentage is None, "still not a clean result"
+    assert "cancelled" in result.diagnosis
+    assert "could not run" not in result.diagnosis
+
+
+def test_brng_records_why_it_could_not_run():
+    """The reason has to leave the analyzer; None alone tells the report nothing."""
+    analyzer = fa.DifferentialBRNGAnalyzer.__new__(fa.DifferentialBRNGAnalyzer)
+    analyzer.check_cancelled = lambda: False
+    analyzer.signals = None
+
+    result = analyzer.analyze_with_differential_detection(
+        output_dir=Path(tempfile.mkdtemp()),
+        analysis_periods=[],
+        no_periods_reason=fa.DURATION_UNKNOWN_REASON,
+    )
+
+    assert result is None
+    assert "duration unknown" in analyzer.could_not_run_reason
+
+
+def test_brng_could_not_run_reason_does_not_outlive_its_run():
+    """A stale reason would put a could-not-run banner on a measured result."""
+    analyzer = fa.DifferentialBRNGAnalyzer.__new__(fa.DifferentialBRNGAnalyzer)
+    analyzer.check_cancelled = lambda: False
+    analyzer.signals = None
+
+    analyzer.analyze_with_differential_detection(
+        output_dir=Path(tempfile.mkdtemp()), analysis_periods=[],
+        no_periods_reason=fa.DURATION_UNKNOWN_REASON)
+    assert analyzer.could_not_run_reason is not None
+
+    # A second run that gets as far as period handling clears it first.
+    analyzer.analyze_with_differential_detection(
+        output_dir=Path(tempfile.mkdtemp()), analysis_periods=[])
+    assert "duration unknown" not in analyzer.could_not_run_reason
+
+
+def test_summary_does_not_print_zero_percent_when_signalstats_could_not_run():
+    """generate_summary is what the operator reads in the console."""
+    from AV_Spex.checks import frame_analysis_report
+
+    text = frame_analysis_report.generate_summary(
+        {'qctools_report_available': True,
+         'signalstats': {'violation_percentage': None, 'max_brng': None,
+                         'avg_brng': None, 'analysis_periods': [],
+                         'diagnosis': 'Signalstats could not run: video duration unknown'}},
+        'JPC_AV_03569')
+
+    assert "0.0%" not in text and "0.00%" not in text
+    assert "could not run" in text.lower()
 
 
 def test_ffprobe_video_properties_returns_none_on_bad_dimensions(monkeypatch):
