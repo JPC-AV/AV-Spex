@@ -346,7 +346,7 @@ class ComplexWindow(QWidget, ThemeableMixin):
                 "Automatically adjusts borders if edge artifacts are found",
                 extra_indent=self.INDENT))
 
-        self.max_border_retries_input = QLineEdit("5")
+        self.max_border_retries_input = QLineEdit("3")
         self._add_option(soph_layout, self._param_row(
             "Max Retries:", self.max_border_retries_input),
             self._desc_label(

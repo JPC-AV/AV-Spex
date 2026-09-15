@@ -321,11 +321,11 @@ Detects the active video area and identifies edge artifacts including head-switc
 
 Two modes are available:
 - **Simple** (default): Crops a fixed pixel border from each edge (default: 25px)
-- **Sophisticated**: Uses edge detection to dynamically identify the active video area
+- **Sophisticated**: Scans in from each edge of well-exposed sample frames to find where the picture starts, sizes each border independently, and expands the bottom crop for head-switching noise. Brightness threshold, edge search width, sample frame count and padding are adjustable on the Complex tab. Border refinement (re-expanding borders when BRNG finds edge artifacts) runs in this mode only.
 
 ### BRNG Analysis
 
-Detects out-of-range luma and chroma values (BRNG — **B**roadcast **Ra**n**g**e) using a multi-method voting approach. Frames with violations are highlighted in the diagnostic output, and results are included in the HTML report. BRNG analysis automatically skips color bars at the head of the tape to avoid false positives.
+Detects out-of-range luma and chroma values (BRNG — **B**roadcast **Ra**n**g**e) using a multi-method voting approach. Frames with violations are highlighted in the diagnostic output, and results are included in the HTML report. Detected color bars (head and mid-file) are skipped to avoid false positives, unless **Skip Color Bars** is turned off (`--frame-no-colorbar-skip`).
 
 <p align="center">
   <img src="https://github.com/JPC-AV/JPC_AV_videoQC/blob/main/images_for_readme/avspex_brng_example.png?raw=true" alt="BRNG Analysis Example"/>

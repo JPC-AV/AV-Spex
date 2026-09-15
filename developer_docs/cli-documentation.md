@@ -421,7 +421,7 @@ The frame analysis sub-system is configured via `checks_config.outputs.frame_ana
 
 All frame analysis updates are applied as a single deep-merge `update_config('checks', ...)` call at the end of `run_cli_mode`. If none of the frame analysis flags are supplied, the config is unchanged.
 
-Tuning parameters that the GUI exposes but the CLI does not (sophisticated border thresholds / sample frames / padding / max retries, analysis-period duration & count, duplicate-frame `min_run_length`, and the CLAMS bars/tone numerics) are JSON-only. Use `-pp checks,outputs` to inspect the live values, or edit `last_used_checks_config.json` directly.
+Tuning parameters the CLI does not expose must be set in the GUI or in the saved JSON: sophisticated border threshold / edge width / sample frames / padding, auto-retry and max retries, and analysis-period duration & count (all on the Complex tab); duplicate-frame `duplicate_min_run_length` and the CLAMS bars/tone numerics are JSON-only. Use `-pp checks,outputs` to inspect the live values, or edit `last_used_checks_config.json` directly.
 
 Color bar skipping relies on the `color_bars_end_time` value and the `all_bars_regions` span list (the qct-parse + CLAMS consensus) being passed through `process_video_outputs()` → `process_frame_analysis()` → `analyze_frame_quality()`. Passing `--frame-no-colorbar-skip` sets `brng_skip_color_bars = False`, so `analyze()` stops excluding both from the QCTools violation scan, analysis-period placement, signalstats and BRNG. Duplicate-frame detection keeps excluding them regardless.
 
@@ -1136,7 +1136,7 @@ All outputs are conditional. If all selected outputs succeed, a results dictiona
 
 #### CLAMS Detection (Bars + Tone)
 
-When `tools.clams_detection.run_tool` is true, `process_video_outputs()` runs the CLAMS SSIM-based SMPTE bars detector and the cross-correlation tone detector together as one step, before qct-parse. The tone detector identifies spans of monotonic audio (e.g. the tones in SMPTE bars-and-tones segments), and detected bars/tone regions are passed to `run_qctparse()` to guide additional windowed bars scans. The head-bars end time used for downstream BRNG-skip and access-file trim is merged across both detectors ("longest/latest wins"). Numeric tuning of the `bars`/`tone` parameters is JSON-only — only `clams_detection.run_tool` is settable from the CLI (`av-spex --on clams_detection.run_tool`).
+When `tools.clams_detection.run_tool` is true, `process_video_outputs()` runs the CLAMS SSIM-based SMPTE bars detector and the cross-correlation tone detector together as one step, before qct-parse. The tone detector identifies spans of monotonic audio (e.g. the tones in SMPTE bars-and-tones segments), and detected bars/tone regions are passed to `run_qctparse()` to guide additional windowed bars scans. The head-bars end time used for downstream BRNG-skip and access-file trim is settled by the SSIM-arbitrated qct-parse + CLAMS consensus (`merge_head_bars_consensus()` in `processing_mgmt.py`). Numeric tuning of the `bars`/`tone` parameters is JSON-only — only `clams_detection.run_tool` is settable from the CLI (`av-spex --on clams_detection.run_tool`).
 
 7. **Completion**
     Upon completion of the single directory loop, the CLI app outputs the video ID in ASCII art, and, if additional source directories were provided, begins the loop again.

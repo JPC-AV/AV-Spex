@@ -4285,10 +4285,12 @@ BORDER_DETECTION_METHODOLOGY_HTML = """
             <ul style="margin: 4px 0 10px 20px; padding: 0;">
                 <li style="margin-bottom: 4px;"><strong>Sophisticated (quality-based)</strong> — samples 
                     multiple frames across the video, selecting high-quality frames with good contrast. 
-                    Analyzes luminance gradients at frame edges to find where active picture content begins. 
+                    Scans in from each frame edge for the first row or column brighter than a threshold to 
+                    find where active picture content begins, taking the median across frames. 
                     Also detects head switching artifacts in the bottom rows of the frame. If the
-                    average head switching artifact height exceeds the luminance-based bottom border crop,
-                    the bottom crop is expanded to match the artifact height.</li>
+                    average head switching artifact height exceeds the measured bottom border,
+                    the bottom crop is expanded to match the artifact height. A small padding is then 
+                    trimmed from every side.</li>
                 <li style="margin-bottom: 4px;"><strong>Simple (fixed)</strong> — applies a uniform border 
                     crop (default 25 pixels) on all sides. Used as a fallback when sophisticated detection 
                     is not possible.</li>
@@ -4394,8 +4396,9 @@ SIGNALSTATS_METHODOLOGY_HTML = """
                     spaced periods across the video content (after color bars)</li>
             </ol>
             <p style="margin: 0; color: #777;">
-                The final diagnosis is based on active area results, which reflect the actual picture 
-                content that would be seen in playback or broadcast.
+                When border detection ran, the final diagnosis is based on active area results, which 
+                reflect the actual picture content that would be seen in playback or broadcast. Without 
+                border detection it is based on the full frame, borders included.
             </p>
         </div>
         """
@@ -4475,8 +4478,9 @@ BRNG_METHODOLOGY_HTML = """
                     frames examined by the differential detector. The sample count adapts based on signalstats 
                     findings for each period: periods with significant active-area violations receive denser 
                     sampling (~200 frames) while periods with negligible active-area BRNG use lighter sampling 
-                    (~30 frames). When no upstream data is available, the default behavior targets ~50–100 frames 
-                    per period.</li>
+                    (~30 frames). Otherwise every QCTools-flagged frame in the period is examined; if fewer than 50 
+                    map to it, evenly spaced frames are added (up to ~100–200 samples), and a tape with no 
+                    QCTools violations at all gets up to 500 evenly spaced samples per period.</li>
             </ul>
             <p style="margin: 0 0 6px 0; font-weight: bold;">Adaptive detection:</p>
             <p style="margin: 0 0 10px 0;">

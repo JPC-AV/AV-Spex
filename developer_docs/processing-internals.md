@@ -8,13 +8,15 @@ Deep reference for the analysis subsystems. CLAUDE.md carries a one-paragraph su
 
 Unified module controlled by `FrameAnalysisConfig`. Three optional sub-steps, each independently togglable:
 
-- **Border detection**: Detects active video area and head-switching artifacts. Modes: `simple` (fixed pixel crop, default 25px) or `sophisticated` (edge detection). Supports auto-retry with refinement iterations.
+- **Border detection**: Detects active video area and head-switching artifacts. Modes: `simple` (fixed pixel crop, `simple_border_pixels`, default 25px) or `sophisticated` (brightness scan in from each edge of well-exposed sample frames, tunable via the `sophisticated_*` fields). Sophisticated mode supports auto-retry refinement, which stops early when a round makes no meaningful improvement.
 - **BRNG analysis**: Detects out-of-range luma/chroma values using multi-method voting; generates diagnostic thumbnails and an HTML report with magenta highlights.
 - **Signalstats**: FFmpeg `signalstats` filter analysis over selected time periods (default: 3 periods of 60s each).
 
 Signalstats and BRNG analysis sample **analysis periods** rather than the whole file. How those periods are chosen — the QCTools violation histogram, the black-segment/bars avoidance and repair passes, and the post-signalstats refinement — is documented separately in **`developer_docs/analysis-period-selection.md`**.
 
-Color bars end time (from qct-parse) is passed to frame analysis so non-program content is skipped. Results feed into the HTML report.
+The head-bars end time and all detected bars spans (the qct-parse + CLAMS consensus) are passed to frame analysis so test patterns are skipped; `brng_skip_color_bars` gates that for the BRNG side (violation scan, period placement, signalstats, BRNG), while duplicate-frame detection always excludes bars. Results feed into the HTML report.
+
+A step-by-step account of period selection, border detection, signalstats and BRNG — every threshold, in execution order — is in **`docs/frame_analysis_process.md`**.
 
 Frame analysis image/JSON outputs (`_enhanced_frame_analysis.json`, `_border_detection.jpg`, `brng_thumbnails/`) are written to **`{video_id}_qc_metadata/`**, not `report_csvs/` — `analyze_frame_quality(output_dir=destination_directory)` and `destination_directory` is the qc_metadata dir (see `dir_setup.py`). Some frame-analysis CSV sidecars and HTML fragments do go to `report_csvs/`.
 

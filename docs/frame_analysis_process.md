@@ -21,6 +21,9 @@ Values are the code defaults. "Config" means `FrameAnalysisConfig` in `utils/con
    - `border_detection_mode` → `simple` or `sophisticated`
    - `brng_skip_color_bars` (True)
    - `max_border_retries` (3)
+
+   Everything else (enable flags, border and period settings) is read from the same
+   `FrameAnalysisConfig` inside `analyze()`.
 5. Video geometry and timing are read with OpenCV; if OpenCV can't open the file, geometry comes
    from ffprobe instead and frame-reading steps know they can't decode frames.
    An unknown duration is recorded as 0 and treated as "unknown", never computed with.
@@ -32,7 +35,7 @@ Values are the code defaults. "Config" means `FrameAnalysisConfig` in `utils/con
 | Step | What | Runs when |
 |---|---|---|
 | 0 | Bitplane check | enabled (not covered here) |
-| 1 | Resolve head color-bars end time | `brng_skip_color_bars` is on |
+| 1 | Resolve head color-bars end time (CSV fallback only when `brng_skip_color_bars` is on) | always |
 | 2a | Detect black segments from QCTools | any of border / signalstats / BRNG / duplicate-frame is on, and a QCTools report exists |
 | 2b | Scan QCTools for BRNG violations + build candidate periods | any of border / signalstats / BRNG is on, and a QCTools report exists |
 | 3 | Border detection (+ visualization) | enabled |
@@ -124,7 +127,8 @@ Runs right after the violation scan, only if violations were found.
 
 ### 2.2 Stage 2 — Final selection (`_find_analysis_periods`, called from signalstats)
 1. **Effective start** = head bars end + **10 s** (`BARS_SAFETY_MARGIN_SECONDS`), or 10 s with no
-   bars — the same on every pass (first signalstats pass, refinement re-runs, BRNG fallback).
+   bars — the same on every pass (first signalstats pass, refinement re-runs, BRNG fallback). With
+   Skip Color Bars off, the bars end counts as 0 here, so the effective start is 10 s.
 2. If duration is unknown **and** there are no QCTools candidates → no periods (signalstats reports
    "could not run").
 3. Choose a placement strategy, first that applies:
@@ -211,18 +215,20 @@ Produces the **active area** `(x, y, width, height)` used to crop signalstats an
 3. No quality hints, no head-switching check.
 
 ### 3.2 Sophisticated mode
-1. If OpenCV can't open the file → fall back to simple mode (using `simple_border_pixels`, as do
-   the other fallbacks below).
-   Settings (Complex tab or JSON; values are checked here — a non-number uses the default, a value
-   below the minimum is raised to it, each with a warning):
+Settings (Complex tab, checks-profile dialog, or JSON). Values are checked when detection runs: a
+non-number uses the default and a value below the minimum is raised to it, each with a warning.
 
-   | Setting | Default | Minimum | Controls |
-   |---|---|---|---|
-   | `sophisticated_sample_frames` (N) | 30 | 5 | frames measured |
-   | `sophisticated_threshold` | 10 | 0 | brightness that counts as picture |
-   | `sophisticated_edge_sample_width` | 100 | 1 | left/right search depth |
-   | `sophisticated_padding` | 5 | 0 | safety margin per side |
+| Setting | Default | Minimum | Controls |
+|---|---|---|---|
+| `sophisticated_sample_frames` (N) | 30 | 5 | frames measured |
+| `sophisticated_threshold` | 10 | 0 | brightness that counts as picture |
+| `sophisticated_edge_sample_width` | 100 | 1 | left/right search depth |
+| `sophisticated_padding` | 5 | 0 | safety margin per side |
 
+Every fallback to simple mode below uses `simple_border_pixels`. Cancellation during detection also
+falls back to simple mode.
+
+1. If OpenCV can't open the file → fall back to simple mode.
 2. **Choose frames to measure**:
    1. Read up to the first N of the top-100 QCTools violation frames.
    2. If fewer than N suitable frames, also read `max(50, N × 5/3)` frames evenly spaced across the
@@ -287,7 +293,8 @@ Each iteration, up to `max_border_retries` (3), while BRNG still says adjustment
 6. **Stop early if the round made no meaningful improvement** (`_is_meaningful_improvement`, comparing
    this round's BRNG result with the previous one). A round counts as improved if any of:
    - violation frames fell by more than 20 %;
-   - the worst frame's violation % fell by more than 20 %;
+   - the first-listed violation frame's violation % fell by more than 20 % (intended as the worst
+     frame, but see section 7: it is the worst frame of the *first analyzed period*);
    - edge violation % is still above 50 % **and** the borders actually moved (keep trying);
    - edge violation % fell by more than 30 %.
 
@@ -385,8 +392,10 @@ Built when both signalstats and border results exist. Only periods measured both
 have a diagnosis) are included; BRNG uses its default sensitivity and sampling for the rest:
 - per-period diagnosis, active-area flagged % and max BRNG, full-frame flagged % and max BRNG;
 - head-switching result from border detection;
-- average active-area BRNG, overall diagnosis, border widths, and a border-violation fraction
-  (these last four are recorded but not currently used by BRNG).
+- border widths (left/right/top/bottom crop of the active area) — used by the head-switching
+  bottom-strip widening (section 5.6);
+- average active-area BRNG, overall diagnosis, and a border-violation fraction (recorded but not
+  currently used by BRNG).
 
 ---
 
@@ -511,7 +520,8 @@ Then:
 ### 5.8 Thumbnails
 1. Clear `brng_thumbnails/` from previous runs.
 2. Order violation frames: those in content-violation periods first, then undiagnosed, then
-   border-violation periods (within each group, by BRNG value).
+   border-violation periods. Within each group frames keep analysis order — period by period, each
+   period's frames sorted by BRNG value — not one global BRNG ranking (section 7).
 3. Take the first, then add frames at least **5 s** from every selected frame, up to **5**.
    If still short, fill with the next best regardless of spacing.
 4. For each, build a 4-panel image: Original | BRNG Highlighted / Violations Only (magenta pixels
@@ -542,7 +552,13 @@ All written to `{video_id}_qc_metadata/`:
 None open.
 
 ### Probable bugs
-None open.
+- **BRNG violations are never ranked across periods.** Each period's violation frames are sorted by
+  BRNG value, then the per-period lists are concatenated (`analyze_with_differential_detection`) and
+  never re-sorted. Everything that treats the list as "worst first" actually gets the first period's
+  frames first:
+  - the refinement loop's "worst frame fell by more than 20 %" check (section 3.5);
+  - the first BRNG thumbnail pick within its priority group (section 5.8);
+  - `worst_frames` (the "top 5 violations") in `processing_mgmt._format_frame_analysis_results`.
 
 ### Existing docs that disagree with the code
 None open.
