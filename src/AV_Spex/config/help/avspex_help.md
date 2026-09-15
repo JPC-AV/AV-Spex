@@ -152,7 +152,7 @@ The Checks tab controls which tools and processing steps are run. It includes:
 
   **Manage Profiles** opens a dialog listing your saved checks profiles, with buttons to create, edit, delete, and apply them. **Save Current as Profile** stores whatever the checkboxes currently say as a new named profile of your own.
 - **Checks Options**: The individual settings, grouped by what they affect. Every checkbox carries its description inline, so nothing is hidden behind a tooltip:
-  - **Input** — **Video File Extension**, the container AV Spex looks for in each input directory. Choosing a non-MKV container automatically disables the options that only work on Matroska: embedded stream fixity, the mediatrace custom-tag check, and the signal flow check
+  - **Input** — **Video File Extension**, the container AV Spex looks for in each input directory. Choosing a non-MKV container automatically disables the options that only work on Matroska: embedded stream fixity, the mediatrace custom-tag check, mkvalidator, and the signal flow check
   - **Validation** — **Validate Filename**, checking the input filename against the active Filename profile
   - **Outputs** — the access copy with its sub-options, and the HTML report. Sub-options that depend on another setting say so on a *Requires:* line and stay grayed out until that setting is on (the QCTools file extension lives on the Complex tab, with the rest of the QCTools settings)
   - **Fixity** — the whole-file and embedded stream fixity steps, each with its own hash algorithm dropdown (`md5` or `sha256`)
@@ -202,7 +202,7 @@ The Complex tab configures the advanced analysis steps — typically run during 
   - **Bitplane Check**: Verify that the 9th and 10th bits of 10-bit video contain data
   - **Border Detection**: Toggle on/off and select mode — simple (fixed pixel crop) or sophisticated (edge detection, with tunable parameters)
   - **Signalstats Analysis**: Enhanced FFprobe signalstats over the detected active area (requires Border Detection)
-  - **BRNG Analysis**: Toggle on/off, set maximum analysis duration, and enable or disable automatic color bar skipping
+  - **BRNG Analysis**: Toggle on/off, and enable or disable automatic color bar skipping
   - **Analysis Periods**: The number and length of the time windows sampled across the video, shared by Signalstats and BRNG analysis
 - **Audio Checks** (each check is described in the Audio Checks section below):
   - **Audio Analysis**: Clipping, channel imbalance, audible timecode (LTC), identical channel detection, and audio dropout (via qct-parse)
@@ -396,8 +396,8 @@ Identifies the active picture area within the video frame, excluding non-content
 
 Two modes are available:
 
-- **Simple** (default) — Applies a uniform fixed-pixel crop on all sides (default: 25 px). Also used as a fallback when sophisticated detection is not possible.
-- **Sophisticated** — Samples multiple frames across the video, selecting high-quality frames with good contrast, and analyzes luminance gradients at the frame edges to find where active picture content begins. Also detects head-switching artifacts in the bottom rows of the frame; if the average artifact height exceeds the luminance-based bottom border crop, the bottom crop is expanded to match.
+- **Simple** (default) — Applies a uniform fixed-pixel crop on all sides (**Border Pixels**, default: 25 px). The same crop is used as a fallback when sophisticated detection is not possible (the file can't be decoded, or too few usable frames are found).
+- **Sophisticated** — Measures borders on well-exposed, good-contrast frames from across the video (**Sample Frames**, default 30), scanning in from each edge for the first row or column brighter than the **Brightness Threshold** (default 10; the left and right edges are searched **Edge Sample Width** pixels deep, default 100) and taking the median. Also detects head-switching artifacts in the bottom rows of the frame; if the average artifact height exceeds the measured bottom border, the bottom crop is expanded to match. **Padding** (default 5 px) is then trimmed from every side as a safety margin.
 
 ![Simple border detection as shown in the HTML report](border_detection_simple_example.png)
 
@@ -407,9 +407,9 @@ Two modes are available:
 
 *Sophisticated border detection on the same tape: edge analysis sizes each border independently (here L=36 px, R=18 px, T=7 px, B=14 px — shaded red) instead of applying a uniform crop, and the detected head-switching region at the bottom of the frame (orange, 9 px) is excluded as well.*
 
-**Iterative refinement**: After initial border detection, BRNG analysis runs on the detected active area. If a high percentage of violations occur at the edges of the active area — suggesting the borders were not cropped aggressively enough — the borders are automatically expanded and the analysis is re-run, up to the configured maximum number of retries. The goal is to separate true content violations from border artifacts.
+**Iterative refinement** (Sophisticated mode only; also requires BRNG Analysis and Auto-retry): After initial border detection, BRNG analysis runs on the detected active area. If a high percentage of violations occur at the edges of the active area — suggesting the borders were not cropped aggressively enough — the borders are automatically expanded and the analysis is re-run, up to the configured maximum number of retries. Refinement stops early when a round makes no meaningful improvement — the borders stopped moving, or edge violations and violation counts didn't drop noticeably. The goal is to separate true content violations from border artifacts.
 
-Border Detection is required for Signalstats Analysis in the Checks tab (the signalstats comparison needs an active picture area), and the detected active area can also be used to crop the access file (**Crop Borders** output option).
+Border Detection is required for Signalstats Analysis on the Complex tab (the signalstats comparison needs an active picture area). An active area found by Sophisticated detection can also be used to crop the access file (**Crop detected borders** output option); the fixed Simple crop is never applied to the access file.
 
 CLI: `av-spex --enable-border-detection {on,off}`, `--frame-borders {simple,sophisticated}`, `--frame-border-pixels 25`
 
@@ -436,9 +436,9 @@ The aggregate numbers reported for the file come from the active-area pass — t
 
 *A one-minute analysis period as shown in the HTML report. Every non-black frame is flagged when the whole frame is measured, but only 2.0% of frames are flagged inside the active picture area — so the period is classified as border violations rather than content violations. Note the active area's max BRNG of 100%: one frame in the period was entirely out of range, a reminder that the flagged-frame share and the severity of the violations are two different things.*
 
-**Without Border Detection**: the Checks tab requires Border Detection before Signalstats Analysis can be enabled, since the comparison above needs an active picture area to compare against. From the command line the two flags are independent — with border detection off, signalstats still runs, measuring the full frame only, and says so in every diagnosis it produces ("borders were not excluded").
+**Without Border Detection**: the Complex tab requires Border Detection before Signalstats Analysis can be enabled, since the comparison above needs an active picture area to compare against. From the command line the two flags are independent — with border detection off, signalstats still runs, measuring the full frame only, and says so in every diagnosis it produces ("borders were not excluded").
 
-**Period selection**: Analysis periods target, in priority order: timestamps where QCTools detected the highest concentrations of BRNG activity, timestamps flagged during border detection as having interesting signal characteristics, and finally evenly spaced periods across the content (after color bars).
+**Period selection**: Analysis periods target, in priority order: timestamps where QCTools detected the highest concentrations of BRNG activity; well-exposed frames found by Sophisticated border detection (used only when there are enough of them for every period); and finally evenly spaced periods across the content (after color bars). See **Analysis Periods** below for the full placement rules.
 
 CLI: `av-spex --enable-signalstats {on,off}`
 
@@ -452,21 +452,22 @@ CLI: `av-spex --enable-signalstats {on,off}`
 
 *The same frame from the two rendered segments. On the right, the `signalstats` filter paints out-of-range pixels magenta — here a dropout band crossing the picture, a hot highlight, and violations along the frame edges.*
 
-Frames are then compared pixel-by-pixel using three independent detection methods that vote on whether a pixel is a genuine violation:
+Frames are then compared pixel-by-pixel using four independent detection methods that vote on whether a pixel is a genuine violation:
 
 1. **BGR threshold** — checks for the magenta color signature (high red + blue, low green channel differences)
 2. **Ratio-based** — verifies that red and blue channel increases are proportional, characteristic of the magenta overlay
 3. **HSV analysis** — confirms the magenta hue range with a saturation increase
+4. **Green-channel drop** — catches already-bright pixels (e.g. blown-out highlights), where the overlay can't raise red and blue further and instead shows up as a sharp drop in green
 
-A pixel is classified as a violation only when at least 2 of the 3 methods agree, and small isolated clusters (fewer than 10 connected pixels) are filtered out as noise.
+A pixel is classified as a violation only when at least 2 of the 4 methods agree, and small isolated clusters (fewer than 10 connected pixels, or 15 at the stricter sensitivity) are filtered out as noise.
 
 **Violation classification**: Each frame with detected violations is classified by spatial pattern — *sub-black* (violations concentrated in low-luma zones), *highlight clipping* (high-luma zones), *edge artifacts* (within 15 px of frame edges, suggesting border/blanking issues), *linear blanking patterns* (edge violations forming continuous horizontal or vertical lines), or *general broadcast range violations*.
 
-**Adaptive detection**: When signalstats results are available, periods diagnosed as border-dominated or minimal use stricter detection thresholds to reduce false positives, while periods with content violations use standard sensitivity. When head-switching artifacts were detected during border detection, the bottom-edge analysis zone is widened so head-switching noise is classified as edge artifacts rather than content violations.
+**Adaptive detection**: When signalstats results are available, periods diagnosed as border-dominated or minimal use stricter detection thresholds to reduce false positives, while periods with content violations use standard sensitivity. Border detection already crops the average head-switching height off the bottom of the picture; when head switching reaches further than that crop in more than 30% of sampled frames, the bottom-edge analysis zone is widened to cover the remainder (up to 40 px), so that noise is classified as an edge artifact rather than a content violation.
 
-Options: **Duration Limit** caps how much of the video is analyzed (default: 300 seconds), and **Skip Color Bars** excludes the detected color-bars section from analysis.
+BRNG analysis examines the same analysis periods as Signalstats (see **Analysis Periods** below). **Skip Color Bars** (on by default) excludes the detected color bars — the head bars and any mid-file bars — from the QCTools violation scan, analysis-period placement, Signalstats and BRNG analysis. Turn it off to analyze bars like any other content; note that standard SMPTE bars measure slightly outside broadcast range, so they will read as violations and can attract analysis periods. Bars are always excluded from Duplicate Frame Detection, where a static test pattern would otherwise be reported as a freeze.
 
-CLI: `av-spex --enable-brng-analysis {on,off}`, `--frame-brng-duration 300`, `--frame-no-colorbar-skip`
+CLI: `av-spex --enable-brng-analysis {on,off}`, `--frame-no-colorbar-skip`
 
 ### Analysis Periods
 
@@ -476,13 +477,13 @@ Because only a few minutes of a tape are actually examined, *where* those period
 
 **How periods are placed**: The QCTools report is scanned once and every frame with out-of-range pixels (BRNG above a small threshold) is tallied into 10-second bins. Bins are ranked by how severe their violations are — total severity rather than a simple frame count, because on a noisy tape nearly every frame in many bins violates and counts all tie at the top. Periods are then placed on the densest bins first, centered on the bin. A first pass requires each new period to sit at least two period-lengths away from the ones already chosen, so the periods cover distinct problem areas instead of stacking on a single burst; if that leaves too few periods — a tape whose problems really are all in one place — the spacing requirement relaxes to simple non-overlap.
 
-**What is excluded**: Detected head color bars plus a 10-second margin, mid-file color bars, detected all-black segments, and the last 30 seconds of the file (end-of-tape static). Black is excluded because analog tape black carries sub-black noise that would otherwise dominate every violation list, and bars are excluded because standard SMPTE bars themselves measure marginally outside broadcast range — left in, a test pattern reads as a dense violation cluster and attracts every period.
+**What is excluded**: Detected head color bars plus a 10-second margin, mid-file color bars (both only while **Skip Color Bars** is on), detected all-black segments, and the last 30 seconds of the file (end-of-tape static). Black is excluded because analog tape black carries sub-black noise that would otherwise dominate every violation list, and bars are excluded because standard SMPTE bars themselves measure marginally outside broadcast range — left in, a test pattern reads as a dense violation cluster and attracts every period.
 
 **Repairs**: A period that ends up overlapping bars or black by more than a quarter of its length is shifted outward in 5-second steps, alternating forward and backward, until it finds a position that overlaps by 10% or less and stays clear of the other periods. If no such position exists, the period is shrunk to fit the largest clean gap in the content (down to a 10-second minimum) — this is what happens on short tapes whose entire non-black content is shorter than one configured period. A period that can't be repaired either way is dropped.
 
 If *every* candidate is dropped — a tape with no window of picture content long enough to sample — the least-black candidate is kept anyway rather than abandoning the analysis, and the results are flagged as low confidence (below). Measuring mostly-black frames and saying so is more useful than reporting nothing. Only when there were no candidates at all is BRNG analysis skipped outright; the log says so explicitly, because a skipped analysis is an absence of evidence, not a clean result.
 
-**When there are no violations to aim at**: On a clean tape the placement falls back to periods centered on frames that border detection found visually clean, and failing that to periods spread evenly across the content. If violation clustering or the repair pass left fewer periods than requested, the count is topped up with evenly spaced periods that avoid the existing ones, so the report always samples the requested number of places.
+**When there are no violations to aim at**: On a clean tape the placement falls back to periods centered on the well-exposed frames Sophisticated border detection measured (only when there are enough of them for every period), and failing that to periods spread evenly across the content. If violation clustering or the repair pass left fewer periods than requested, the count is topped up with evenly spaced periods that avoid the existing ones, so the report always samples the requested number of places.
 
 **Refinement**: Signalstats runs on the selected periods first, and its findings can revise the periods before BRNG analysis runs. A period whose active picture area turns out to hold essentially no out-of-range signal — nothing for the differential detector to find — is swapped for the next-best unused candidate. Each period's diagnosis also sets how densely BRNG analysis samples it: periods with real content violations are sampled heavily, near-clean periods lightly.
 
@@ -654,11 +655,10 @@ av-spex [path/to/directory]
 - `--enable-duplicate-frame-detection {on,off}` — Toggle duplicate/frozen frame detection
 - `--frame-borders {simple,sophisticated}` — Border detection mode
 - `--frame-border-pixels N` — Pixels cropped from each edge in simple border mode (default: 25)
-- `--frame-brng-duration SECONDS` — Maximum duration analyzed by BRNG analysis (default: 300)
-- `--frame-no-colorbar-skip` — Analyze the detected color bars instead of skipping them
+- `--frame-no-colorbar-skip` — Include the detected color bars (head and mid-file) in the QCTools violation scan, analysis-period placement, Signalstats and BRNG analysis instead of skipping them. Bars stay excluded from duplicate frame detection.
 
 **Input settings:**
-- `--video-file-extension {mkv,mov,mp4,avi,mxf}` — Which container to look for in the input directory (default: `mkv`). A non-MKV selection automatically turns off embedded stream fixity and the mediatrace custom-tag check, and skips the ffprobe signal flow (`ENCODER_SETTINGS`) check, since those only work on Matroska.
+- `--video-file-extension {mkv,mov,mp4,avi,mxf}` — Which container to look for in the input directory (default: `mkv`). A non-MKV selection automatically turns off embedded stream fixity, the mediatrace custom-tag check, and mkvalidator, and skips the ffprobe signal flow (`ENCODER_SETTINGS`) check, since those only work on Matroska.
 
 **Output settings:**
 - `--access-trim-color-bars {on,off}` — Skip head color bars in the access file
@@ -704,7 +704,7 @@ Controls which tools run and what outputs are generated.
 - `access_file_exclude_flagged_audio` — Leave flagged audio channels out of the access copy: a channel found silent or carrying audible timecode is dropped, and dual mono is built from the good channel (default `false`; requires audio analysis)
 - `report` — Generate an HTML summary report
 - `qctools_ext` — Output extension for QCTools files (`qctools.xml.gz` or `qctools.mkv`)
-- **Frame Analysis** settings: `enable_bitplane_check`, `enable_border_detection`, `enable_brng_analysis`, `enable_signalstats`, `enable_dropped_sample_detection`, `enable_duplicate_frame_detection`, `border_detection_mode` (simple/sophisticated), `simple_border_pixels` (default: 25), `brng_duration_limit` (default: 300 seconds), `brng_skip_color_bars`, `analysis_period_duration` and `analysis_period_count` (the periods shared by signalstats and BRNG analysis), `duplicate_min_run_length` (default: 2), plus sophisticated-border tuning fields and the border retry settings `auto_retry_borders` / `max_border_retries`
+- **Frame Analysis** settings: `enable_bitplane_check`, `enable_border_detection`, `enable_brng_analysis`, `enable_signalstats`, `enable_dropped_sample_detection`, `enable_duplicate_frame_detection`, `border_detection_mode` (simple/sophisticated), `simple_border_pixels` (default: 25), `brng_skip_color_bars`, `analysis_period_duration` and `analysis_period_count` (the periods shared by signalstats and BRNG analysis), `duplicate_min_run_length` (default: 2), plus sophisticated-border tuning fields and the border retry settings `auto_retry_borders` / `max_border_retries`
 
 **Fixity**
 - `output_fixity` — Write checksums to a fixity text file

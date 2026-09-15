@@ -4285,21 +4285,24 @@ BORDER_DETECTION_METHODOLOGY_HTML = """
             <ul style="margin: 4px 0 10px 20px; padding: 0;">
                 <li style="margin-bottom: 4px;"><strong>Sophisticated (quality-based)</strong> — samples 
                     multiple frames across the video, selecting high-quality frames with good contrast. 
-                    Analyzes luminance gradients at frame edges to find where active picture content begins. 
+                    Scans in from each frame edge for the first row or column brighter than a threshold to 
+                    find where active picture content begins, taking the median across frames. 
                     Also detects head switching artifacts in the bottom rows of the frame. If the
-                    average head switching artifact height exceeds the luminance-based bottom border crop,
-                    the bottom crop is expanded to match the artifact height.</li>
+                    average head switching artifact height exceeds the measured bottom border,
+                    the bottom crop is expanded to match the artifact height. A small padding is then 
+                    trimmed from every side.</li>
                 <li style="margin-bottom: 4px;"><strong>Simple (fixed)</strong> — applies a uniform border 
                     crop (default 25 pixels) on all sides. Used as a fallback when sophisticated detection 
                     is not possible.</li>
             </ul>
-            <p style="margin: 0 0 10px 0; font-weight: bold;">Iterative refinement:</p>
+            <p style="margin: 0 0 10px 0; font-weight: bold;">Iterative refinement (sophisticated mode only):</p>
             <p style="margin: 0 0 10px 0;">
                 After initial border detection, AV Spex runs BRNG (broadcast range) analysis on the detected 
                 active area. If a high percentage of violations occur at the edges of the active area 
                 (suggesting the borders were not cropped aggressively enough), the borders are automatically 
                 expanded and analysis is re-run. This iterative refinement continues until edge violations 
-                are reduced or a maximum number of iterations is reached. The goal is to separate true 
+                are reduced, a round makes no meaningful improvement, or a maximum number of iterations 
+                is reached. The goal is to separate true 
                 content violations from border artifacts.
             </p>
         </div>
@@ -4386,14 +4389,16 @@ SIGNALSTATS_METHODOLOGY_HTML = """
             <ol style="margin: 4px 0 10px 20px; padding: 0;">
                 <li style="margin-bottom: 4px;"><strong>QCTools violation clusters</strong> — periods targeting 
                     timestamps where QCTools detected the highest concentrations of BRNG activity</li>
-                <li style="margin-bottom: 4px;"><strong>Border detection quality hints</strong> — timestamps 
-                    flagged during border detection as having interesting signal characteristics</li>
+                <li style="margin-bottom: 4px;"><strong>Border detection quality hints</strong> — well-exposed 
+                    frames found by sophisticated border detection, used only when there are enough of them 
+                    for every period</li>
                 <li style="margin-bottom: 4px;"><strong>Even distribution</strong> — fallback to evenly 
                     spaced periods across the video content (after color bars)</li>
             </ol>
             <p style="margin: 0; color: #777;">
-                The final diagnosis is based on active area results, which reflect the actual picture 
-                content that would be seen in playback or broadcast.
+                When border detection ran, the final diagnosis is based on active area results, which 
+                reflect the actual picture content that would be seen in playback or broadcast. Without 
+                border detection it is based on the full frame, borders included.
             </p>
         </div>
         """
@@ -4425,7 +4430,7 @@ BRNG_METHODOLOGY_HTML = """
                     (cropped to active area only)</li>
             </ol>
             <p style="margin: 0 0 6px 0;">
-                Frames are then compared pixel-by-pixel using three independent detection methods that vote 
+                Frames are then compared pixel-by-pixel using four independent detection methods that vote 
                 on whether a pixel is a genuine violation:
             </p>
             <ol style="margin: 4px 0 10px 20px; padding: 0;">
@@ -4435,10 +4440,13 @@ BRNG_METHODOLOGY_HTML = """
                     channel increases are proportional (characteristic of magenta overlay)</li>
                 <li style="margin-bottom: 4px;"><strong>HSV analysis</strong> — confirms magenta hue range with 
                     saturation increase in HSV color space</li>
+                <li style="margin-bottom: 4px;"><strong>Green-channel drop</strong> — catches already-bright 
+                    pixels, where the overlay shows up as a sharp drop in green rather than a rise in red and blue</li>
             </ol>
             <p style="margin: 0 0 10px 0;">
-                A pixel is classified as a violation only when <strong>at least 2 of 3 methods agree</strong>. 
-                Small isolated pixel clusters (fewer than 10 connected pixels) are filtered out as noise.
+                A pixel is classified as a violation only when <strong>at least 2 of 4 methods agree</strong>. 
+                Small isolated pixel clusters (fewer than 10 connected pixels, or 15 at the stricter 
+                sensitivity) are filtered out as noise.
             </p>
             <p style="margin: 0 0 6px 0; font-weight: bold;">Violation classification:</p>
             <p style="margin: 0 0 4px 0;">Each frame with detected violations is then classified by spatial pattern:</p>
@@ -4470,8 +4478,9 @@ BRNG_METHODOLOGY_HTML = """
                     frames examined by the differential detector. The sample count adapts based on signalstats 
                     findings for each period: periods with significant active-area violations receive denser 
                     sampling (~200 frames) while periods with negligible active-area BRNG use lighter sampling 
-                    (~30 frames). When no upstream data is available, the default behavior targets ~50–100 frames 
-                    per period.</li>
+                    (~30 frames). Otherwise every QCTools-flagged frame in the period is examined; if fewer than 50 
+                    map to it, evenly spaced frames are added (up to ~100–200 samples), and a tape with no 
+                    QCTools violations at all gets up to 500 evenly spaced samples per period.</li>
             </ul>
             <p style="margin: 0 0 6px 0; font-weight: bold;">Adaptive detection:</p>
             <p style="margin: 0 0 10px 0;">
@@ -4479,10 +4488,10 @@ BRNG_METHODOLOGY_HTML = """
                 signalstats diagnosis. Periods diagnosed as <em>border-dominated</em> or <em>minimal</em> 
                 use stricter detection thresholds (requiring stronger evidence to classify a pixel as a 
                 violation), reducing false positives in regions where actual content violations are unlikely. 
-                Periods with <em>content violations</em> use standard sensitivity. When head switching 
-                artifacts were detected during border detection, the bottom-edge analysis zone is 
-                automatically widened to classify head switching noise as edge artifacts rather than 
-                content violations.
+                Periods with <em>content violations</em> use standard sensitivity. Border detection already crops 
+                the average head switching height; when head switching reaches further than that crop, 
+                the bottom-edge analysis zone is widened to cover the remainder so the noise is 
+                classified as an edge artifact rather than a content violation.
             </p>
             <p style="margin: 0; color: #777;">
                 Because the differential detector compares two decoded video frames and runs multi-method 

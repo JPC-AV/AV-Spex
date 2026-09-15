@@ -6,8 +6,10 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 
+import copy
 import json
 import os
+from dataclasses import replace
 
 from AV_Spex.processing.processing_mgmt import setup_mediaconch_policy
 from AV_Spex.utils.config_manager import ConfigManager
@@ -16,8 +18,11 @@ from AV_Spex.utils import config_edit
 from AV_Spex.utils.config_setup import (
     ChecksProfile, OutputsConfig, FixityConfig, ToolsConfig,
     BasicToolConfig, QCToolsConfig, MediaConchConfig, QCTParseToolConfig,
-    FrameAnalysisConfig
+    FrameAnalysisConfig, ClamsDetectionConfig, SUPPORTED_VIDEO_EXTENSIONS
 )
+
+# Tools shown with a Run Tool / Check Tool pair
+BASIC_TOOLS = ["exiftool", "ffprobe", "mediainfo", "mediatrace", "mkvalidator"]
 from AV_Spex.gui.gui_theme_manager import ThemeManager, ThemeableMixin
 from AV_Spex.utils.log_setup import logger
 
@@ -28,6 +33,13 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
         super().__init__(parent)
         self.profile = None
         self.edit_mode = edit_profile is not None
+        # Settings with no control in any GUI (duplicate_min_run_length, the
+        # CLAMS numeric tuning) are carried over from whatever was loaded —
+        # the edited profile or the current config — so saving doesn't reset
+        # them. The form's own fields are layered on top in
+        # get_profile_from_form().
+        self._base_frame_analysis = FrameAnalysisConfig()
+        self._base_clams = ClamsDetectionConfig()
         self.setWindowTitle("Custom Profile Editor" if self.edit_mode else "Create Custom Profile")
         self.setModal(True)
 
@@ -116,7 +128,24 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
         validate_fn_layout.addWidget(self.validate_filename_check)
         validate_fn_layout.addStretch()
         info_layout.addLayout(validate_fn_layout)
-        
+
+        # Input video file extension
+        ext_layout = QHBoxLayout()
+        ext_layout.addWidget(QLabel("Video File Extension:"))
+        self.video_extension_combo = QComboBox()
+        self.video_extension_combo.addItems(list(SUPPORTED_VIDEO_EXTENSIONS))
+        self.video_extension_combo.setMinimumWidth(120)
+        ext_layout.addWidget(self.video_extension_combo)
+        ext_layout.addStretch()
+        info_layout.addLayout(ext_layout)
+        ext_desc = QLabel(
+            "Container extension of the input video file. Non-MKV containers can't carry "
+            "embedded stream fixity, custom Matroska tags (mediatrace), Matroska validation (mkvalidator), "
+            "or signal flow; those are turned off when the profile is applied.")
+        ext_desc.setIndent(20)
+        ext_desc.setWordWrap(True)
+        info_layout.addWidget(ext_desc)
+
         info_group.setLayout(info_layout)
         layout.addWidget(info_group)
     
@@ -129,14 +158,63 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
         outputs_layout.addWidget(QLabel("Access File:"), 0, 0)
         self.access_file_check = QCheckBox()
         outputs_layout.addWidget(self.access_file_check, 0, 1)
-        
+
+        # Access file sub-options (mirror the Checks tab)
+        access_options = QVBoxLayout()
+        access_options.setContentsMargins(20, 0, 0, 0)
+        self.access_trim_bars_check = self._add_sub_option(
+            access_options, "Trim color bars from start",
+            "If color bars are detected at the head of the tape, skip them in the access file "
+            "(requires Detect Color Bars or CLAMS Bars + Tone Detection)")
+        self.access_crop_to_480_check = self._add_sub_option(
+            access_options, "Crop NTSC to 720x480",
+            "Trim NTSC sources to 720x480; if unchecked, keep the native 720x486 height")
+        self.access_crop_borders_check = self._add_sub_option(
+            access_options, "Crop detected borders",
+            "If sophisticated border detection finds an active picture area, crop to it "
+            "(requires Border Detection in Sophisticated mode and Crop NTSC to 720x480)")
+        self.access_exclude_audio_check = self._add_sub_option(
+            access_options, "Exclude flagged audio channel",
+            "If audio analysis flags a channel as silent or carrying audible timecode, "
+            "output dual-mono from the good channel (requires Audio Analysis)")
+        outputs_layout.addLayout(access_options, 1, 0, 1, 2)
+
         # Report (now using checkbox for boolean)
-        outputs_layout.addWidget(QLabel("Report:"), 1, 0)
+        outputs_layout.addWidget(QLabel("Report:"), 2, 0)
         self.report_check = QCheckBox()
-        outputs_layout.addWidget(self.report_check, 1, 1)
-        
+        outputs_layout.addWidget(self.report_check, 2, 1)
+
+        outputs_layout.addWidget(QLabel("Save Console Log as PDF:"), 3, 0)
+        self.save_console_pdf_check = QCheckBox()
+        outputs_layout.addWidget(self.save_console_pdf_check, 3, 1)
+
+        # Same dependencies as the Checks tab: sub-options need Access File,
+        # and cropping borders needs the 480 crop
+        self.access_file_check.toggled.connect(self._update_access_option_states)
+        self.access_crop_to_480_check.toggled.connect(self._update_access_option_states)
+        self._update_access_option_states()
+
         outputs_group.setLayout(outputs_layout)
         self.config_layout.addWidget(outputs_group)
+
+    def _add_sub_option(self, layout, text, description):
+        """Add a bold checkbox with a wrapped description under it; return the checkbox."""
+        checkbox = QCheckBox(text)
+        checkbox.setStyleSheet("font-weight: bold;")
+        desc = QLabel(description)
+        desc.setIndent(20)
+        desc.setWordWrap(True)
+        layout.addWidget(checkbox)
+        layout.addWidget(desc)
+        return checkbox
+
+    def _update_access_option_states(self):
+        access_on = self.access_file_check.isChecked()
+        for checkbox in (self.access_trim_bars_check, self.access_crop_to_480_check,
+                         self.access_exclude_audio_check):
+            checkbox.setEnabled(access_on)
+        self.access_crop_borders_check.setEnabled(
+            access_on and self.access_crop_to_480_check.isChecked())
     
     def setup_fixity_section(self):
         """Setup the fixity configuration section."""
@@ -205,11 +283,10 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
         tools_group = QGroupBox("Tools Settings")
         tools_layout = QVBoxLayout()
         
-        # Basic tools (exiftool, ffprobe, mediainfo, mediatrace)
-        basic_tools = ["exiftool", "ffprobe", "mediainfo", "mediatrace"]
+        # Basic tools (exiftool, ffprobe, mediainfo, mediatrace, mkvalidator)
         self.basic_tool_checks = {}
-        
-        for tool in basic_tools:
+
+        for tool in BASIC_TOOLS:
             tool_group = QGroupBox(tool.title())
             tool_layout = QGridLayout()
             
@@ -239,7 +316,10 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
         
         # QCT Parse
         self.setup_qct_parse_section(tools_layout)
-        
+
+        # CLAMS bars + tone detection
+        self.setup_clams_section(tools_layout)
+
         tools_group.setLayout(tools_layout)
         self.config_layout.addWidget(tools_group)
         
@@ -443,9 +523,32 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
         qct_parse_layout.addWidget(thumb_export_desc)
         qct_parse_layout.addWidget(self.audio_analysis_check)
         qct_parse_layout.addWidget(audio_analysis_desc)
-        
+
+        self.tone_leak_check = self._add_sub_option(
+            qct_parse_layout, "Tone Leak Detection",
+            "Detect a 1 kHz reference tone leaking from the transfer chain, heard as a faint "
+            "high-pitched whine or squeak in quiet passages")
+        self.clamped_levels_check = self._add_sub_option(
+            qct_parse_layout, "Detect Clamped Levels",
+            "Detect broadcast-range level clamping from the analog-to-digital converter")
+        self.chroma_phase_check = self._add_sub_option(
+            qct_parse_layout, "Detect Chroma Phase Errors",
+            "Detect tape tracking artifacts where chroma collapses toward cyan or magenta")
+
         qct_parse_group.setLayout(qct_parse_layout)
         parent_layout.addWidget(qct_parse_group)
+
+    def setup_clams_section(self, parent_layout):
+        """CLAMS bars + tone detection. Only the on/off toggle is exposed; its
+        numeric tuning is JSON-only and carried over from the loaded settings."""
+        clams_group = QGroupBox("CLAMS Detection")
+        clams_layout = QVBoxLayout()
+        self.clams_run_check = self._add_sub_option(
+            clams_layout, "CLAMS Bars + Tone Detection",
+            "Run the CLAMS SSIM-based SMPTE bars detector and the cross-correlation tone "
+            "detector. Where they disagree with qct-parse about head bars, SSIM decides.")
+        clams_group.setLayout(clams_layout)
+        parent_layout.addWidget(clams_group)
     
     def setup_frame_analysis_section(self):
         """Setup the frame analysis configuration section with sub-groups
@@ -464,7 +567,21 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
 
         # --- Signalstats Settings ---
         self.setup_signalstats_profile_section(frame_layout)
-        
+
+        # --- Standalone detectors ---
+        detectors_group = QGroupBox("Other Frame Analysis Checks")
+        detectors_layout = QVBoxLayout()
+        self.duplicate_frame_check = self._add_sub_option(
+            detectors_layout, "Duplicate Frame Detection",
+            "Detect runs of repeated frames likely caused by TBC or framesync errors, using "
+            "QCTools YDIF/UDIF/VDIF to find candidate freezes and OpenCV to verify them")
+        self.dropped_sample_check = self._add_sub_option(
+            detectors_layout, "Dropped Sample Detection",
+            "Detect potential audio sample drops from TBC/framesync or ADC devices. Generates "
+            "a spectrogram to identify audible pops and compares audio/video durations.")
+        detectors_group.setLayout(detectors_layout)
+        frame_layout.addWidget(detectors_group)
+
         frame_group.setLayout(frame_layout)
         self.config_layout.addWidget(frame_group)
     
@@ -545,7 +662,7 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
         threshold_row.addWidget(self.soph_threshold_input)
         threshold_row.addStretch()
         border_layout.addLayout(threshold_row)
-        threshold_desc = QLabel("0 = pure black, 255 = pure white")
+        threshold_desc = QLabel("Brightness an edge row or column must exceed to count as picture (0 = pure black, 255 = pure white)")
         threshold_desc.setIndent(20)
         border_layout.addWidget(threshold_desc)
         
@@ -558,7 +675,7 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
         edge_row.addWidget(self.soph_edge_width_input)
         edge_row.addStretch()
         border_layout.addLayout(edge_row)
-        edge_desc = QLabel("Pixels to examine from each edge")
+        edge_desc = QLabel("Pixels to search in from the left and right edges")
         edge_desc.setIndent(20)
         border_layout.addWidget(edge_desc)
         
@@ -571,7 +688,7 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
         frames_row.addWidget(self.soph_sample_frames_input)
         frames_row.addStretch()
         border_layout.addLayout(frames_row)
-        frames_desc = QLabel("Number of frames to sample across the video")
+        frames_desc = QLabel("Number of well-exposed frames to measure borders on (minimum 5)")
         frames_desc.setIndent(20)
         border_layout.addWidget(frames_desc)
         
@@ -584,7 +701,7 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
         padding_row.addWidget(self.soph_padding_input)
         padding_row.addStretch()
         border_layout.addLayout(padding_row)
-        padding_desc = QLabel("Extra margin around detected borders")
+        padding_desc = QLabel("Extra pixels trimmed from each side of the detected picture area")
         padding_desc.setIndent(20)
         border_layout.addWidget(padding_desc)
         border_layout.addSpacing(5)
@@ -603,7 +720,7 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
         max_retries_row = QHBoxLayout()
         max_retries_label = QLabel("Max Retries:")
         max_retries_label.setStyleSheet("font-weight: bold;")
-        self.max_border_retries_input = QLineEdit("5")
+        self.max_border_retries_input = QLineEdit("3")
         self.max_border_retries_input.setMaximumWidth(60)
         max_retries_row.addWidget(max_retries_label)
         max_retries_row.addWidget(self.max_border_retries_input)
@@ -631,24 +748,11 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
         brng_layout.addWidget(brng_desc)
         brng_layout.addSpacing(10)
         
-        # Duration Limit
-        duration_row = QHBoxLayout()
-        duration_label = QLabel("Duration Limit (s):")
-        duration_label.setStyleSheet("font-weight: bold;")
-        self.brng_duration_input = QLineEdit("300")
-        self.brng_duration_input.setMaximumWidth(60)
-        duration_row.addWidget(duration_label)
-        duration_row.addWidget(self.brng_duration_input)
-        duration_row.addStretch()
-        brng_layout.addLayout(duration_row)
-        duration_desc = QLabel("Maximum duration to analyze for BRNG violations")
-        duration_desc.setIndent(20)
-        brng_layout.addWidget(duration_desc)
-        
         # Skip Color Bars
         self.brng_skip_colorbars_check = QCheckBox("Skip Color Bars")
         self.brng_skip_colorbars_check.setStyleSheet("font-weight: bold;")
-        skip_bars_desc = QLabel("Exclude color bar sections from BRNG analysis")
+        skip_bars_desc = QLabel("Exclude detected color bars from BRNG, signalstats and analysis-period placement (bars are always excluded from duplicate frame detection)")
+        skip_bars_desc.setWordWrap(True)
         skip_bars_desc.setIndent(20)
         brng_layout.addWidget(self.brng_skip_colorbars_check)
         brng_layout.addWidget(skip_bars_desc)
@@ -671,33 +775,32 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
         signalstats_layout.addWidget(signalstats_desc)
         signalstats_layout.addSpacing(10)
         
-        # Duration
-        duration_row = QHBoxLayout()
-        duration_label = QLabel("Duration (s):")
-        duration_label.setStyleSheet("font-weight: bold;")
-        self.signalstats_duration_input = QLineEdit("60")
-        self.signalstats_duration_input.setMaximumWidth(60)
-        duration_row.addWidget(duration_label)
-        duration_row.addWidget(self.signalstats_duration_input)
-        duration_row.addStretch()
-        signalstats_layout.addLayout(duration_row)
-        duration_desc = QLabel("How long to run signalstats analysis")
-        duration_desc.setIndent(20)
-        signalstats_layout.addWidget(duration_desc)
-        
-        # Analysis Periods
+        # Analysis periods (shared by signalstats and BRNG analysis)
         periods_row = QHBoxLayout()
-        periods_label = QLabel("Analysis Periods:")
+        periods_label = QLabel("Number of Periods:")
         periods_label.setStyleSheet("font-weight: bold;")
-        self.signalstats_periods_input = QLineEdit("3")
-        self.signalstats_periods_input.setMaximumWidth(60)
+        self.analysis_period_count_input = QLineEdit("3")
+        self.analysis_period_count_input.setMaximumWidth(60)
         periods_row.addWidget(periods_label)
-        periods_row.addWidget(self.signalstats_periods_input)
+        periods_row.addWidget(self.analysis_period_count_input)
         periods_row.addStretch()
         signalstats_layout.addLayout(periods_row)
-        periods_desc = QLabel("Number of analysis periods to spread across video")
+        periods_desc = QLabel("How many time windows to sample (shared by Signalstats and BRNG analysis)")
         periods_desc.setIndent(20)
         signalstats_layout.addWidget(periods_desc)
+
+        duration_row = QHBoxLayout()
+        duration_label = QLabel("Period Duration (s):")
+        duration_label.setStyleSheet("font-weight: bold;")
+        self.analysis_period_duration_input = QLineEdit("60")
+        self.analysis_period_duration_input.setMaximumWidth(60)
+        duration_row.addWidget(duration_label)
+        duration_row.addWidget(self.analysis_period_duration_input)
+        duration_row.addStretch()
+        signalstats_layout.addLayout(duration_row)
+        duration_desc = QLabel("Length of each analysis period")
+        duration_desc.setIndent(20)
+        signalstats_layout.addWidget(duration_desc)
         
         signalstats_group.setLayout(signalstats_layout)
         parent_layout.addWidget(signalstats_group)
@@ -728,203 +831,115 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
         """Load settings from the current checks configuration."""
         try:
             current_config = config_edit.config_mgr.get_config('checks', config_edit.ChecksConfig)
-            
-            # Load validate filename
-            self.validate_filename_check.setChecked(current_config.validate_filename)
-            
-            # Load outputs (now booleans)
-            self.access_file_check.setChecked(current_config.outputs.access_file)
-            self.report_check.setChecked(current_config.outputs.report)
-            
-            # Load QCTools extension into the combo box
-            qctools_ext = getattr(current_config.outputs, 'qctools_ext', 'qctools.xml.gz')
-            ext_index = self.qctools_ext_combo.findText(qctools_ext)
-            if ext_index >= 0:
-                self.qctools_ext_combo.setCurrentIndex(ext_index)
-            
-            # Load frame analysis settings
-            if hasattr(current_config.outputs, 'frame_analysis'):
-                fa = current_config.outputs.frame_analysis
-                
-                # Bitplane check
-                self.enable_bitplane_check_check.setChecked(bool(getattr(fa, 'enable_bitplane_check', True)))
-
-                # Border detection
-                self.enable_border_detection_check.setChecked(bool(fa.enable_border_detection))
-                mode_index = self.border_detection_combo.findData(fa.border_detection_mode)
-                if mode_index >= 0:
-                    self.border_detection_combo.setCurrentIndex(mode_index)
-                self.simple_border_pixels_input.setText(str(fa.simple_border_pixels))
-                self.soph_threshold_input.setText(str(fa.sophisticated_threshold))
-                self.soph_edge_width_input.setText(str(fa.sophisticated_edge_sample_width))
-                self.soph_sample_frames_input.setText(str(fa.sophisticated_sample_frames))
-                self.soph_padding_input.setText(str(fa.sophisticated_padding))
-                self.auto_retry_borders_check.setChecked(bool(fa.auto_retry_borders))
-                self.max_border_retries_input.setText(str(getattr(fa, 'max_border_retries', 3)))
-                
-                # BRNG analysis
-                self.enable_brng_analysis_check.setChecked(bool(fa.enable_brng_analysis))
-                self.brng_duration_input.setText(str(fa.brng_duration_limit))
-                self.brng_skip_colorbars_check.setChecked(bool(fa.brng_skip_color_bars))
-                
-                # Signalstats
-                self.enable_signalstats_check.setChecked(bool(fa.enable_signalstats))
-                self.signalstats_duration_input.setText(str(fa.signalstats_duration))
-                self.signalstats_periods_input.setText(str(getattr(fa, 'signalstats_periods', 3)))
-                    
-            # Load fixity (now booleans)
-            self.fixity_checks['check_fixity'].setChecked(current_config.fixity.check_fixity)
-            self.fixity_checks['validate_stream_fixity'].setChecked(current_config.fixity.validate_stream_fixity)
-            self.fixity_checks['embed_stream_fixity'].setChecked(current_config.fixity.embed_stream_fixity)
-            self.fixity_checks['output_fixity'].setChecked(current_config.fixity.output_fixity)
-            self.fixity_checks['overwrite_stream_fixity'].setChecked(current_config.fixity.overwrite_stream_fixity)
-            
-            # Load checksum algorithms
-            algorithm = getattr(current_config.fixity, 'checksum_algorithm', 'md5')
-            index = self.checksum_algorithm_combo.findText(algorithm)
-            if index >= 0:
-                self.checksum_algorithm_combo.setCurrentIndex(index)
-            
-            stream_algorithm = getattr(current_config.fixity, 'stream_hash_algorithm', 'md5')
-            stream_index = self.stream_hash_algorithm_combo.findText(stream_algorithm)
-            if stream_index >= 0:
-                self.stream_hash_algorithm_combo.setCurrentIndex(stream_index)
-            
-            # Load basic tools (now booleans)
-            for tool_name in self.basic_tool_checks:
-                tool_config = getattr(current_config.tools, tool_name)
-                self.basic_tool_checks[tool_name]['check_tool'].setChecked(tool_config.check_tool)
-                self.basic_tool_checks[tool_name]['run_tool'].setChecked(tool_config.run_tool)
-            
-            # Load MediaConch
-            if current_config.tools.mediaconch.mediaconch_policy:
-                # Check if the policy exists in the dropdown, if so select it
-                index = self.mediaconch_policy_combo.findText(current_config.tools.mediaconch.mediaconch_policy)
-                if index >= 0:
-                    self.mediaconch_policy_combo.setCurrentIndex(index)
-                else:
-                    # If policy doesn't exist in dropdown, add it and select it
-                    self.mediaconch_policy_combo.addItem(current_config.tools.mediaconch.mediaconch_policy)
-                    self.mediaconch_policy_combo.setCurrentText(current_config.tools.mediaconch.mediaconch_policy)
-            
-            self.mediaconch_run_check.setChecked(current_config.tools.mediaconch.run_mediaconch)
-            
-            # Load QCTools (now boolean)
-            self.qctools_run_check.setChecked(current_config.tools.qctools.run_tool)
-            
-            # Load QCT Parse (now boolean for run_tool)
-            qct_config = current_config.tools.qct_parse
-            self.qct_parse_run_check.setChecked(qct_config.run_tool)
-            self.bars_detection_check.setChecked(qct_config.barsDetection)
-            self.evaluate_bars_check.setChecked(qct_config.evaluateBars)
-            self.thumb_export_check.setChecked(qct_config.thumbExport)
-            bars_ref = getattr(qct_config, 'evaluateBarsReference', 'detected')
-            self.bars_ref_smpte_radio.setChecked(bars_ref == 'smpte')
-            self.bars_ref_detected_radio.setChecked(bars_ref != 'smpte')
-            self.audio_analysis_check.setChecked(getattr(qct_config, 'audio_analysis', False))
-
+            self._load_settings(current_config)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load current config: {str(e)}")
-    
+
     def load_existing_profile(self, profile):
         """Load an existing profile into the dialog."""
-        # Load profile info
         self.name_input.setText(profile.name)
         self.description_input.setPlainText(profile.description)
-        
-        # Load validate filename
-        self.validate_filename_check.setChecked(profile.validate_filename)
-        
-        # Load outputs (now booleans)
-        self.access_file_check.setChecked(profile.outputs.access_file)
-        self.report_check.setChecked(profile.outputs.report)
-        
-        # Load QCTools extension into the combo box
-        qctools_ext = getattr(profile.outputs, 'qctools_ext', 'qctools.xml.gz')
-        ext_index = self.qctools_ext_combo.findText(qctools_ext)
-        if ext_index >= 0:
-            self.qctools_ext_combo.setCurrentIndex(ext_index)
+        self._load_settings(profile)
 
-        # Load frame analysis if it exists
-        if hasattr(profile.outputs, 'frame_analysis'):
-            fa = profile.outputs.frame_analysis
-            
-            # Bitplane check
-            self.enable_bitplane_check_check.setChecked(bool(getattr(fa, 'enable_bitplane_check', True)))
+    def _load_settings(self, source):
+        """Fill every control from a ChecksConfig or ChecksProfile.
 
-            # Border detection
-            self.enable_border_detection_check.setChecked(bool(getattr(fa, 'enable_border_detection', False)))
-            mode_index = self.border_detection_combo.findData(getattr(fa, 'border_detection_mode', 'simple'))
-            if mode_index >= 0:
-                self.border_detection_combo.setCurrentIndex(mode_index)
-            self.simple_border_pixels_input.setText(str(getattr(fa, 'simple_border_pixels', 25)))
-            self.soph_threshold_input.setText(str(getattr(fa, 'sophisticated_threshold', 10)))
-            self.soph_edge_width_input.setText(str(getattr(fa, 'sophisticated_edge_sample_width', 100)))
-            self.soph_sample_frames_input.setText(str(getattr(fa, 'sophisticated_sample_frames', 30)))
-            self.soph_padding_input.setText(str(getattr(fa, 'sophisticated_padding', 5)))
-            self.auto_retry_borders_check.setChecked(bool(getattr(fa, 'auto_retry_borders', False)))
-            self.max_border_retries_input.setText(str(getattr(fa, 'max_border_retries', 3)))
-            
-            # BRNG analysis
-            self.enable_brng_analysis_check.setChecked(bool(getattr(fa, 'enable_brng_analysis', False)))
-            self.brng_duration_input.setText(str(getattr(fa, 'brng_duration_limit', 300)))
-            self.brng_skip_colorbars_check.setChecked(bool(getattr(fa, 'brng_skip_color_bars', False)))
-            
-            # Signalstats
-            self.enable_signalstats_check.setChecked(bool(getattr(fa, 'enable_signalstats', False)))
-            self.signalstats_duration_input.setText(str(getattr(fa, 'signalstats_duration', 60)))
-            self.signalstats_periods_input.setText(str(getattr(fa, 'signalstats_periods', 3)))
-        
-        # Load fixity (now booleans)
-        self.fixity_checks['check_fixity'].setChecked(profile.fixity.check_fixity)
-        self.fixity_checks['validate_stream_fixity'].setChecked(profile.fixity.validate_stream_fixity)
-        self.fixity_checks['embed_stream_fixity'].setChecked(profile.fixity.embed_stream_fixity)
-        self.fixity_checks['output_fixity'].setChecked(profile.fixity.output_fixity)
-        self.fixity_checks['overwrite_stream_fixity'].setChecked(profile.fixity.overwrite_stream_fixity)
-        
-        # Load checksum algorithms
-        algorithm = getattr(profile.fixity, 'checksum_algorithm', 'md5')
-        index = self.checksum_algorithm_combo.findText(algorithm)
-        if index >= 0:
-            self.checksum_algorithm_combo.setCurrentIndex(index)
-        
-        stream_algorithm = getattr(profile.fixity, 'stream_hash_algorithm', 'md5')
-        stream_index = self.stream_hash_algorithm_combo.findText(stream_algorithm)
-        if stream_index >= 0:
-            self.stream_hash_algorithm_combo.setCurrentIndex(stream_index)
-        
-        # Load basic tools (now booleans)
-        for tool_name in self.basic_tool_checks:
-            tool_config = getattr(profile.tools, tool_name)
-            self.basic_tool_checks[tool_name]['check_tool'].setChecked(tool_config.check_tool)
-            self.basic_tool_checks[tool_name]['run_tool'].setChecked(tool_config.run_tool)
-        
-        # Load MediaConch
-        if profile.tools.mediaconch.mediaconch_policy:
-            # Check if the policy exists in the dropdown, if so select it
-            index = self.mediaconch_policy_combo.findText(profile.tools.mediaconch.mediaconch_policy)
+        Both share validate_filename, video_file_extension, outputs, fixity and
+        tools, so the current config and a saved profile load the same way.
+        """
+        def set_combo_text(combo, text):
+            index = combo.findText(text)
             if index >= 0:
-                self.mediaconch_policy_combo.setCurrentIndex(index)
-            else:
-                # If policy doesn't exist in dropdown, add it and select it
-                self.mediaconch_policy_combo.addItem(profile.tools.mediaconch.mediaconch_policy)
-                self.mediaconch_policy_combo.setCurrentText(profile.tools.mediaconch.mediaconch_policy)
-        
-        self.mediaconch_run_check.setChecked(profile.tools.mediaconch.run_mediaconch)
-        
-        # Load QCTools (now boolean)
-        self.qctools_run_check.setChecked(profile.tools.qctools.run_tool)
-        
-        # Load QCT Parse (now boolean for run_tool)
-        qct_config = profile.tools.qct_parse
-        self.qct_parse_run_check.setChecked(qct_config.run_tool)
-        self.bars_detection_check.setChecked(qct_config.barsDetection)
-        self.evaluate_bars_check.setChecked(qct_config.evaluateBars)
-        self.thumb_export_check.setChecked(qct_config.thumbExport)
-        bars_ref = getattr(qct_config, 'evaluateBarsReference', 'detected')
+                combo.setCurrentIndex(index)
+
+        # Top-level
+        self.validate_filename_check.setChecked(bool(source.validate_filename))
+        set_combo_text(self.video_extension_combo,
+                       getattr(source, 'video_file_extension', 'mkv') or 'mkv')
+
+        # Outputs
+        outputs = source.outputs
+        self.access_file_check.setChecked(bool(outputs.access_file))
+        self.access_trim_bars_check.setChecked(bool(getattr(outputs, 'access_file_trim_color_bars', True)))
+        self.access_crop_to_480_check.setChecked(bool(getattr(outputs, 'access_file_crop_to_480', True)))
+        self.access_crop_borders_check.setChecked(bool(getattr(outputs, 'access_file_crop_borders', True)))
+        self.access_exclude_audio_check.setChecked(bool(getattr(outputs, 'access_file_exclude_flagged_audio', False)))
+        self.report_check.setChecked(bool(outputs.report))
+        self.save_console_pdf_check.setChecked(bool(getattr(outputs, 'save_console_pdf', False)))
+        set_combo_text(self.qctools_ext_combo, getattr(outputs, 'qctools_ext', 'qctools.xml.gz'))
+        self._update_access_option_states()
+
+        # Frame analysis
+        fa = getattr(outputs, 'frame_analysis', None) or FrameAnalysisConfig()
+        self._base_frame_analysis = copy.deepcopy(fa)
+
+        self.enable_bitplane_check_check.setChecked(bool(fa.enable_bitplane_check))
+
+        self.enable_border_detection_check.setChecked(bool(fa.enable_border_detection))
+        mode_index = self.border_detection_combo.findData(fa.border_detection_mode)
+        if mode_index >= 0:
+            self.border_detection_combo.setCurrentIndex(mode_index)
+        self.simple_border_pixels_input.setText(str(fa.simple_border_pixels))
+        self.soph_threshold_input.setText(str(fa.sophisticated_threshold))
+        self.soph_edge_width_input.setText(str(fa.sophisticated_edge_sample_width))
+        self.soph_sample_frames_input.setText(str(fa.sophisticated_sample_frames))
+        self.soph_padding_input.setText(str(fa.sophisticated_padding))
+        self.auto_retry_borders_check.setChecked(bool(fa.auto_retry_borders))
+        self.max_border_retries_input.setText(str(fa.max_border_retries))
+
+        self.enable_brng_analysis_check.setChecked(bool(fa.enable_brng_analysis))
+        self.brng_skip_colorbars_check.setChecked(bool(fa.brng_skip_color_bars))
+
+        self.enable_signalstats_check.setChecked(bool(fa.enable_signalstats))
+        self.analysis_period_count_input.setText(str(fa.analysis_period_count))
+        self.analysis_period_duration_input.setText(str(fa.analysis_period_duration))
+
+        self.duplicate_frame_check.setChecked(bool(fa.enable_duplicate_frame_detection))
+        self.dropped_sample_check.setChecked(bool(fa.enable_dropped_sample_detection))
+
+        # Fixity
+        fixity = source.fixity
+        for key, checkbox in self.fixity_checks.items():
+            checkbox.setChecked(bool(getattr(fixity, key)))
+        set_combo_text(self.checksum_algorithm_combo, getattr(fixity, 'checksum_algorithm', 'md5'))
+        set_combo_text(self.stream_hash_algorithm_combo, getattr(fixity, 'stream_hash_algorithm', 'md5'))
+
+        # Basic tools
+        tools = source.tools
+        for tool_name, checks in self.basic_tool_checks.items():
+            tool_config = getattr(tools, tool_name, None)
+            checks['check_tool'].setChecked(bool(tool_config and tool_config.check_tool))
+            checks['run_tool'].setChecked(bool(tool_config and tool_config.run_tool))
+
+        # MediaConch: select the policy, adding it to the list if it isn't there
+        policy = tools.mediaconch.mediaconch_policy
+        if policy:
+            if self.mediaconch_policy_combo.findText(policy) < 0:
+                self.mediaconch_policy_combo.addItem(policy)
+            self.mediaconch_policy_combo.setCurrentText(policy)
+        self.mediaconch_run_check.setChecked(bool(tools.mediaconch.run_mediaconch))
+
+        # QCTools
+        self.qctools_run_check.setChecked(bool(tools.qctools.run_tool))
+
+        # qct-parse
+        qct = tools.qct_parse
+        self.qct_parse_run_check.setChecked(bool(qct.run_tool))
+        self.bars_detection_check.setChecked(bool(qct.barsDetection))
+        self.evaluate_bars_check.setChecked(bool(qct.evaluateBars))
+        self.thumb_export_check.setChecked(bool(qct.thumbExport))
+        bars_ref = getattr(qct, 'evaluateBarsReference', 'detected')
         self.bars_ref_smpte_radio.setChecked(bars_ref == 'smpte')
         self.bars_ref_detected_radio.setChecked(bars_ref != 'smpte')
-        self.audio_analysis_check.setChecked(getattr(qct_config, 'audio_analysis', False))
+        self.audio_analysis_check.setChecked(bool(getattr(qct, 'audio_analysis', False)))
+        self.tone_leak_check.setChecked(bool(getattr(qct, 'detect_tone_leak', False)))
+        self.clamped_levels_check.setChecked(bool(getattr(qct, 'detect_clamped_levels', False)))
+        self.chroma_phase_check.setChecked(bool(getattr(qct, 'detect_chroma_phase_errors', False)))
+
+        # CLAMS
+        clams = getattr(tools, 'clams_detection', None) or ClamsDetectionConfig()
+        self._base_clams = copy.deepcopy(clams)
+        self.clams_run_check.setChecked(bool(clams.run_tool))
 
     def get_profile_from_form(self):
         """Create a ChecksProfile from the form data."""
@@ -933,36 +948,63 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
         if not name:
             QMessageBox.warning(self, "Validation Error", "Profile name is required.")
             return None
-        
-        # Create frame analysis config with all parameters
-        frame_analysis = FrameAnalysisConfig(
+
+        # Numeric fields: an empty box means the default; anything else must be a whole number
+        numeric_fields = [
+            ("Border Pixels", self.simple_border_pixels_input, 25),
+            ("Brightness Threshold", self.soph_threshold_input, 10),
+            ("Edge Sample Width", self.soph_edge_width_input, 100),
+            ("Sample Frames", self.soph_sample_frames_input, 30),
+            ("Padding", self.soph_padding_input, 5),
+            ("Max Retries", self.max_border_retries_input, 3),
+            ("Number of Periods", self.analysis_period_count_input, 3),
+            ("Period Duration", self.analysis_period_duration_input, 60),
+        ]
+        numbers = {}
+        for label, line_edit, default in numeric_fields:
+            text = line_edit.text().strip()
+            try:
+                numbers[label] = int(text) if text else default
+            except ValueError:
+                QMessageBox.warning(self, "Validation Error",
+                                    f"{label} must be a whole number (got \"{text}\").")
+                return None
+
+        # Frame analysis: form fields layered over the loaded settings, so
+        # values with no control here (duplicate_min_run_length) are kept
+        frame_analysis = replace(
+            copy.deepcopy(self._base_frame_analysis),
             enable_bitplane_check=self.enable_bitplane_check_check.isChecked(),
             enable_border_detection=self.enable_border_detection_check.isChecked(),
             enable_brng_analysis=self.enable_brng_analysis_check.isChecked(),
             enable_signalstats=self.enable_signalstats_check.isChecked(),
+            enable_duplicate_frame_detection=self.duplicate_frame_check.isChecked(),
+            enable_dropped_sample_detection=self.dropped_sample_check.isChecked(),
             border_detection_mode=self.border_detection_combo.currentData() or "simple",
-            simple_border_pixels=int(self.simple_border_pixels_input.text() or 25),
-            sophisticated_threshold=int(self.soph_threshold_input.text() or 10),
-            sophisticated_edge_sample_width=int(self.soph_edge_width_input.text() or 100),
-            sophisticated_sample_frames=int(self.soph_sample_frames_input.text() or 30),
-            sophisticated_padding=int(self.soph_padding_input.text() or 5),
+            simple_border_pixels=numbers["Border Pixels"],
+            sophisticated_threshold=numbers["Brightness Threshold"],
+            sophisticated_edge_sample_width=numbers["Edge Sample Width"],
+            sophisticated_sample_frames=numbers["Sample Frames"],
+            sophisticated_padding=numbers["Padding"],
             auto_retry_borders=self.auto_retry_borders_check.isChecked(),
-            max_border_retries=int(self.max_border_retries_input.text() or 3),
-            brng_duration_limit=int(self.brng_duration_input.text() or 300),
+            max_border_retries=numbers["Max Retries"],
             brng_skip_color_bars=self.brng_skip_colorbars_check.isChecked(),
-            signalstats_duration=int(self.signalstats_duration_input.text() or 60),
-            signalstats_periods=int(self.signalstats_periods_input.text() or 3)
+            analysis_period_count=numbers["Number of Periods"],
+            analysis_period_duration=numbers["Period Duration"],
         )
-        
-        # Create outputs config (now with booleans)
+
         outputs = OutputsConfig(
             access_file=self.access_file_check.isChecked(),
             report=self.report_check.isChecked(),
             qctools_ext=self.qctools_ext_combo.currentText(),
-            frame_analysis=frame_analysis
+            frame_analysis=frame_analysis,
+            access_file_trim_color_bars=self.access_trim_bars_check.isChecked(),
+            access_file_crop_borders=self.access_crop_borders_check.isChecked(),
+            access_file_crop_to_480=self.access_crop_to_480_check.isChecked(),
+            access_file_exclude_flagged_audio=self.access_exclude_audio_check.isChecked(),
+            save_console_pdf=self.save_console_pdf_check.isChecked(),
         )
-        
-        # Create fixity config (now with booleans)
+
         fixity = FixityConfig(
             check_fixity=self.fixity_checks['check_fixity'].isChecked(),
             validate_stream_fixity=self.fixity_checks['validate_stream_fixity'].isChecked(),
@@ -972,29 +1014,22 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
             checksum_algorithm=self.checksum_algorithm_combo.currentText(),
             stream_hash_algorithm=self.stream_hash_algorithm_combo.currentText()
         )
-        
-        # Create tools config (now with booleans)
+
+        def basic_tool(tool_name):
+            return BasicToolConfig(
+                check_tool=self.basic_tool_checks[tool_name]['check_tool'].isChecked(),
+                run_tool=self.basic_tool_checks[tool_name]['run_tool'].isChecked()
+            )
+
         tools = ToolsConfig(
-            exiftool=BasicToolConfig(
-                check_tool=self.basic_tool_checks['exiftool']['check_tool'].isChecked(),
-                run_tool=self.basic_tool_checks['exiftool']['run_tool'].isChecked()
-            ),
-            ffprobe=BasicToolConfig(
-                check_tool=self.basic_tool_checks['ffprobe']['check_tool'].isChecked(),
-                run_tool=self.basic_tool_checks['ffprobe']['run_tool'].isChecked()
-            ),
+            exiftool=basic_tool('exiftool'),
+            ffprobe=basic_tool('ffprobe'),
             mediaconch=MediaConchConfig(
                 mediaconch_policy=self.mediaconch_policy_combo.currentText(),
                 run_mediaconch=self.mediaconch_run_check.isChecked()
             ),
-            mediainfo=BasicToolConfig(
-                check_tool=self.basic_tool_checks['mediainfo']['check_tool'].isChecked(),
-                run_tool=self.basic_tool_checks['mediainfo']['run_tool'].isChecked()
-            ),
-            mediatrace=BasicToolConfig(
-                check_tool=self.basic_tool_checks['mediatrace']['check_tool'].isChecked(),
-                run_tool=self.basic_tool_checks['mediatrace']['run_tool'].isChecked()
-            ),
+            mediainfo=basic_tool('mediainfo'),
+            mediatrace=basic_tool('mediatrace'),
             qctools=QCToolsConfig(
                 run_tool=self.qctools_run_check.isChecked()
             ),
@@ -1004,20 +1039,29 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
                 evaluateBars=self.evaluate_bars_check.isChecked(),
                 thumbExport=self.thumb_export_check.isChecked(),
                 evaluateBarsReference=('smpte' if self.bars_ref_smpte_radio.isChecked() else 'detected'),
-                audio_analysis=self.audio_analysis_check.isChecked()
-            )
+                audio_analysis=self.audio_analysis_check.isChecked(),
+                detect_clamped_levels=self.clamped_levels_check.isChecked(),
+                detect_chroma_phase_errors=self.chroma_phase_check.isChecked(),
+                detect_tone_leak=self.tone_leak_check.isChecked(),
+            ),
+            mkvalidator=basic_tool('mkvalidator'),
+            # Numeric CLAMS tuning is JSON-only; keep the loaded values
+            clams_detection=replace(
+                copy.deepcopy(self._base_clams),
+                run_tool=self.clams_run_check.isChecked()
+            ),
         )
-        
-        # Create and return the profile
+
         return ChecksProfile(
             name=name,
             description=self.description_input.toPlainText().strip(),
             validate_filename=self.validate_filename_check.isChecked(),
             outputs=outputs,
             fixity=fixity,
-            tools=tools
+            tools=tools,
+            video_file_extension=self.video_extension_combo.currentText(),
         )
-    
+
     def on_save_clicked(self):
         """Handle save button click."""
         profile = self.get_profile_from_form()

@@ -291,7 +291,6 @@ class FrameAnalysisConfig:
     max_border_retries: int = 3
     
     # BRNG analysis settings
-    brng_duration_limit: int = 300
     brng_skip_color_bars: bool = True
     
     # Analysis period settings (used by signalstats and BRNG analysis)
@@ -316,6 +315,14 @@ SUPPORTED_VIDEO_EXTENSIONS = ("mkv", "mov", "mp4", "avi", "mxf")
 def is_mkv_extension(ext: str) -> bool:
     """True if the given extension string refers to a Matroska (.mkv) container."""
     return ext.lower().lstrip('.') == "mkv"
+
+
+# Settings that only work on Matroska input, forced off (and grayed in the GUI)
+# when a non-MKV extension is configured. Stream fixity uses mkvextract/
+# mkvpropedit; mediatrace reads Matroska SimpleTags; mkvalidator validates
+# Matroska conformance.
+MKV_ONLY_FIXITY_FIELDS = ("embed_stream_fixity", "validate_stream_fixity", "overwrite_stream_fixity")
+MKV_ONLY_TOOLS = ("mediatrace", "mkvalidator")
 
 # Output configuration
 @dataclass

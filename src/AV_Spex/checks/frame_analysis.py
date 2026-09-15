@@ -851,6 +851,60 @@ DURATION_UNKNOWN_REASON = (
     "supply one"
 )
 
+# Analysis periods start no earlier than this many seconds after the head color
+# bars end (or after the start of the file when there are no bars). Every
+# period-placement path adds it exactly once — the first signalstats pass used
+# to add it twice (20s) while refinement re-runs and BRNG fallbacks added it
+# once (10s).
+BARS_SAFETY_MARGIN_SECONDS = 10
+
+SIGNALSTATS_BRNG_TAG = 'TAG:lavfi.signalstats.BRNG'
+
+
+def _float_or_none(value: str) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def iter_signalstats_brng_frames(lines):
+    """Yield (pts_time, brng) per frame from ffprobe's default output format.
+
+    Expects `-show_entries frame=pts_time:frame_tags=lavfi.signalstats.BRNG
+    -of default`: each frame is a [FRAME] ... [/FRAME] block of key=value lines.
+    pts_time is None when ffprobe reports N/A; frames without a BRNG tag are
+    skipped.
+
+    Not csv: when a frame carries side data (HDR mastering metadata, captions,
+    ...), csv output appends a trailing separator ("0.000000,0.209591,"), which
+    the old last-comma split turned into an empty BRNG value and silently
+    dropped the frame. Here side data is just a nested block whose keys are
+    ignored.
+    """
+    in_frame = False
+    ts = brng = None
+    for raw in lines:
+        line = raw.strip()
+        if line == '[FRAME]':
+            in_frame = True
+            ts = brng = None
+        elif line == '[/FRAME]':
+            if in_frame and brng is not None:
+                yield ts, brng
+            in_frame = False
+        elif in_frame and '=' in line:
+            key, _, value = line.partition('=')
+            if key == 'pts_time':
+                ts = _float_or_none(value)
+            elif key == SIGNALSTATS_BRNG_TAG:
+                brng = _float_or_none(value)
+
+
+def content_start_after_bars(color_bars_end_time) -> float:
+    """Earliest time an analysis period may start, given the head bars end (or None)."""
+    return (color_bars_end_time or 0) + BARS_SAFETY_MARGIN_SECONDS
+
 
 def _positive_finite(value) -> Optional[float]:
     """Return `value` as a float when it is a real positive number, else None.
@@ -1101,9 +1155,39 @@ def _opencv_has_ffmpeg() -> bool:
         return False
 
 
+def _config_int(value, default: int, minimum: int, name: str) -> int:
+    """Coerce a numeric config value to an int no smaller than `minimum`.
+
+    The GUI saves an emptied field as 0 and neither the GUI nor the CLI range-
+    checks these, so the detector does: a non-number falls back to `default`,
+    anything below `minimum` is raised to it, each with a warning.
+    """
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        logger.warning(f"  Invalid {name} {value!r}, using {default}")
+        return default
+    if result < minimum:
+        logger.warning(f"  {name} {result} is below the minimum, using {minimum}")
+        return minimum
+    return result
+
+
 class SophisticatedBorderDetector:
     """Advanced border detection with quality assessment and refinement capabilities"""
-    
+
+    # Defaults match FrameAnalysisConfig; detect_borders_with_quality_assessment()
+    # overwrites them per call with the configured values.
+    simple_border_pixels = 25
+    sophisticated_threshold = 10
+    sophisticated_edge_sample_width = 100
+    sophisticated_sample_frames = 30
+    sophisticated_padding = 5
+
+    # Sophisticated detection needs this many usable frames before it trusts
+    # its measurement over the simple fallback.
+    MIN_QUALITY_FRAMES = 5
+
     def __init__(self, video_path: str, signals=None, check_cancelled_fn=None):
         self.video_path = str(video_path)
         self.signals = signals
@@ -1128,21 +1212,55 @@ class SophisticatedBorderDetector:
 
     def detect_borders_with_quality_assessment(self,
                                               violations: List[FrameViolation] = None,
-                                              method: str = 'sophisticated') -> BorderDetectionResult:
+                                              method: str = 'sophisticated',
+                                              simple_border_pixels: int = 25,
+                                              sophisticated_threshold: int = 10,
+                                              sophisticated_edge_sample_width: int = 100,
+                                              sophisticated_sample_frames: int = 30,
+                                              sophisticated_padding: int = 5) -> BorderDetectionResult:
         """
         Detect borders using sophisticated quality assessment or simple method.
-        
+
         Args:
             violations: List of frames with known violations for focused detection
             method: 'sophisticated' or 'simple'
+            simple_border_pixels: Crop per edge for simple mode, and for the
+                simple fallback when sophisticated detection cannot run
+            sophisticated_threshold: Mean grayscale brightness (0-255) a column
+                or row must exceed to count as picture rather than border
+            sophisticated_edge_sample_width: How many columns in from the left
+                and right edges to search for the picture edge
+            sophisticated_sample_frames: How many quality frames to measure
+                borders on (at least MIN_QUALITY_FRAMES)
+            sophisticated_padding: Safety margin, in pixels, taken off every
+                side of the detected active area
         """
+        self.simple_border_pixels = simple_border_pixels
+        self.sophisticated_threshold = _config_int(
+            sophisticated_threshold, 10, 0, "sophisticated_threshold")
+        self.sophisticated_edge_sample_width = _config_int(
+            sophisticated_edge_sample_width, 100, 1, "sophisticated_edge_sample_width")
+        self.sophisticated_sample_frames = _config_int(
+            sophisticated_sample_frames, 30, self.MIN_QUALITY_FRAMES,
+            "sophisticated_sample_frames")
+        self.sophisticated_padding = _config_int(
+            sophisticated_padding, 5, 0, "sophisticated_padding")
         if method == 'simple':
             return self._detect_simple_borders()
         else:
             return self._detect_sophisticated_borders(violations)
-    
-    def _detect_simple_borders(self, border_size: int = 25) -> BorderDetectionResult:
-        """Simple fixed-size border detection"""
+
+    def _detect_simple_borders(self, border_size: int = None) -> BorderDetectionResult:
+        """Simple fixed-size border detection.
+
+        border_size defaults to the simple_border_pixels passed to
+        detect_borders_with_quality_assessment() (25 if never set), so the
+        sophisticated-mode fallbacks honour the configured crop too.
+        """
+        if border_size is None:
+            border_size = self.simple_border_pixels
+        border_size = _config_int(border_size, 25, 0, "simple_border_pixels")
+
         active_x = border_size
         active_y = border_size
         active_width = self.width - (2 * border_size)
@@ -1187,7 +1305,7 @@ class SophisticatedBorderDetector:
             cap.release()
             return self._detect_simple_borders()
 
-        if len(quality_frames) < 5:
+        if len(quality_frames) < self.MIN_QUALITY_FRAMES:
             logger.warning("Insufficient quality frames, falling back to simple detection")
             cap.release()
             self._emit_progress(100)
@@ -1243,12 +1361,19 @@ class SophisticatedBorderDetector:
         logger.debug(f"  Using {len(quality_frames)} quality frames for detection\n")
         
         # Add padding for safety
-        padding = 5
+        padding = self.sophisticated_padding
         active_x += padding
         active_y += padding
         active_width -= 2 * padding
         active_height -= 2 * padding
-        
+
+        if active_width <= 0 or active_height <= 0:
+            logger.warning(
+                f"  Detected borders plus {padding}px padding leave no active picture "
+                f"({active_width}x{active_height}), falling back to simple detection")
+            self._emit_progress(45)
+            return self._detect_simple_borders()
+
         border_regions = self._calculate_border_regions(
             active_x, active_y, active_width, active_height
         )
@@ -1270,10 +1395,11 @@ class SophisticatedBorderDetector:
     def _select_quality_frames(self, cap, violations: List[FrameViolation] = None) -> List[Dict]:
         """Select high-quality frames for border detection"""
         quality_frames = []
-        
+        target_frames = self.sophisticated_sample_frames
+
         # If we have violations, prioritize those frames
         if violations:
-            violation_batch = violations[:30]
+            violation_batch = violations[:target_frames]
             for i, v in enumerate(violation_batch):
                 if self.check_cancelled():
                     break
@@ -1293,8 +1419,11 @@ class SophisticatedBorderDetector:
                     self._emit_progress(1 + int((i + 1) / len(violation_batch) * 7))
         
         # If we need more frames, sample evenly
-        if len(quality_frames) < 30:
-            sample_indices = np.linspace(0, self.total_frames - 1, 50, dtype=int)
+        if len(quality_frames) < target_frames:
+            # Oversample: some evenly spaced frames will be rejected as too
+            # dark, too bright or flat (50 candidates for the default 30)
+            num_candidates = max(50, target_frames * 5 // 3)
+            sample_indices = np.linspace(0, self.total_frames - 1, num_candidates, dtype=int)
             for j, idx in enumerate(sample_indices):
                 if self.check_cancelled():
                     break
@@ -1315,7 +1444,7 @@ class SophisticatedBorderDetector:
         
         # Sort by quality
         quality_frames.sort(key=lambda x: x['quality'], reverse=True)
-        return quality_frames[:30]
+        return quality_frames[:target_frames]
     
     def _assess_frame_quality(self, frame) -> Dict:
         """Assess frame quality for suitability"""
@@ -1349,8 +1478,9 @@ class SophisticatedBorderDetector:
     def _analyze_borders_from_frames(self, cap, quality_frames: List[Dict]) -> Dict:
         """Analyze borders from quality frames"""
         borders = {'left': [], 'right': [], 'top': [], 'bottom': []}
-        threshold = 10
-        edge_sample_width = 100
+        threshold = self.sophisticated_threshold
+        # Left/right search depth only; top/bottom always search 20 rows
+        edge_sample_width = self.sophisticated_edge_sample_width
         
         for frame_data in quality_frames:
             frame = frame_data['frame']
@@ -1853,8 +1983,6 @@ class DifferentialBRNGAnalyzer:
 
     def analyze_with_differential_detection(self, 
                                        output_dir: Path,
-                                       duration_limit: int = 300,
-                                       skip_start_seconds: float = 0,
                                        qctools_violations: List[FrameViolation] = None,
                                        analysis_periods: List[Tuple[float, int]] = None,
                                        upstream_context: 'UpstreamAnalysisContext' = None,
@@ -2005,7 +2133,12 @@ class DifferentialBRNGAnalyzer:
                 
                 self._emit_progress(period_end)
             
-            violations = all_violations
+            # Each period's list is sorted worst-first, but concatenating them
+            # put the first period's frames ahead of worse frames from later
+            # periods. Consumers treat violations[0] / violations[:5] as the
+            # worst frames (refinement improvement check, thumbnail choice,
+            # worst_frames), so rank across all periods.
+            violations = sorted(all_violations, key=lambda v: v.violation_score, reverse=True)
 
             # Every period failing means nothing was examined. Returning an empty
             # violation list here would be reported as "No BRNG violations
@@ -2643,6 +2776,37 @@ class DifferentialBRNGAnalyzer:
 
         return diagnostics if diagnostics else ["General broadcast range violations"]
 
+    def _head_switching_bottom_edge_width(self, edge_width: int) -> int:
+        """Bottom edge-strip width, widened for head switching the crop didn't remove.
+
+        Sophisticated border detection already crops the *average* head-switching
+        height (plus padding) off the bottom of the active area BRNG analyzes, so
+        only the part of the artifact that reaches past that crop can still show
+        up in the analyzed frame: max_height_px minus the bottom crop. When that
+        residual is taller than the normal strip, and head switching was seen in
+        more than 30% of sampled frames, the bottom strip grows to cover it (+5 px
+        margin, capped at 40 px) so the noise is classified as an edge artifact
+        rather than a content violation. Measuring from the crop, not the full
+        frame, keeps the strip from reaching into real picture.
+        """
+        context = getattr(self, 'upstream_context', None)
+        hs = context.head_switching if context else None
+        if not hs or not hs.get('detected'):
+            return edge_width
+
+        affected_pct = hs.get('percentage', 0) or 0
+        max_height = hs.get('max_height_px', 0) or 0
+        bottom_crop = (context.border_widths or {}).get('bottom', 0) or 0
+        residual = max_height - bottom_crop
+
+        if affected_pct > 30 and residual > edge_width:
+            widened = min(residual + 5, 40)
+            logger.debug(f"    Bottom edge width expanded to {widened}px "
+                         f"(head switching reaches {max_height}px, {bottom_crop}px already "
+                         f"cropped, in {affected_pct:.0f}% of frames)")
+            return widened
+        return edge_width
+
     def _detect_edge_violations_enhanced(self, violation_mask, edge_width=15):
         """
         Enhanced edge violation detection that identifies blanking patterns
@@ -2667,19 +2831,12 @@ class DifferentialBRNGAnalyzer:
             'interior_density': 0.0
         }
         
-        # Determine per-edge widths. Widen bottom edge if head switching was detected
-        # upstream — head switching noise produces expected BRNG violations that should
-        # be classified as edge artifacts, not content issues.
-        bottom_edge_width = edge_width
-        if (hasattr(self, 'upstream_context') and self.upstream_context 
-            and self.upstream_context.head_switching):
-            hs = self.upstream_context.head_switching
-            hs_height = hs.get('artifact_height', 0)
-            hs_pct = hs.get('affected_percentage', 0)
-            if hs_pct > 30 and hs_height > edge_width:
-                bottom_edge_width = min(hs_height + 5, 40)  # Cap at 40px
-                logger.debug(f"    Bottom edge width expanded to {bottom_edge_width}px "
-                           f"(head switching: {hs_height}px in {hs_pct:.0f}% of frames)")
+        # Per-edge strip widths. The bottom strip is widened when head switching
+        # reaches past what border detection already cropped (see
+        # _head_switching_bottom_edge_width).
+        bottom_edge_width = self._head_switching_bottom_edge_width(edge_width)
+        strip_widths = {'left': edge_width, 'right': edge_width,
+                        'top': edge_width, 'bottom': bottom_edge_width}
         
         # Calculate interior violation density as baseline for comparison.
         # This is the region inset by edge_width on all sides (using bottom_edge_width for bottom).
@@ -2706,6 +2863,8 @@ class DifferentialBRNGAnalyzer:
             
             edge_info['edge_percentages'][edge_name] = violation_percentage
             
+            strip = strip_widths[edge_name]
+
             # Detect linear patterns (even if not perfectly continuous)
             linear_score = 0
             if orientation == 'vertical':
@@ -2716,7 +2875,7 @@ class DifferentialBRNGAnalyzer:
                         if len(violation_positions) >= 4:  
                             if edge_name == 'left' and np.max(violation_positions) <= 2:
                                 linear_score += 1
-                            elif edge_name == 'right' and np.min(violation_positions) >= edge_width - 3:
+                            elif edge_name == 'right' and np.min(violation_positions) >= strip - 3:
                                 linear_score += 1
                 
                 linear_percentage = (linear_score / edge_region.shape[0]) * 100
@@ -2730,7 +2889,7 @@ class DifferentialBRNGAnalyzer:
                         if len(violation_positions) >= 2:
                             if edge_name == 'top' and np.max(violation_positions) <= 3:
                                 linear_score += 1
-                            elif edge_name == 'bottom' and np.min(violation_positions) >= edge_width - 4:
+                            elif edge_name == 'bottom' and np.min(violation_positions) >= strip - 4:
                                 linear_score += 1
                 
                 linear_percentage = (linear_score / edge_region.shape[1]) * 100
@@ -2747,7 +2906,7 @@ class DifferentialBRNGAnalyzer:
                             if edge_name == 'left':
                                 depth = np.max(row_violations)
                             else:  # right
-                                depth = edge_width - np.min(row_violations)
+                                depth = strip - np.min(row_violations)
                             max_depth = max(max_depth, depth)
                 else:  # horizontal
                     for col in range(edge_region.shape[1]):
@@ -2756,7 +2915,7 @@ class DifferentialBRNGAnalyzer:
                             if edge_name == 'top':
                                 depth = np.max(col_violations)
                             else:  # bottom
-                                depth = edge_width - np.min(col_violations)
+                                depth = strip - np.min(col_violations)
                             max_depth = max(max_depth, depth)
                 
                 edge_info['blanking_depth'][edge_name] = max_depth
@@ -2780,7 +2939,7 @@ class DifferentialBRNGAnalyzer:
             if edge_name == 'top':
                 adjacent = violation_mask[edge_width:edge_width + adjacent_band_depth, :]
             elif edge_name == 'bottom':
-                adjacent = violation_mask[-(edge_width + adjacent_band_depth):-edge_width, :]
+                adjacent = violation_mask[-(strip + adjacent_band_depth):-strip, :]
             elif edge_name == 'left':
                 adjacent = violation_mask[:, edge_width:edge_width + adjacent_band_depth]
             else:  # right
@@ -3398,9 +3557,15 @@ class IntegratedSignalstatsAnalyzer:
             end_tc = self._seconds_to_timecode(end_time)
             logger.debug(f"    Period {i+1}: {start_tc} - {end_tc} ({duration}s)")
         
-        # Log active area vs full frame comparison
-        active_area = sanitize_active_area(
-            border_data.active_area if border_data else None, "signalstats analysis")
+        # Log active area vs full frame comparison. With border detection off,
+        # analyze() passes a full-frame placeholder (method 'disabled') so BRNG
+        # still has geometry; it is not a detected active area, so signalstats
+        # measures the full frame only instead of comparing the frame to itself.
+        if border_data is not None and border_data.detection_method == 'disabled':
+            active_area = None
+        else:
+            active_area = sanitize_active_area(
+                border_data.active_area if border_data else None, "signalstats analysis")
         if active_area:
             x, y, w, h = active_area
             full_w, full_h = self.width, self.height
@@ -3726,10 +3891,12 @@ class IntegratedSignalstatsAnalyzer:
         or replaces any that overlap significantly with all-black content.
         """
         
-        # Start after color bars with a safety margin
-        effective_start = max(content_start, color_bars_end or 0) + 10
+        # Start after color bars with a safety margin. content_start is an
+        # optional extra floor (no current caller sets one); the margin is
+        # applied once here, so callers must not add it themselves.
+        effective_start = max(content_start or 0, content_start_after_bars(color_bars_end))
         
-        logger.debug(f"  Content starts at {effective_start:.1f}s (after color bars at {color_bars_end:.1f}s)\n")
+        logger.debug(f"  Content starts at {effective_start:.1f}s (after color bars at {(color_bars_end or 0):.1f}s)\n")
 
         # Every placement strategy below except QCTools periods measures back
         # from self.duration, so an unknown (0) duration produced periods like
@@ -4124,7 +4291,8 @@ class IntegratedSignalstatsAnalyzer:
             # is captured alongside BRNG so downstream code can locate the
             # representative/worst frames for thumbnails.
             '-show_entries', 'frame=pts_time:frame_tags=lavfi.signalstats.BRNG',
-            '-of', 'csv=p=0'
+            # Key=value blocks, not csv — see iter_signalstats_brng_frames
+            '-of', 'default'
         ]
 
         # Estimate frames for the period (~30fps; fine as a denominator for progress)
@@ -4139,12 +4307,7 @@ class IntegratedSignalstatsAnalyzer:
             brng_values = []
             brng_frames = []  # (timestamp_seconds, brng_fraction) per analyzed frame
             frame_count = 0
-            while True:
-                line = proc.stdout.readline()
-                if not line:
-                    if proc.poll() is not None:
-                        break
-                    continue
+            for ts_val, brng_val in iter_signalstats_brng_frames(proc.stdout):
                 if self.check_cancelled():
                     proc.terminate()
                     try:
@@ -4152,23 +4315,6 @@ class IntegratedSignalstatsAnalyzer:
                     except subprocess.TimeoutExpired:
                         proc.kill()
                     return None
-                line = line.strip()
-                if not line:
-                    continue
-                # Each CSV row is "pts_time,BRNG". Fall back to a single BRNG
-                # column if pts_time is unavailable in this ffmpeg build.
-                ts_val = None
-                brng_str = line
-                if ',' in line:
-                    ts_str, brng_str = line.rsplit(',', 1)
-                    try:
-                        ts_val = float(ts_str)
-                    except ValueError:
-                        ts_val = None
-                try:
-                    brng_val = float(brng_str)
-                except ValueError:
-                    continue
                 brng_values.append(brng_val)
                 if ts_val is not None:
                     brng_frames.append((ts_val, brng_val))
@@ -4181,6 +4327,7 @@ class IntegratedSignalstatsAnalyzer:
                         self._emit_progress(pct)
                         last_pct = pct
 
+            proc.communicate()  # stdout is exhausted; drain stderr and reap
             if proc.returncode != 0:
                 logger.warning(f"    FFprobe failed for period {period_num}")
                 return None
@@ -4714,7 +4861,6 @@ class EnhancedFrameAnalysis:
 
     def analyze(self,
         method: str = 'sophisticated',
-        duration_limit: int = 300,
         skip_color_bars: bool = True,
         max_refinement_iterations: int = 3,
         color_bars_end_time: float = None,
@@ -4726,7 +4872,6 @@ class EnhancedFrameAnalysis:
 
         Args:
             method: 'sophisticated' or 'simple' border detection
-            duration_limit: Maximum duration to analyze (seconds)
             skip_color_bars: Whether to skip color bars at start
             max_refinement_iterations: Maximum border refinement iterations
             color_bars_end_time: End time of color bars if detected
@@ -4755,7 +4900,7 @@ class EnhancedFrameAnalysis:
         # Use the caller's config when given. Reading self.checks_config
         # unconditionally would ignore an explicitly passed FrameAnalysisConfig
         # — the enable_* flags would come from whatever was last saved in the
-        # GUI while method/duration_limit came from the argument.
+        # GUI while method came from the argument.
         if frame_config is None:
             frame_config = self.checks_config.outputs.frame_analysis
         
@@ -4810,6 +4955,14 @@ class EnhancedFrameAnalysis:
             if color_bars_end_time > 0:
                 results['color_bars_end_time'] = color_bars_end_time
 
+        # No bars detected arrives as None. With skip_color_bars off, None was
+        # never replaced, and period selection formats it as a number and the
+        # BRNG fallback adds to it — a TypeError that process_frame_analysis
+        # caught, silently discarding the whole frame analysis. Every consumer
+        # treats 0 as "no bars", so normalize once here.
+        if color_bars_end_time is None:
+            color_bars_end_time = 0
+
         # Period selection (QCTools violations + suggested periods) is only
         # needed for the video-frame analysis steps. Dropped sample detection
         # is audio-only and does not consume them.
@@ -4846,13 +4999,32 @@ class EnhancedFrameAnalysis:
         # parsing skips them, and duplicate-frame candidates inside them are
         # dropped. The scalar color_bars_end_time still handles the head
         # region; this list adds the additional bars.
+        #
+        # Skip Color Bars (brng_skip_color_bars) controls the BRNG side only:
+        # when it is off, bars stay in the QCTools violation scan, period
+        # placement, signalstats and BRNG. Duplicate-frame detection always
+        # excludes them — bars are a static test pattern and would otherwise
+        # be reported as one long freeze.
         bars_regions = [(s, e) for s, e in (bars_regions or []) if e > s]
-        if bars_regions:
-            logger.info(
-                f"Excluding {len(bars_regions)} detected color-bars region(s) "
-                f"from BRNG/signalstats/duplicate-frame analysis"
-            )
-        avoid_segments = black_segments + bars_regions
+        if skip_color_bars:
+            brng_bars_end = color_bars_end_time
+            brng_bars_regions = bars_regions
+            if bars_regions:
+                logger.info(
+                    f"Excluding {len(bars_regions)} detected color-bars region(s) "
+                    f"from BRNG/signalstats/duplicate-frame analysis"
+                )
+        else:
+            brng_bars_end = 0
+            brng_bars_regions = []
+            if bars_regions or color_bars_end_time:
+                logger.info(
+                    "Skip Color Bars is off: detected color bars are included in the "
+                    "QCTools violation scan, period placement, signalstats and BRNG "
+                    "analysis (still excluded from duplicate-frame detection)"
+                )
+        avoid_segments = black_segments + brng_bars_regions
+        duplicate_avoid_segments = black_segments + bars_regions
 
         if self.check_cancelled():
             return results
@@ -4863,8 +5035,8 @@ class EnhancedFrameAnalysis:
                 violations = parser.parse_for_violations_streaming(
                     max_frames=100,
                     skip_color_bars=skip_color_bars,
-                    color_bars_end_time=color_bars_end_time,
-                    exclude_regions=bars_regions
+                    color_bars_end_time=brng_bars_end,
+                    exclude_regions=brng_bars_regions
                 )
                 # Total frames with violations, not the severity-capped list length
                 frames_with_qctools_violations = getattr(parser, 'total_violation_frames', len(violations))
@@ -4898,7 +5070,12 @@ class EnhancedFrameAnalysis:
             logger.info(f"Detecting borders using {method} method...")
             border_results = self.border_detector.detect_borders_with_quality_assessment(
                 violations=violations,
-                method=method
+                method=method,
+                simple_border_pixels=frame_config.simple_border_pixels,
+                sophisticated_threshold=frame_config.sophisticated_threshold,
+                sophisticated_edge_sample_width=frame_config.sophisticated_edge_sample_width,
+                sophisticated_sample_frames=frame_config.sophisticated_sample_frames,
+                sophisticated_padding=frame_config.sophisticated_padding
             )
             results['initial_borders'] = asdict(border_results)
 
@@ -4954,8 +5131,8 @@ class EnhancedFrameAnalysis:
             logger.info("Running signalstats analysis on active picture area to identify key analysis periods...")
             signalstats_results = self.signalstats_analyzer.analyze_with_signalstats(
                 border_data=border_results,
-                content_start_time=color_bars_end_time + 10 if color_bars_end_time else 10,
-                color_bars_end_time=color_bars_end_time,
+                content_start_time=0,
+                color_bars_end_time=brng_bars_end,
                 analysis_duration=frame_config.analysis_period_duration,
                 num_periods=frame_config.analysis_period_count,
                 qctools_periods=qctools_suggested_periods,
@@ -5034,7 +5211,7 @@ class EnhancedFrameAnalysis:
                     qctools_candidate_periods=qctools_suggested_periods,
                     black_segments=avoid_segments,
                     period_duration=frame_config.analysis_period_duration,
-                    color_bars_end_time=color_bars_end_time
+                    color_bars_end_time=brng_bars_end
                 )
         
         # Step 5: BRNG analysis (conditional)
@@ -5052,7 +5229,7 @@ class EnhancedFrameAnalysis:
                     logger.info(f"Creating evenly distributed analysis periods (no QCTools violations found)\n")
                     video_duration = self._get_video_duration()
                     if video_duration:
-                        content_start = color_bars_end_time + 10  # Start 10s after color bars
+                        content_start = content_start_after_bars(brng_bars_end)
                         content_duration = video_duration - content_start - 10  # Leave 10s at end
                         if content_duration > 0:
                             period_duration = frame_config.analysis_period_duration
@@ -5081,7 +5258,7 @@ class EnhancedFrameAnalysis:
                 if avoid_segments and analysis_periods:
                     analysis_periods = self.signalstats_analyzer._validate_periods_against_black_segments(
                         analysis_periods, avoid_segments,
-                        effective_start=(color_bars_end_time or 0) + 10,
+                        effective_start=content_start_after_bars(brng_bars_end),
                         period_duration=frame_config.analysis_period_duration
                     )
             
@@ -5091,9 +5268,7 @@ class EnhancedFrameAnalysis:
                                                           signals=self.signals)
             
             brng_results = self.brng_analyzer.analyze_with_differential_detection(
-                output_dir=self.output_dir, 
-                duration_limit=duration_limit,
-                skip_start_seconds=color_bars_end_time,
+                output_dir=self.output_dir,
                 qctools_violations=violations,
                 analysis_periods=analysis_periods,
                 upstream_context=upstream_context,
@@ -5219,7 +5394,7 @@ class EnhancedFrameAnalysis:
                         signalstats_results = self.signalstats_analyzer.analyze_with_signalstats(
                             border_data=border_results,
                             content_start_time=0,
-                            color_bars_end_time=color_bars_end_time,
+                            color_bars_end_time=brng_bars_end,
                             analysis_duration=frame_config.analysis_period_duration,
                             num_periods=frame_config.analysis_period_count,
                             qctools_periods=qctools_suggested_periods,
@@ -5250,8 +5425,6 @@ class EnhancedFrameAnalysis:
 
                     brng_results = self.brng_analyzer.analyze_with_differential_detection(
                         output_dir=self.output_dir,
-                        duration_limit=duration_limit,
-                        skip_start_seconds=color_bars_end_time,
                         qctools_violations=violations,
                         analysis_periods=analysis_periods,
                         upstream_context=upstream_context,
@@ -5278,7 +5451,6 @@ class EnhancedFrameAnalysis:
                         'edge_violation_pct': brng_results.aggregate_patterns.get('edge_violation_percentage', 0),
                         'visualization_path': str(viz_output_path) if success else None
                     }
-                    refinement_history.append(iteration_data)
 
                     # Log improvement metrics
                     violation_reduction = iteration_data['violations_before'] - iteration_data['violations_after']
@@ -5287,12 +5459,25 @@ class EnhancedFrameAnalysis:
                     else:
                         logger.info(f"  Violations: {iteration_data['violations_after']} (no reduction)")
 
-                    # Check for improvement
+                    # Stop once a round stops paying off. Without this the loop
+                    # re-ran border detection, signalstats and BRNG up to
+                    # max_refinement_iterations times even when the borders no
+                    # longer moved or the edge violations weren't going down.
                     improved = self._is_meaningful_improvement(
                         previous_brng, brng_results,
                         previous_area=previous_area,
                         current_area=new_area
                     )
+                    iteration_data['improved'] = improved
+                    refinement_history.append(iteration_data)
+
+                    if not improved:
+                        if brng_results.requires_border_adjustment:
+                            logger.info(
+                                f"  Refinement iteration {refinement_iterations} made no meaningful "
+                                f"improvement — stopping border refinement\n"
+                            )
+                        break
 
                 # After refinement loop completes
                 results['refinement_iterations'] = refinement_iterations
@@ -5387,7 +5572,7 @@ class EnhancedFrameAnalysis:
         def _run_duplicate_frames():
             result = self._detect_duplicate_frames(
                 color_bars_end_time=color_bars_end_time,
-                black_segments=avoid_segments,
+                black_segments=duplicate_avoid_segments,
                 min_run_length=getattr(frame_config, 'duplicate_min_run_length', 2),
             )
             return asdict(result) if result else None
@@ -5694,8 +5879,14 @@ class EnhancedFrameAnalysis:
         period_full_brng = {}
         
         for comp in (signalstats_results.comparison_results or []):
+            # Only periods that were measured both ways carry a diagnosis. An
+            # unmeasured period (full-frame-only signalstats, or a failed
+            # ffprobe pass) would otherwise read as 0% active-area BRNG and
+            # push BRNG into light sampling it has no evidence for.
+            if not comp.get('diagnosis'):
+                continue
             idx = comp.get('period', 1) - 1  # 0-indexed
-            period_diagnoses[idx] = comp.get('diagnosis', '')
+            period_diagnoses[idx] = comp['diagnosis']
             
             ff_data = comp.get('ffprobe_active_area', {})
             qc_data = comp.get('qctools_full_frame', {})
@@ -5762,6 +5953,9 @@ class EnhancedFrameAnalysis:
         for i, (start, dur) in enumerate(current_periods):
             comp = comparison_results[i] if i < len(comparison_results) else {}
             diagnosis = comp.get('diagnosis', '')
+            if not diagnosis:
+                # Not measured both ways: no evidence it is low-value, keep it
+                continue
             
             ff_data = comp.get('ffprobe_active_area', {})
             active_pct = ff_data.get('violations_pct', 0)
@@ -5811,7 +6005,7 @@ class EnhancedFrameAnalysis:
         if black_segments and replacements_made > 0:
             refined = self.signalstats_analyzer._validate_periods_against_black_segments(
                 refined, black_segments,
-                effective_start=(color_bars_end_time or 0) + 10,
+                effective_start=content_start_after_bars(color_bars_end_time),
                 period_duration=period_duration
             )
         
@@ -6020,7 +6214,6 @@ def analyze_frame_quality(video_path: str,
     
     # Extract parameters directly from dataclass
     method = frame_config.border_detection_mode
-    duration_limit = frame_config.brng_duration_limit
     skip_color_bars = bool(frame_config.brng_skip_color_bars)
     max_refinements = frame_config.max_border_retries
     
@@ -6043,7 +6236,6 @@ def analyze_frame_quality(video_path: str,
     
     results = analyzer.analyze(
         method=method,
-        duration_limit=duration_limit,
         skip_color_bars=skip_color_bars,
         max_refinement_iterations=max_refinements,
         color_bars_end_time=color_bars_end_time,

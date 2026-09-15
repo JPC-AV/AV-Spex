@@ -30,6 +30,9 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from types import SimpleNamespace
+
+import numpy as np
 import pytest
 
 from AV_Spex.checks import frame_analysis as fa
@@ -782,7 +785,6 @@ def test_analyze_frame_quality_passes_config_fields_through(monkeypatch):
     from AV_Spex.utils.config_setup import FrameAnalysisConfig
     cfg = FrameAnalysisConfig(
         border_detection_mode="sophisticated",
-        brng_duration_limit=120,
         brng_skip_color_bars=False,
         max_border_retries=5,
     )
@@ -793,7 +795,7 @@ def test_analyze_frame_quality_passes_config_fields_through(monkeypatch):
 
     call = fake_analyzer.analyze.call_args
     assert call.kwargs["method"] == "sophisticated"
-    assert call.kwargs["duration_limit"] == 120
+    assert "duration_limit" not in call.kwargs
     assert call.kwargs["skip_color_bars"] is False
     assert call.kwargs["max_refinement_iterations"] == 5
     assert call.kwargs["color_bars_end_time"] == 4.5
@@ -907,6 +909,145 @@ def test_simple_borders_stay_positive_when_opencv_is_broken(monkeypatch):
 
     assert (x, y, w, h) == (25, 25, 670, 436)
     assert w > 0 and h > 0, "a non-positive crop reaches ffmpeg as crop=-1:-1:0:0"
+
+
+def _bare_border_detector(width=720, height=486):
+    det = fa.SophisticatedBorderDetector.__new__(fa.SophisticatedBorderDetector)
+    det.video_path = "/v/in.mkv"
+    det.signals = None
+    det.check_cancelled = lambda: False
+    det.width, det.height = width, height
+    det.fps, det.total_frames, det.duration = 30000 / 1001, 1000, 33.4
+    det.opencv_usable = True
+    return det
+
+
+def test_simple_mode_uses_configured_border_pixels():
+    """simple_border_pixels / --frame-border-pixels used to be ignored (always 25)."""
+    det = _bare_border_detector()
+
+    result = det.detect_borders_with_quality_assessment(
+        method='simple', simple_border_pixels=10)
+
+    assert result.active_area == (10, 10, 700, 466)
+    assert result.detection_method == 'simple'
+
+
+def test_sophisticated_fallback_uses_configured_border_pixels(monkeypatch):
+    """When sophisticated detection can't decode frames it falls back to simple
+    mode, which should honour the configured crop as well."""
+    monkeypatch.setattr(fa.cv2, "VideoCapture", lambda *a, **kw: _DeadCapture())
+    det = _bare_border_detector()
+
+    result = det.detect_borders_with_quality_assessment(
+        method='sophisticated', simple_border_pixels=40)
+
+    assert result.active_area == (40, 40, 640, 406)
+
+
+def _bordered_frame(width=720, height=486, left=30, right=20, top=8, border_level=30):
+    """Striped picture (mean 120, high contrast) inside dim, flat borders.
+
+    border_level 30 sits between the default threshold (10) and the vertical
+    blanking test (mean < 20), so only sophisticated_threshold decides whether
+    the borders read as picture.
+    """
+    frame = np.zeros((height, width, 3), dtype=np.uint8)
+    stripes = np.where((np.arange(width) // 4) % 2 == 0, 60, 180).astype(np.uint8)
+    frame[:, :, :] = stripes[None, :, None]
+    frame[:, :left] = border_level
+    frame[:, width - right:] = border_level
+    frame[:top, :] = border_level
+    return frame
+
+
+class _FrameCapture:
+    """A capture that opens and returns the same frame for every position."""
+
+    def __init__(self, frame):
+        self.frame = frame
+
+    def isOpened(self):
+        return True
+
+    def set(self, prop, value):
+        return True
+
+    def read(self):
+        return True, self.frame.copy()
+
+    def get(self, prop):
+        return 0.0
+
+    def release(self):
+        pass
+
+
+def _sophisticated_area(monkeypatch, **params):
+    frame = _bordered_frame()
+    monkeypatch.setattr(fa.cv2, "VideoCapture", lambda *a, **kw: _FrameCapture(frame))
+    det = _bare_border_detector()
+    result = det.detect_borders_with_quality_assessment(method='sophisticated', **params)
+    return result.active_area, result.detection_method
+
+
+def test_sophisticated_threshold_decides_what_counts_as_border(monkeypatch):
+    # Borders at brightness 30: above threshold 10 they read as picture...
+    area, method = _sophisticated_area(monkeypatch, sophisticated_threshold=10)
+    assert method == 'sophisticated'
+    assert area == (5, 5, 710, 476)
+
+    # ...below threshold 40 they are measured as borders (L30 R20 T8, +5px padding)
+    area, _ = _sophisticated_area(monkeypatch, sophisticated_threshold=40)
+    assert area == (35, 13, 660, 468)
+
+
+def test_sophisticated_edge_sample_width_limits_left_right_search(monkeypatch):
+    # A 10px search never reaches the end of the 30px/20px side borders, so no
+    # left/right border is found; the top border (row scan) is unaffected.
+    area, _ = _sophisticated_area(
+        monkeypatch, sophisticated_threshold=40, sophisticated_edge_sample_width=10)
+    assert area == (5, 13, 710, 468)
+
+
+def test_sophisticated_padding_is_applied(monkeypatch):
+    area, _ = _sophisticated_area(
+        monkeypatch, sophisticated_threshold=40, sophisticated_padding=0)
+    assert area == (30, 8, 670, 478)
+
+
+def test_sophisticated_padding_that_consumes_the_frame_falls_back_to_simple(monkeypatch):
+    area, method = _sophisticated_area(
+        monkeypatch, sophisticated_threshold=40, sophisticated_padding=400,
+        simple_border_pixels=25)
+    assert method == 'simple'
+    assert area == (25, 25, 670, 436)
+
+
+@pytest.mark.parametrize("configured, expected", [(12, 12), (80, 80), (3, 5), (0, 5)])
+def test_sophisticated_sample_frames_sets_quality_frame_count(monkeypatch, configured, expected):
+    frame = _bordered_frame()
+    det = _bare_border_detector()
+    det.sophisticated_sample_frames = fa._config_int(
+        configured, 30, det.MIN_QUALITY_FRAMES, "sophisticated_sample_frames")
+
+    frames = det._select_quality_frames(_FrameCapture(frame), violations=None)
+
+    assert len(frames) == expected
+
+
+@pytest.mark.parametrize("pixels, expected", [
+    (0, (0, 0, 720, 486)),
+    (-5, (0, 0, 720, 486)),       # negative is clamped to no crop
+    (400, (0, 0, 720, 486)),      # crop larger than the frame falls back to full frame
+])
+def test_simple_border_pixels_edge_values(pixels, expected):
+    det = _bare_border_detector()
+
+    result = det.detect_borders_with_quality_assessment(
+        method='simple', simple_border_pixels=pixels)
+
+    assert result.active_area == expected
 
 
 def test_ffprobe_video_properties_derives_frame_count_from_duration(monkeypatch):
@@ -1525,8 +1666,7 @@ def test_no_analysis_periods_returns_none_rather_than_crashing(tmp_path):
     analyzer.check_cancelled = lambda: False
 
     result = analyzer.analyze_with_differential_detection(
-        output_dir=tmp_path, analysis_periods=None, duration_limit=300,
-        skip_start_seconds=0.0,
+        output_dir=tmp_path, analysis_periods=None,
     )
 
     assert result is None
@@ -1546,7 +1686,7 @@ def test_no_analysis_periods_does_not_call_the_renamed_method(tmp_path, monkeypa
             "an empty period list must not fall back to an arbitrary whole-file window"))
 
     assert analyzer.analyze_with_differential_detection(
-        output_dir=tmp_path, analysis_periods=[], duration_limit=300) is None
+        output_dir=tmp_path, analysis_periods=[]) is None
 
 
 def test_differential_analyzer_has_no_stale_method_reference():
@@ -1747,3 +1887,305 @@ def test_black_sample_with_a_failed_period_reports_last_resort(tmp_path):
     # Neither reason is lost to the precedence choice
     assert "Least-black candidate used." in result.period_confidence_note
     assert "2 of 3" in result.period_confidence_note
+
+
+# ---------------------------------------------------------------------------
+# Head-switching bottom-edge widening
+#
+# It used to read 'artifact_height' / 'affected_percentage', keys border
+# detection never writes, so it never fired. It now widens only by how far
+# head switching reaches past the bottom crop border detection already made.
+# ---------------------------------------------------------------------------
+
+def _brng_analyzer_with_head_switching(head_switching, bottom_crop):
+    analyzer = fa.DifferentialBRNGAnalyzer.__new__(fa.DifferentialBRNGAnalyzer)
+    analyzer.upstream_context = fa.UpstreamAnalysisContext(
+        period_diagnoses={}, period_active_area_brng={}, period_full_frame_brng={},
+        avg_active_area_brng=0.0, overall_diagnosis="",
+        head_switching=head_switching,
+        border_widths={'left': 14, 'right': 17, 'top': 5, 'bottom': bottom_crop},
+    )
+    return analyzer
+
+
+@pytest.mark.parametrize("head_switching, bottom_crop, expected", [
+    # JPC_AV_03801: reaches 30px, 11px cropped -> 19px residual -> 24px strip
+    ({'detected': True, 'percentage': 55.0, 'avg_height_px': 6, 'max_height_px': 30}, 11, 24),
+    # 21419511_noNoise: reaches 30px, 19px cropped -> 11px residual, strip covers it
+    ({'detected': True, 'percentage': 70.0, 'avg_height_px': 8, 'max_height_px': 30}, 19, 15),
+    # Seen in too few frames
+    ({'detected': True, 'percentage': 25.0, 'avg_height_px': 6, 'max_height_px': 30}, 11, 15),
+    # Very tall residual is capped
+    ({'detected': True, 'percentage': 90.0, 'avg_height_px': 6, 'max_height_px': 80}, 11, 40),
+    # Not detected / absent
+    ({'detected': False, 'percentage': 90.0, 'max_height_px': 30}, 0, 15),
+    (None, 0, 15),
+])
+def test_head_switching_bottom_edge_width(head_switching, bottom_crop, expected):
+    analyzer = _brng_analyzer_with_head_switching(head_switching, bottom_crop)
+    assert analyzer._head_switching_bottom_edge_width(15) == expected
+
+
+def test_head_switching_residual_band_is_classified_as_bottom_edge():
+    """A 35px band of violations at the bottom: without widening it spills past
+    the 15px strip into the adjacent band and reads as content; with the
+    head-switching residual covering it, it is a bottom edge artifact."""
+    mask = np.zeros((436, 670), dtype=np.uint8)
+    mask[-35:, :] = 255
+
+    no_hs = _brng_analyzer_with_head_switching(None, 11)
+    assert 'bottom' not in no_hs._detect_edge_violations_enhanced(mask)['edges_affected']
+
+    # reaches 41px, 11px cropped -> 30px residual -> 35px strip
+    hs = {'detected': True, 'percentage': 80.0, 'avg_height_px': 6, 'max_height_px': 41}
+    with_hs = _brng_analyzer_with_head_switching(hs, 11)
+    assert 'bottom' in with_hs._detect_edge_violations_enhanced(mask)['edges_affected']
+
+
+# ---------------------------------------------------------------------------
+# Border detection off: signalstats measures the full frame only
+#
+# analyze() hands a full-frame placeholder BorderDetectionResult (method
+# 'disabled') downstream. Signalstats used to treat it as a detected active
+# area and compare the full frame with a "crop" of the same full frame,
+# producing border/content diagnoses instead of the full-frame-only result.
+# ---------------------------------------------------------------------------
+
+def _full_frame_ss_analyzer(monkeypatch, periods):
+    analyzer = fa.IntegratedSignalstatsAnalyzer.__new__(fa.IntegratedSignalstatsAnalyzer)
+    analyzer.video_path = "/v/in.mkv"
+    analyzer.qctools_report = "/v/in.mkv.qctools.xml.gz"
+    analyzer.check_cancelled = lambda: False
+    analyzer.signals = None
+    analyzer.width, analyzer.height, analyzer.duration = 720, 486, 600.0
+    analyzer.last_resort_period_note = None
+    monkeypatch.setattr(analyzer, "_find_analysis_periods", lambda *a, **kw: periods)
+
+    def qctools_period(start, end, num):
+        # 40% of non-black frames flagged, max 2% of pixels
+        return {'frames_analyzed': 100, 'frames_with_violations': 40,
+                'brng_values': [0.02] * 40 + [0.0] * 60,
+                'brng_frames': [(start + i / 30, 0.02) for i in range(40)]}
+    monkeypatch.setattr(analyzer, "_parse_qctools_brng_period", qctools_period)
+
+    ffprobe_calls = []
+
+    def ffprobe_period(active_area, start, duration, num, progress_range=None):
+        ffprobe_calls.append(active_area)
+        return {'frames_analyzed': 100, 'frames_with_violations': 5,
+                'brng_values': [0.001] * 5 + [0.0] * 95,
+                'brng_frames': [(start + i / 30, 0.001) for i in range(5)]}
+    monkeypatch.setattr(analyzer, "_analyze_with_ffprobe_period", ffprobe_period)
+    return analyzer, ffprobe_calls
+
+
+def _placeholder_border(area, method):
+    return fa.BorderDetectionResult(active_area=area, border_regions={},
+                                    detection_method=method, quality_frame_hints=[])
+
+
+def test_signalstats_with_border_detection_disabled_is_full_frame_only(monkeypatch):
+    analyzer, ffprobe_calls = _full_frame_ss_analyzer(monkeypatch, [(10.0, 60), (200.0, 60)])
+
+    result = analyzer.analyze_with_signalstats(border_data=_placeholder_border((0, 0, 720, 486), 'disabled'))
+
+    assert ffprobe_calls == []                   # no self-comparison pass
+    assert result.analyzed_region == 'full_frame'
+    assert "borders were not excluded" in result.diagnosis
+    assert all('diagnosis' not in c for c in result.comparison_results)
+
+
+def test_signalstats_with_detected_borders_still_compares(monkeypatch):
+    analyzer, ffprobe_calls = _full_frame_ss_analyzer(monkeypatch, [(10.0, 60), (200.0, 60)])
+
+    result = analyzer.analyze_with_signalstats(border_data=_placeholder_border((25, 25, 670, 436), 'simple'))
+
+    assert ffprobe_calls == [(25, 25, 670, 436)] * 2
+    assert result.analyzed_region == 'active_area'
+    assert [c['diagnosis'] for c in result.comparison_results] == ['border_violations'] * 2
+
+
+def _context_builder():
+    obj = fa.EnhancedFrameAnalysis.__new__(fa.EnhancedFrameAnalysis)
+    obj.border_detector = SimpleNamespace(width=720, height=486)
+    obj.signalstats_analyzer = SimpleNamespace(_validate_periods_against_black_segments=lambda p, *a, **kw: p)
+    return obj
+
+
+def _ss_comparison_result(comparisons):
+    return fa.SignalstatsResult(violation_percentage=10.0, max_brng=2.0, avg_brng=1.0,
+                                analysis_periods=[], diagnosis="", used_qctools=True,
+                                comparison_results=comparisons)
+
+
+def test_upstream_context_skips_periods_without_a_comparison():
+    """An unmeasured period must not read as 0% active-area BRNG (light sampling)."""
+    comparisons = [
+        {'period': 1, 'qctools_full_frame': {'violations_pct': 40.0, 'max_brng': 2.0}},
+        {'period': 2, 'diagnosis': 'content_violations',
+         'qctools_full_frame': {'violations_pct': 40.0, 'max_brng': 2.0},
+         'ffprobe_active_area': {'violations_pct': 35.0, 'max_brng': 1.5}},
+    ]
+    ctx = _context_builder()._build_upstream_context(
+        _ss_comparison_result(comparisons), _placeholder_border((0, 0, 720, 486), 'disabled'))
+
+    assert ctx.period_diagnoses == {1: 'content_violations'}
+    assert 0 not in ctx.period_active_area_brng
+
+
+def test_period_refinement_keeps_periods_without_a_comparison():
+    comparisons = [
+        {'period': 1, 'qctools_full_frame': {'violations_pct': 40.0}},
+        {'period': 2, 'qctools_full_frame': {'violations_pct': 40.0}},
+    ]
+    current = [(10.0, 60), (200.0, 60)]
+    refined = _context_builder()._refine_periods_from_signalstats(
+        current_periods=current, signalstats_results=_ss_comparison_result(comparisons),
+        qctools_candidate_periods=[(400.0, 60), (500.0, 60)], black_segments=[],
+        period_duration=60, color_bars_end_time=0)
+
+    assert refined == current
+
+
+# ---------------------------------------------------------------------------
+# Bars safety margin is applied once, the same on every pass
+#
+# The first signalstats pass passed content_start_time = bars_end + 10 and
+# _find_analysis_periods added another 10 (bars + 20s); refinement re-runs and
+# BRNG fallbacks used bars + 10s.
+# ---------------------------------------------------------------------------
+
+def _period_finder(duration=600.0):
+    analyzer = fa.IntegratedSignalstatsAnalyzer.__new__(fa.IntegratedSignalstatsAnalyzer)
+    analyzer.duration = duration
+    analyzer.last_resort_period_note = None
+    return analyzer
+
+
+@pytest.mark.parametrize("bars_end, expected_first_start", [(52.0, 62.0), (None, 10.0), (0, 10.0)])
+def test_even_periods_start_one_margin_after_bars(bars_end, expected_first_start):
+    periods = _period_finder()._find_analysis_periods(
+        0, bars_end, 60, 3, None, qctools_periods=None, black_segments=[])
+    assert periods[0][0] == pytest.approx(expected_first_start)
+
+
+def test_margin_helper_matches_constant():
+    assert fa.BARS_SAFETY_MARGIN_SECONDS == 10
+    assert fa.content_start_after_bars(52.0) == 62.0
+    assert fa.content_start_after_bars(None) == 10.0
+
+
+# ---------------------------------------------------------------------------
+# Active-area signalstats probe output parsing
+#
+# The probe used `-of csv=p=0`. A frame carrying side data (e.g. HDR mastering
+# metadata) is written as "0.000000,0.209591," — the trailing separator left
+# an empty BRNG value after the last-comma split, so the frame was silently
+# dropped. Captured from a real HEVC clip with mastering-display side data.
+# ---------------------------------------------------------------------------
+
+SIDE_DATA_PROBE_OUTPUT = """\
+[FRAME]
+pts_time=0.000000
+TAG:lavfi.signalstats.BRNG=0.209591
+[SIDE_DATA]
+side_data_type=Mastering display metadata
+[/SIDE_DATA]
+[SIDE_DATA]
+[/SIDE_DATA]
+[/FRAME]
+[FRAME]
+pts_time=0.033000
+TAG:lavfi.signalstats.BRNG=0.21153
+[/FRAME]
+[FRAME]
+pts_time=N/A
+TAG:lavfi.signalstats.BRNG=0
+[/FRAME]
+[FRAME]
+pts_time=0.100000
+[/FRAME]
+"""
+
+
+def test_signalstats_frame_parser_keeps_frames_with_side_data():
+    frames = list(fa.iter_signalstats_brng_frames(SIDE_DATA_PROBE_OUTPUT.splitlines(keepends=True)))
+
+    assert frames == [(0.0, 0.209591), (0.033, 0.21153), (None, 0.0)]
+
+
+def test_active_area_probe_counts_every_frame(monkeypatch):
+    """End to end through _analyze_with_ffprobe_period with a fake ffprobe."""
+    import io
+
+    captured = {}
+
+    class FakeProc:
+        def __init__(self, cmd, **kw):
+            captured['cmd'] = cmd
+            self.stdout = io.StringIO(SIDE_DATA_PROBE_OUTPUT)
+            self.returncode = 0
+
+        def communicate(self):
+            return "", ""
+
+    monkeypatch.setattr(fa.subprocess, "Popen", FakeProc)
+    analyzer = fa.IntegratedSignalstatsAnalyzer.__new__(fa.IntegratedSignalstatsAnalyzer)
+    analyzer.video_path = "/v/in.mkv"
+    analyzer.check_cancelled = lambda: False
+    analyzer.signals = None
+
+    result = analyzer._analyze_with_ffprobe_period((10, 10, 300, 220), 0.0, 1, 1)
+
+    assert 'csv=p=0' not in captured['cmd']
+    assert result['frames_analyzed'] == 3
+    assert result['frames_with_violations'] == 2
+    assert result['brng_frames'] == [(0.0, 0.209591), (0.033, 0.21153)]   # N/A pts has no timestamp
+
+
+# ---------------------------------------------------------------------------
+# BRNG violations are ranked across periods
+#
+# Each period's frames were sorted worst-first, then the lists were
+# concatenated and never re-sorted, so violations[0] meant "worst frame of the
+# first analyzed period". The refinement improvement check, the first
+# thumbnail pick and worst_frames all read it as the overall worst.
+# ---------------------------------------------------------------------------
+
+def _violation(ts, pct):
+    return fa.FrameViolation(frame_num=int(ts * 30), timestamp=ts, brng_value=pct,
+                             violation_score=pct / 100, violation_pixels=int(pct * 10),
+                             violation_percentage=pct, diagnostics=[])
+
+
+def test_brng_violations_are_ranked_across_periods(tmp_path):
+    per_period = iter([
+        [_violation(110.0, 2.0), _violation(130.0, 1.0)],     # period 1: mild
+        [_violation(250.0, 9.0), _violation(270.0, 0.5)],     # period 2: holds the worst frame
+    ])
+    stats = {"qctools_frames_targeted": 0, "frames_mapped_to_period": 0,
+             "total_samples_analyzed": 2, "frames_checked": 2, "violations_found": 2}
+
+    analyzer = _stub_brng_analyzer()
+    analyzer._analyze_differential_violations = lambda *a, **kw: (next(per_period), stats)
+    picked = []
+    analyzer._create_diagnostic_thumbnails = lambda selected, *a, **kw: picked.extend(selected) or []
+
+    result = analyzer.analyze_with_differential_detection(
+        output_dir=tmp_path, analysis_periods=[(100.0, 60), (240.0, 60)])
+
+    assert [v.violation_percentage for v in result.violations] == [9.0, 2.0, 1.0, 0.5]
+    assert picked[0].timestamp == 250.0      # first thumbnail is the overall worst frame
+
+
+def test_improvement_check_compares_overall_worst_frames():
+    """Worst frame dropped 9% -> 2% (in a later period): that is an improvement."""
+    def result(*pcts):
+        return fa.BRNGAnalysisResult(
+            violations=sorted((_violation(float(i), p) for i, p in enumerate(pcts)),
+                              key=lambda v: v.violation_score, reverse=True),
+            aggregate_patterns={'edge_violation_percentage': 10.0}, actionable_report={},
+            thumbnails=[], requires_border_adjustment=True)
+
+    obj = fa.EnhancedFrameAnalysis.__new__(fa.EnhancedFrameAnalysis)
+    assert obj._is_meaningful_improvement(result(3.0, 9.0), result(2.0, 1.9)) is True

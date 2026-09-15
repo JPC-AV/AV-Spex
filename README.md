@@ -182,7 +182,7 @@ The Complex tab configures the advanced analysis steps — typically run during 
   - **Bitplane Check**: Verify that the 9th and 10th bits of 10-bit video contain data
   - **Border Detection**: Toggle on/off and select mode — simple (fixed pixel crop) or sophisticated (edge detection, with tunable parameters)
   - **Signalstats Analysis**: Enhanced FFprobe signalstats over the detected active area (requires Border Detection)
-  - **BRNG Analysis**: Toggle on/off, set maximum analysis duration, and enable or disable automatic color bar skipping
+  - **BRNG Analysis**: Toggle on/off, and enable or disable automatic color bar skipping (detected bars are excluded from BRNG, signalstats and analysis-period placement unless skipping is turned off)
   - **Analysis Periods**: The number and length of the time windows sampled across the video, shared by Signalstats and BRNG analysis
 - **Audio Checks**:
   - **Audio Analysis**: Clipping, channel imbalance, identical channel detection, audible timecode (LTC), and audio dropout (via qct-parse)
@@ -321,11 +321,11 @@ Detects the active video area and identifies edge artifacts including head-switc
 
 Two modes are available:
 - **Simple** (default): Crops a fixed pixel border from each edge (default: 25px)
-- **Sophisticated**: Uses edge detection to dynamically identify the active video area
+- **Sophisticated**: Scans in from each edge of well-exposed sample frames to find where the picture starts, sizes each border independently, and expands the bottom crop for head-switching noise. Brightness threshold, edge search width, sample frame count and padding are adjustable on the Complex tab. Border refinement (re-expanding borders when BRNG finds edge artifacts) runs in this mode only.
 
 ### BRNG Analysis
 
-Detects out-of-range luma and chroma values (BRNG — **B**roadcast **Ra**n**g**e) using a multi-method voting approach. Frames with violations are highlighted in the diagnostic output, and results are included in the HTML report. BRNG analysis automatically skips color bars at the head of the tape to avoid false positives.
+Detects out-of-range luma and chroma values (BRNG — **B**roadcast **Ra**n**g**e) using a multi-method voting approach. Frames with violations are highlighted in the diagnostic output, and results are included in the HTML report. Detected color bars (head and mid-file) are skipped to avoid false positives, unless **Skip Color Bars** is turned off (`--frame-no-colorbar-skip`).
 
 <p align="center">
   <img src="https://github.com/JPC-AV/JPC_AV_videoQC/blob/main/images_for_readme/avspex_brng_example.png?raw=true" alt="BRNG Analysis Example"/>
@@ -360,7 +360,6 @@ av-spex --enable-dropped-sample-detection {on,off}
 av-spex --enable-duplicate-frame-detection {on,off}
 av-spex --frame-borders {simple,sophisticated}
 av-spex --frame-border-pixels 25
-av-spex --frame-brng-duration 300
 av-spex --frame-no-colorbar-skip
 ```
 
@@ -400,10 +399,10 @@ av-spex [path/to/directory]
 - `--evaluate-bars-reference {detected,smpte}` — What Evaluate Color Bars grades against: this file's own detected bars (default) or standard SMPTE values. Only takes effect when `evaluateBars` is on.
 
 **Frame analysis:**
-- Six `--enable-*` sub-step toggles plus `--frame-borders`, `--frame-border-pixels`, `--frame-brng-duration`, and `--frame-no-colorbar-skip` — see [Frame Analysis CLI Flags](#frame-analysis-cli-flags) above
+- Six `--enable-*` sub-step toggles plus `--frame-borders`, `--frame-border-pixels`, and `--frame-no-colorbar-skip` — see [Frame Analysis CLI Flags](#frame-analysis-cli-flags) above
 
 **Input settings:**
-- `--video-file-extension {mkv,mov,mp4,avi,mxf}` — Which container to look for in the input directory (default: `mkv`). A non-MKV selection automatically turns off embedded stream fixity and the mediatrace custom-tag check, and skips the ffprobe signal flow (`ENCODER_SETTINGS`) check, since those only work on Matroska.
+- `--video-file-extension {mkv,mov,mp4,avi,mxf}` — Which container to look for in the input directory (default: `mkv`). A non-MKV selection automatically turns off embedded stream fixity, the mediatrace custom-tag check, and mkvalidator, and skips the ffprobe signal flow (`ENCODER_SETTINGS`) check, since those only work on Matroska.
 
 **Output settings:**
 - `--access-trim-color-bars {on,off}` — Skip head color bars in the access file
@@ -449,7 +448,7 @@ Controls which tools run and what outputs are generated.
 - `access_file_exclude_flagged_audio` — Leave flagged audio channels out of the access copy: a channel found silent or carrying audible timecode is dropped, and dual mono is built from the good channel (default `false`; requires audio analysis)
 - `report` — Generate an HTML summary report
 - `qctools_ext` — Output extension for QCTools files (`qctools.xml.gz` or `qctools.mkv`)
-- **Frame Analysis** settings: `enable_bitplane_check`, `enable_border_detection`, `enable_brng_analysis`, `enable_signalstats`, `enable_dropped_sample_detection`, `enable_duplicate_frame_detection`, `border_detection_mode` (simple/sophisticated), `simple_border_pixels` (default: 25), `brng_duration_limit` (default: 300 seconds), `brng_skip_color_bars`, `analysis_period_duration` and `analysis_period_count` (the periods shared by signalstats and BRNG analysis), `duplicate_min_run_length` (default: 2), plus sophisticated-border tuning fields and the border retry settings `auto_retry_borders` / `max_border_retries`
+- **Frame Analysis** settings: `enable_bitplane_check`, `enable_border_detection`, `enable_brng_analysis`, `enable_signalstats`, `enable_dropped_sample_detection`, `enable_duplicate_frame_detection`, `border_detection_mode` (simple/sophisticated), `simple_border_pixels` (default: 25), `brng_skip_color_bars`, `analysis_period_duration` and `analysis_period_count` (the periods shared by signalstats and BRNG analysis), `duplicate_min_run_length` (default: 2), plus sophisticated-border tuning fields and the border retry settings `auto_retry_borders` / `max_border_retries`
 
 **Fixity**
 - `output_fixity` — Write checksums to a fixity text file

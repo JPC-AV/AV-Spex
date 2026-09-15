@@ -315,26 +315,28 @@ class ComplexWindow(QWidget, ThemeableMixin):
         self._add_option(soph_layout, self._param_row(
             "Brightness Threshold:", self.soph_threshold_input),
             self._desc_label(
-                "0 = pure black, 255 = pure white", extra_indent=self.INDENT))
+                "Brightness an edge row or column must exceed to count as picture "
+                "(0 = pure black, 255 = pure white)", extra_indent=self.INDENT))
 
         self.soph_edge_width_input = QLineEdit("100")
         self._add_option(soph_layout, self._param_row(
             "Edge Sample Width:", self.soph_edge_width_input),
             self._desc_label(
-                "Pixels to examine from each edge", extra_indent=self.INDENT))
+                "Pixels to search in from the left and right edges",
+                extra_indent=self.INDENT))
 
         self.soph_sample_frames_input = QLineEdit("30")
         self._add_option(soph_layout, self._param_row(
             "Sample Frames:", self.soph_sample_frames_input),
             self._desc_label(
-                "Number of frames to sample across the video",
+                "Number of well-exposed frames to measure borders on (minimum 5)",
                 extra_indent=self.INDENT))
 
         self.soph_padding_input = QLineEdit("5")
         self._add_option(soph_layout, self._param_row(
             "Padding:", self.soph_padding_input),
             self._desc_label(
-                "Extra margin around detected borders",
+                "Extra pixels trimmed from each side of the detected picture area",
                 extra_indent=self.INDENT))
 
         self.auto_retry_borders_cb = self._make_checkbox(
@@ -344,7 +346,7 @@ class ComplexWindow(QWidget, ThemeableMixin):
                 "Automatically adjusts borders if edge artifacts are found",
                 extra_indent=self.INDENT))
 
-        self.max_border_retries_input = QLineEdit("5")
+        self.max_border_retries_input = QLineEdit("3")
         self._add_option(soph_layout, self._param_row(
             "Max Retries:", self.max_border_retries_input),
             self._desc_label(
@@ -365,17 +367,10 @@ class ComplexWindow(QWidget, ThemeableMixin):
         self._add_option(layout, self.enable_brng_analysis_cb, self._desc_label(
             "Analyze broadcast range violations in the active picture area"))
 
-        self.brng_duration_input = QLineEdit("300")
-        self._add_option(layout, self._param_row(
-            "Duration Limit (s):", self.brng_duration_input),
-            self._desc_label(
-                "Maximum duration to analyze for BRNG violations",
-                extra_indent=self.INDENT))
-
         self.brng_skip_colorbars_cb = self._make_checkbox("Skip Color Bars")
         self._add_option(layout, self._indent_row(self.brng_skip_colorbars_cb),
             self._desc_label(
-                "Exclude color bar sections from BRNG analysis",
+                "Exclude detected color bars from BRNG, signalstats and analysis-period placement (bars are always excluded from duplicate frame detection)",
                 extra_indent=self.INDENT))
 
         # Shared analysis periods (signalstats + BRNG)
@@ -577,9 +572,6 @@ class ComplexWindow(QWidget, ThemeableMixin):
         )
 
         # BRNG parameters
-        self.brng_duration_input.textChanged.connect(
-            lambda text: self.on_frame_analysis_param_changed('brng_duration_limit', text)
-        )
         self.brng_skip_colorbars_cb.stateChanged.connect(
             lambda state: self.on_boolean_changed(state, ['outputs', 'frame_analysis', 'brng_skip_color_bars'])
         )
@@ -657,7 +649,6 @@ class ComplexWindow(QWidget, ThemeableMixin):
             self.soph_sample_frames_input.setText(str(frame_config.sophisticated_sample_frames))
             self.soph_padding_input.setText(str(frame_config.sophisticated_padding))
             self.auto_retry_borders_cb.setChecked(bool(frame_config.auto_retry_borders))
-            self.brng_duration_input.setText(str(frame_config.brng_duration_limit))
             self.brng_skip_colorbars_cb.setChecked(bool(frame_config.brng_skip_color_bars))
             self.max_border_retries_input.setText(str(getattr(frame_config, 'max_border_retries', 3)))
             self.analysis_period_duration_input.setText(str(frame_config.analysis_period_duration))
@@ -747,8 +738,7 @@ class ComplexWindow(QWidget, ThemeableMixin):
 
         # Convert to appropriate type
         if param_name in ['simple_border_pixels', 'sophisticated_threshold', 'sophisticated_edge_sample_width',
-                        'sophisticated_sample_frames', 'sophisticated_padding', 'sophisticated_viz_time',
-                        'sophisticated_search_window', 'brng_duration_limit',
+                        'sophisticated_sample_frames', 'sophisticated_padding',
                         'analysis_period_duration', 'analysis_period_count', 'max_border_retries']:
             try:
                 # Handle empty string case

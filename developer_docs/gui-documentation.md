@@ -258,74 +258,65 @@ self.main_window.complex_tab.setup_complex_tab()
 
 ### ComplexWindow Sections
 
-`ComplexWindow.setup_ui()` builds the window in this order:
+`ComplexWindow.setup_ui()` builds four group boxes, organized by what is being checked rather than by
+which tool implements it. Every option has a short description label under it (inline, not a
+tooltip).
 
-#### 1. QCTools
+qct-parse has no Run Tool checkbox here: `qct_parse.run_tool` is implicit — turning on any
+qct-parse-backed check enables it, turning all of them off disables it (mirroring the CLI's
+`--enable-*` auto-enable guardrails). The Checks tab still exposes `run_tool` directly.
 
-Controls the `checks_config.tools.qctools` settings:
+#### 1. QCTools Report (`setup_report_generation_section`)
 
-- **Run Tool** checkbox — enables/disables QCTools execution
-- **QCTools File Extension** dropdown — selects output format: `qctools.xml.gz` or `qctools.mkv` (stored in `checks_config.outputs.qctools_ext`)
+- **Run QCTools** (`tools.qctools.run_tool`) — an existing report is reused instead of re-running
+- **File Extension** dropdown (`outputs.qctools_ext`) — `qctools.xml.gz` or `qctools.mkv`
 
-#### 2. qct-parse
+#### 2. Color Bars & Tone (`setup_colorbars_section`)
 
-Controls the `checks_config.tools.qct_parse` settings. Dependency logic is enforced in the UI:
+- **Detect Color Bars** (`qct_parse.barsDetection`) — Evaluate Color Bars and Export Thumbnails are
+  disabled while it is off
+- **Evaluate Color Bars** (`qct_parse.evaluateBars`), with **Compare against** radios
+  (`qct_parse.evaluateBarsReference`: `detected` / `smpte`), enabled only while Evaluate is on
+- **Export Thumbnails** (`qct_parse.thumbExport`)
+- **CLAMS Bars + Tone Detection** (`clams_detection.run_tool`) — runs the SSIM bars detector and the
+  cross-correlation tone detector before qct-parse. Numeric tuning is **JSON-only**. The head-bars
+  end time used for BRNG skip and access-file trim is settled by the SSIM-arbitrated qct-parse +
+  CLAMS consensus (`processing_mgmt.merge_head_bars_consensus`; see
+  `developer_docs/processing-internals.md`).
 
-- **Run Tool** — when checked, automatically enables and checks all sub-options; when unchecked, greys them out
-- **Detect Color Bars** (`barsDetection`) — when unchecked, automatically unchecks and disables Evaluate Color Bars and Thumbnail Export
-- **Evaluate Color Bars** (`evaluateBars`) — compares detected bars against expected values
-- **Thumbnail Export** (`thumbExport`) — exports thumbnails of failed frames; enabled when at least one of bars detection or evaluate bars is active
-- **Perform Audio Analysis** (`audio_analysis`) — detects audio clipping, channel imbalance, identical (dual mono) channels, audible timecode, and audio dropout
-- **Detect Clamped Levels** (`detect_clamped_levels`) — detects broadcast-range level clamping from the analog-to-digital converter
+#### 3. Video Signal Checks (`setup_video_signal_section`)
 
-#### 3. CLAMS Detection
+All frame-analysis fields live under `outputs.frame_analysis` unless noted.
 
-Controls the `checks_config.tools.clams_detection` settings (single section, runs both detectors):
+- **Detect Clamped Levels** (`qct_parse.detect_clamped_levels`)
+- **Detect Chroma Phase Errors** (`qct_parse.detect_chroma_phase_errors`)
+- **Duplicate Frame Detection** (`enable_duplicate_frame_detection`) — `duplicate_min_run_length` is
+  JSON-only
+- **Bitplane Check** (`enable_bitplane_check`)
+- **Border Detection** (`enable_border_detection`) with a **Mode** dropdown (`border_detection_mode`);
+  parameters are shown for the selected mode:
+  - *Simple*: **Border Pixels** (`simple_border_pixels`, default 25)
+  - *Sophisticated*: **Brightness Threshold** (`sophisticated_threshold`, 10), **Edge Sample Width**
+    (`sophisticated_edge_sample_width`, 100), **Sample Frames** (`sophisticated_sample_frames`, 30),
+    **Padding** (`sophisticated_padding`, 5), **Auto-retry** (`auto_retry_borders`) and **Max
+    Retries** (`max_border_retries`, 3). The detector range-checks these (see
+    `docs/frame_analysis_process.md` section 3.2).
+- **Signalstats Analysis** (`enable_signalstats`) — disabled and unchecked while Border Detection is
+  off (`update_signalstats_dependency`). The CLI does not enforce this; with border detection off,
+  signalstats measures the full frame only.
+- **BRNG Analysis** (`enable_brng_analysis`) with **Skip Color Bars** (`brng_skip_color_bars`) —
+  excludes the detected color bars (head end time and `all_bars_regions`) from the QCTools violation
+  scan, analysis-period placement, signalstats and BRNG. Off keeps them in; duplicate-frame detection
+  excludes bars either way.
+- **Analysis Periods** row — **Count** (`analysis_period_count`, 3) and **Duration (s)**
+  (`analysis_period_duration`, 60), shared by signalstats and BRNG
 
-- **Run Tool** — runs the CLAMS SSIM-based SMPTE bars detector and the cross-correlation tone detector together, before qct-parse. Detected regions are passed to qct-parse to guide additional windowed bars scans; the tone detector identifies spans of monotonic audio (e.g. SMPTE bars-and-tones).
-- Numeric tuning of the bars/tone parameters is **JSON-only** — only the `Run Tool` toggle is exposed in the UI. The head-bars end time used for downstream BRNG-skip and access-file trim is merged across qct-parse and CLAMS ("longest/latest wins").
+#### 4. Audio Checks (`setup_audio_section`)
 
-#### 4. Frame Analysis sections
-
-`setup_frame_analysis_sections()` renders these sub-sections in order, each with its own enable checkbox under `checks_config.outputs.frame_analysis`:
-
-##### 4a. Bitplane Check
-
-- **Enable Bitplane Check** (`enable_bitplane_check`) — verifies that the 9th and 10th bits of 10-bit video contain data (some TBC/framesync devices truncate them, producing effectively 8-bit video).
-
-##### 4b. Frame Analysis Periods
-
-Shared settings for signalstats and BRNG analysis:
-
-- **Number of Periods** (`analysis_period_count`) — how many time windows to sample across the video
-- **Period Duration (s)** (`analysis_period_duration`) — length of each analysis window in seconds
-
-##### 4c. Border Detection
-
-- **Enable Border Detection** (`enable_border_detection`)
-- **Detection Mode** (`border_detection_mode`) dropdown — `simple` (fixed pixel crop) or `sophisticated` (edge detection)
-  - *Simple mode*: **Border Pixels** field (`simple_border_pixels`, default 25)
-  - *Sophisticated mode*: Detection Parameters sub-group (`sophisticated_threshold`, `sophisticated_edge_sample_width`, `sophisticated_sample_frames`, `sophisticated_padding`), plus **Auto-retry** checkbox (`auto_retry_borders`) and **Max Retries** field (`max_border_retries`)
-- Signalstats is disabled in the UI if border detection is turned off.
-
-##### 4d. Signalstats
-
-- **Enable Signalstats Analysis** (`enable_signalstats`) — runs the FFmpeg `signalstats` filter. Requires border detection to be enabled (enforced by the UI).
-
-##### 4e. BRNG Analysis
-
-- **Enable BRNG Analysis** (`enable_brng_analysis`)
-- **Duration Limit (s)** (`brng_duration_limit`) — maximum duration to analyze for out-of-range values
-- **Skip Color Bars** (`brng_skip_color_bars`) — excludes color bar sections detected by qct-parse from BRNG analysis
-
-##### 4f. Dropped Sample Detection
-
-- **Enable Dropped Sample Detection** (`enable_dropped_sample_detection`)
-
-##### 4g. Duplicate Frame Detection
-
-- **Enable Duplicate Frame Detection** (`enable_duplicate_frame_detection`)
-- **Min Run Length** (`duplicate_min_run_length`) — minimum consecutive duplicate-frame run to flag
+- **Audio Analysis** (`qct_parse.audio_analysis`) — clipping, channel imbalance, identical channels,
+  audible timecode, dropout
+- **Tone Leak Detection** (`qct_parse.detect_tone_leak`)
+- **Dropped Sample Detection** (`outputs.frame_analysis.enable_dropped_sample_detection`)
 
 ### Config Update Pattern
 

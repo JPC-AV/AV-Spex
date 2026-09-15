@@ -735,7 +735,7 @@ def test_characterize_imbalance(diff, expected):
 # ---- _get_video_duration -------------------------------------------------
 
 def test_get_video_duration_success(monkeypatch):
-    fake_proc = MagicMock(returncode=0, stdout="123.456\n", stderr="")
+    fake_proc = MagicMock(returncode=0, stdout='{"format": {"duration": "123.456000"}}', stderr="")
     monkeypatch.setattr(qp.subprocess, "run", lambda *a, **kw: fake_proc)
     assert qp._get_video_duration("/v.mkv") == 123.456
 
