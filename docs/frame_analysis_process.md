@@ -55,7 +55,8 @@ These pieces are used by period selection, signalstats and BRNG.
 1. If `brng_skip_color_bars` is on and no end time was passed in, fall back to reading
    `{video_id}_report_csvs/qct-parse_colorbars_durations.csv` (next to the video) and parse its end
    timestamp. If that file isn't there, bars end = 0 (no bars).
-2. If `brng_skip_color_bars` is off, the passed-in value is left as is (possibly `None`).
+2. If `brng_skip_color_bars` is off, the passed-in value is used as is.
+3. An empty value (no bars detected) is treated as 0 from here on.
 
 ### 1.2 Bit-depth detection
 1. Read the first frames of the QCTools report.
@@ -273,11 +274,21 @@ Each iteration, up to `max_border_retries` (3), while BRNG still says adjustment
    the QCTools candidates; effective start is now bars end + 10). The stage-3 period refinement
    (section 2.5) is **not** re-applied.
 4. Re-run BRNG on the new active area and periods.
-5. Record the iteration: area change, BRNG frame count before/after, edge violation %.
-6. After the loop: store final borders/BRNG/signalstats alongside the initial ones, regenerate the
+5. Record the iteration: area change, BRNG frame count before/after, edge violation %, and whether
+   it improved.
+6. **Stop early if the round made no meaningful improvement** (`_is_meaningful_improvement`, comparing
+   this round's BRNG result with the previous one). A round counts as improved if any of:
+   - violation frames fell by more than 20 %;
+   - the worst frame's violation % fell by more than 20 %;
+   - edge violation % is still above 50 % **and** the borders actually moved (keep trying);
+   - edge violation % fell by more than 30 %.
+
+   Edge violations above 50 % with borders that didn't move always stops the loop. The borders from
+   the stopping round are kept as the final borders.
+7. After the loop: store final borders/BRNG/signalstats alongside the initial ones, regenerate the
    signalstats example thumbnails against the final borders, and save
    `{video_id}_border_refinement_comparison.jpg` if any iteration ran.
-7. Downstream (report, access-file crop) prefers the final borders and final BRNG result.
+8. Downstream (report, access-file crop) prefers the final borders and final BRNG result.
 
 ### 3.6 Use of the active area outside frame analysis
 The access-file crop uses the active area only when the method starts with `sophisticated`
@@ -522,13 +533,6 @@ All written to `{video_id}_qc_metadata/`:
   end time is passed in.
 
 ### Probable bugs
-- **Refinement loop ignores its own stop check.** `_is_meaningful_improvement()` is computed each
-  iteration but its result is never used; the loop runs until BRNG stops asking for adjustment or
-  the retry limit is hit.
-- **Possible crash with `--frame-no-colorbar-skip` and no bars.** With skip off, a `None` bars end
-  is not replaced by 0; `_find_analysis_periods` then formats it with `:.1f` and the BRNG
-  even-distribution fallback adds 10 to it — both raise `TypeError`, which `process_frame_analysis`
-  catches, so the whole frame analysis returns nothing. Worth confirming.
 - **Border detection off still runs as "active area" mode.** Section 3.4 substitutes a full-frame
   active area, so signalstats uses the comparison path and diagnosis wording rather than the
   "borders were not excluded" wording. That wording only appears when the active area is invalid.

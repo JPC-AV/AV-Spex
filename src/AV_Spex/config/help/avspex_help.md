@@ -407,7 +407,7 @@ Two modes are available:
 
 *Sophisticated border detection on the same tape: edge analysis sizes each border independently (here L=36 px, R=18 px, T=7 px, B=14 px — shaded red) instead of applying a uniform crop, and the detected head-switching region at the bottom of the frame (orange, 9 px) is excluded as well.*
 
-**Iterative refinement**: After initial border detection, BRNG analysis runs on the detected active area. If a high percentage of violations occur at the edges of the active area — suggesting the borders were not cropped aggressively enough — the borders are automatically expanded and the analysis is re-run, up to the configured maximum number of retries. The goal is to separate true content violations from border artifacts.
+**Iterative refinement**: After initial border detection, BRNG analysis runs on the detected active area. If a high percentage of violations occur at the edges of the active area — suggesting the borders were not cropped aggressively enough — the borders are automatically expanded and the analysis is re-run, up to the configured maximum number of retries. Refinement stops early when a round makes no meaningful improvement — the borders stopped moving, or edge violations and violation counts didn't drop noticeably. The goal is to separate true content violations from border artifacts.
 
 Border Detection is required for Signalstats Analysis in the Checks tab (the signalstats comparison needs an active picture area), and the detected active area can also be used to crop the access file (**Crop Borders** output option).
 

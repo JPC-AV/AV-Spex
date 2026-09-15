@@ -4299,7 +4299,8 @@ BORDER_DETECTION_METHODOLOGY_HTML = """
                 active area. If a high percentage of violations occur at the edges of the active area 
                 (suggesting the borders were not cropped aggressively enough), the borders are automatically 
                 expanded and analysis is re-run. This iterative refinement continues until edge violations 
-                are reduced or a maximum number of iterations is reached. The goal is to separate true 
+                are reduced, a round makes no meaningful improvement, or a maximum number of iterations 
+                is reached. The goal is to separate true 
                 content violations from border artifacts.
             </p>
         </div>

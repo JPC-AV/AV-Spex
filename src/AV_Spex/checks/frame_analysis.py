@@ -3830,7 +3830,7 @@ class IntegratedSignalstatsAnalyzer:
         # Start after color bars with a safety margin
         effective_start = max(content_start, color_bars_end or 0) + 10
         
-        logger.debug(f"  Content starts at {effective_start:.1f}s (after color bars at {color_bars_end:.1f}s)\n")
+        logger.debug(f"  Content starts at {effective_start:.1f}s (after color bars at {(color_bars_end or 0):.1f}s)\n")
 
         # Every placement strategy below except QCTools periods measures back
         # from self.duration, so an unknown (0) duration produced periods like
@@ -4909,6 +4909,14 @@ class EnhancedFrameAnalysis:
             if color_bars_end_time > 0:
                 results['color_bars_end_time'] = color_bars_end_time
 
+        # No bars detected arrives as None. With skip_color_bars off, None was
+        # never replaced, and period selection formats it as a number and the
+        # BRNG fallback adds to it — a TypeError that process_frame_analysis
+        # caught, silently discarding the whole frame analysis. Every consumer
+        # treats 0 as "no bars", so normalize once here.
+        if color_bars_end_time is None:
+            color_bars_end_time = 0
+
         # Period selection (QCTools violations + suggested periods) is only
         # needed for the video-frame analysis steps. Dropped sample detection
         # is audio-only and does not consume them.
@@ -5380,7 +5388,6 @@ class EnhancedFrameAnalysis:
                         'edge_violation_pct': brng_results.aggregate_patterns.get('edge_violation_percentage', 0),
                         'visualization_path': str(viz_output_path) if success else None
                     }
-                    refinement_history.append(iteration_data)
 
                     # Log improvement metrics
                     violation_reduction = iteration_data['violations_before'] - iteration_data['violations_after']
@@ -5389,12 +5396,25 @@ class EnhancedFrameAnalysis:
                     else:
                         logger.info(f"  Violations: {iteration_data['violations_after']} (no reduction)")
 
-                    # Check for improvement
+                    # Stop once a round stops paying off. Without this the loop
+                    # re-ran border detection, signalstats and BRNG up to
+                    # max_refinement_iterations times even when the borders no
+                    # longer moved or the edge violations weren't going down.
                     improved = self._is_meaningful_improvement(
                         previous_brng, brng_results,
                         previous_area=previous_area,
                         current_area=new_area
                     )
+                    iteration_data['improved'] = improved
+                    refinement_history.append(iteration_data)
+
+                    if not improved:
+                        if brng_results.requires_border_adjustment:
+                            logger.info(
+                                f"  Refinement iteration {refinement_iterations} made no meaningful "
+                                f"improvement — stopping border refinement\n"
+                            )
+                        break
 
                 # After refinement loop completes
                 results['refinement_iterations'] = refinement_iterations
