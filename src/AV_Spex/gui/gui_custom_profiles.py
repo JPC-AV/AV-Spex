@@ -631,20 +631,6 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
         brng_layout.addWidget(brng_desc)
         brng_layout.addSpacing(10)
         
-        # Duration Limit
-        duration_row = QHBoxLayout()
-        duration_label = QLabel("Duration Limit (s):")
-        duration_label.setStyleSheet("font-weight: bold;")
-        self.brng_duration_input = QLineEdit("300")
-        self.brng_duration_input.setMaximumWidth(60)
-        duration_row.addWidget(duration_label)
-        duration_row.addWidget(self.brng_duration_input)
-        duration_row.addStretch()
-        brng_layout.addLayout(duration_row)
-        duration_desc = QLabel("Maximum duration to analyze for BRNG violations")
-        duration_desc.setIndent(20)
-        brng_layout.addWidget(duration_desc)
-        
         # Skip Color Bars
         self.brng_skip_colorbars_check = QCheckBox("Skip Color Bars")
         self.brng_skip_colorbars_check.setStyleSheet("font-weight: bold;")
@@ -764,7 +750,6 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
                 
                 # BRNG analysis
                 self.enable_brng_analysis_check.setChecked(bool(fa.enable_brng_analysis))
-                self.brng_duration_input.setText(str(fa.brng_duration_limit))
                 self.brng_skip_colorbars_check.setChecked(bool(fa.brng_skip_color_bars))
                 
                 # Signalstats
@@ -867,7 +852,6 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
             
             # BRNG analysis
             self.enable_brng_analysis_check.setChecked(bool(getattr(fa, 'enable_brng_analysis', False)))
-            self.brng_duration_input.setText(str(getattr(fa, 'brng_duration_limit', 300)))
             self.brng_skip_colorbars_check.setChecked(bool(getattr(fa, 'brng_skip_color_bars', False)))
             
             # Signalstats
@@ -948,7 +932,6 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
             sophisticated_padding=int(self.soph_padding_input.text() or 5),
             auto_retry_borders=self.auto_retry_borders_check.isChecked(),
             max_border_retries=int(self.max_border_retries_input.text() or 3),
-            brng_duration_limit=int(self.brng_duration_input.text() or 300),
             brng_skip_color_bars=self.brng_skip_colorbars_check.isChecked(),
             signalstats_duration=int(self.signalstats_duration_input.text() or 60),
             signalstats_periods=int(self.signalstats_periods_input.text() or 3)

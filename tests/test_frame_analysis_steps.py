@@ -123,7 +123,7 @@ def test_start_message_is_logged(caplog):
 # analyze() must honour the FrameAnalysisConfig it is given
 #
 # It previously read self.checks_config unconditionally, so an explicitly
-# passed config controlled method/duration_limit but NOT the enable_* flags —
+# passed config controlled method but NOT the enable_* flags —
 # those silently came from whatever was last saved in the GUI.
 # ===========================================================================
 

@@ -23,7 +23,6 @@
       "sophisticated_search_window": 120,
       "auto_retry_borders": true,
       "max_border_retries": 3,
-      "brng_duration_limit": 300,
       "brng_skip_color_bars": true,
       "signalstats_start_time": 120,
       "signalstats_duration": 60,

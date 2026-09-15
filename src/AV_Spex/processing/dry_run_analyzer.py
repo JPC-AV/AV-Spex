@@ -697,7 +697,10 @@ class DryRunAnalyzer:
         ))
 
         # BRNG Analysis — works with or without QCTools (ffmpeg fallback)
-        brng_details = [f"Duration limit: {frame_config.brng_duration_limit}s"]
+        brng_details = [
+            f"{frame_config.analysis_period_count} analysis period(s) of "
+            f"{frame_config.analysis_period_duration}s"
+        ]
         if frame_config.brng_skip_color_bars:
             brng_details.append("will skip color bars region")
         if not has_qctools:

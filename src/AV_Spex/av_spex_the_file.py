@@ -105,7 +105,6 @@ class ParsedArguments:
     frame_borders: Optional[str]
     frame_border_pixels: Optional[int]
     frame_no_colorbar_skip: bool
-    frame_brng_duration: Optional[int]
     enable_clamped_levels: Optional[str]
     enable_clams_detection: Optional[str]
     enable_audio_analysis: Optional[str]
@@ -247,8 +246,6 @@ The scripts will confirm that the digital files conform to predetermined specifi
                              help='Number of pixels to crop from each edge in simple border mode')
     frame_group.add_argument('--frame-no-colorbar-skip', action='store_true',
                              help='Disable automatic skipping of color bars detected by qct-parse')
-    frame_group.add_argument('--frame-brng-duration', type=int,
-                             help='Maximum duration in seconds for BRNG analysis')
 
     # Output settings (access file sub-options + qctools extension)
     input_group = parser.add_argument_group("Input settings")
@@ -329,7 +326,6 @@ The scripts will confirm that the digital files conform to predetermined specifi
         frame_borders=getattr(args, 'frame_borders', None),
         frame_border_pixels=getattr(args, 'frame_border_pixels', None),
         frame_no_colorbar_skip=getattr(args, 'frame_no_colorbar_skip', False),
-        frame_brng_duration=getattr(args, 'frame_brng_duration', None),
         enable_clamped_levels=getattr(args, 'enable_clamped_levels', None),
         enable_clams_detection=getattr(args, 'enable_clams_detection', None),
         enable_audio_analysis=getattr(args, 'enable_audio_analysis', None),
@@ -582,9 +578,6 @@ def run_cli_mode(args):
 
     if args.frame_no_colorbar_skip:
         frame_updates['outputs']['frame_analysis']['brng_skip_color_bars'] = False
-
-    if args.frame_brng_duration is not None:
-        frame_updates['outputs']['frame_analysis']['brng_duration_limit'] = args.frame_brng_duration
 
     # Only update config if there are actual changes
     if frame_updates['outputs']['frame_analysis']:

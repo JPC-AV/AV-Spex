@@ -783,7 +783,6 @@ def test_analyze_frame_quality_passes_config_fields_through(monkeypatch):
     from AV_Spex.utils.config_setup import FrameAnalysisConfig
     cfg = FrameAnalysisConfig(
         border_detection_mode="sophisticated",
-        brng_duration_limit=120,
         brng_skip_color_bars=False,
         max_border_retries=5,
     )
@@ -794,7 +793,7 @@ def test_analyze_frame_quality_passes_config_fields_through(monkeypatch):
 
     call = fake_analyzer.analyze.call_args
     assert call.kwargs["method"] == "sophisticated"
-    assert call.kwargs["duration_limit"] == 120
+    assert "duration_limit" not in call.kwargs
     assert call.kwargs["skip_color_bars"] is False
     assert call.kwargs["max_refinement_iterations"] == 5
     assert call.kwargs["color_bars_end_time"] == 4.5
@@ -1665,7 +1664,7 @@ def test_no_analysis_periods_returns_none_rather_than_crashing(tmp_path):
     analyzer.check_cancelled = lambda: False
 
     result = analyzer.analyze_with_differential_detection(
-        output_dir=tmp_path, analysis_periods=None, duration_limit=300,
+        output_dir=tmp_path, analysis_periods=None,
         skip_start_seconds=0.0,
     )
 
@@ -1686,7 +1685,7 @@ def test_no_analysis_periods_does_not_call_the_renamed_method(tmp_path, monkeypa
             "an empty period list must not fall back to an arbitrary whole-file window"))
 
     assert analyzer.analyze_with_differential_detection(
-        output_dir=tmp_path, analysis_periods=[], duration_limit=300) is None
+        output_dir=tmp_path, analysis_periods=[]) is None
 
 
 def test_differential_analyzer_has_no_stale_method_reference():

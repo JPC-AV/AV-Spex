@@ -315,7 +315,6 @@ Shared settings for signalstats and BRNG analysis:
 ##### 4e. BRNG Analysis
 
 - **Enable BRNG Analysis** (`enable_brng_analysis`)
-- **Duration Limit (s)** (`brng_duration_limit`) — maximum duration to analyze for out-of-range values
 - **Skip Color Bars** (`brng_skip_color_bars`) — excludes color bar sections detected by qct-parse from BRNG analysis
 
 ##### 4f. Dropped Sample Detection

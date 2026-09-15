@@ -291,7 +291,6 @@ class FrameAnalysisConfig:
     max_border_retries: int = 3
     
     # BRNG analysis settings
-    brng_duration_limit: int = 300
     brng_skip_color_bars: bool = True
     
     # Analysis period settings (used by signalstats and BRNG analysis)

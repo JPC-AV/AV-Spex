@@ -464,9 +464,9 @@ A pixel is classified as a violation only when at least 2 of the 3 methods agree
 
 **Adaptive detection**: When signalstats results are available, periods diagnosed as border-dominated or minimal use stricter detection thresholds to reduce false positives, while periods with content violations use standard sensitivity. When head-switching artifacts were detected during border detection, the bottom-edge analysis zone is widened so head-switching noise is classified as edge artifacts rather than content violations.
 
-Options: **Duration Limit** caps how much of the video is analyzed (default: 300 seconds), and **Skip Color Bars** excludes the detected color-bars section from analysis.
+BRNG analysis examines the same analysis periods as Signalstats (see **Analysis Periods** below); **Skip Color Bars** excludes the detected color-bars section from analysis.
 
-CLI: `av-spex --enable-brng-analysis {on,off}`, `--frame-brng-duration 300`, `--frame-no-colorbar-skip`
+CLI: `av-spex --enable-brng-analysis {on,off}`, `--frame-no-colorbar-skip`
 
 ### Analysis Periods
 
@@ -654,7 +654,6 @@ av-spex [path/to/directory]
 - `--enable-duplicate-frame-detection {on,off}` — Toggle duplicate/frozen frame detection
 - `--frame-borders {simple,sophisticated}` — Border detection mode
 - `--frame-border-pixels N` — Pixels cropped from each edge in simple border mode (default: 25)
-- `--frame-brng-duration SECONDS` — Maximum duration analyzed by BRNG analysis (default: 300)
 - `--frame-no-colorbar-skip` — Analyze the detected color bars instead of skipping them
 
 **Input settings:**
@@ -704,7 +703,7 @@ Controls which tools run and what outputs are generated.
 - `access_file_exclude_flagged_audio` — Leave flagged audio channels out of the access copy: a channel found silent or carrying audible timecode is dropped, and dual mono is built from the good channel (default `false`; requires audio analysis)
 - `report` — Generate an HTML summary report
 - `qctools_ext` — Output extension for QCTools files (`qctools.xml.gz` or `qctools.mkv`)
-- **Frame Analysis** settings: `enable_bitplane_check`, `enable_border_detection`, `enable_brng_analysis`, `enable_signalstats`, `enable_dropped_sample_detection`, `enable_duplicate_frame_detection`, `border_detection_mode` (simple/sophisticated), `simple_border_pixels` (default: 25), `brng_duration_limit` (default: 300 seconds), `brng_skip_color_bars`, `analysis_period_duration` and `analysis_period_count` (the periods shared by signalstats and BRNG analysis), `duplicate_min_run_length` (default: 2), plus sophisticated-border tuning fields and the border retry settings `auto_retry_borders` / `max_border_retries`
+- **Frame Analysis** settings: `enable_bitplane_check`, `enable_border_detection`, `enable_brng_analysis`, `enable_signalstats`, `enable_dropped_sample_detection`, `enable_duplicate_frame_detection`, `border_detection_mode` (simple/sophisticated), `simple_border_pixels` (default: 25), `brng_skip_color_bars`, `analysis_period_duration` and `analysis_period_count` (the periods shared by signalstats and BRNG analysis), `duplicate_min_run_length` (default: 2), plus sophisticated-border tuning fields and the border retry settings `auto_retry_borders` / `max_border_retries`
 
 **Fixity**
 - `output_fixity` — Write checksums to a fixity text file

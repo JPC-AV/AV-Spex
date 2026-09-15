@@ -367,13 +367,6 @@ class ComplexWindow(QWidget, ThemeableMixin):
         self._add_option(layout, self.enable_brng_analysis_cb, self._desc_label(
             "Analyze broadcast range violations in the active picture area"))
 
-        self.brng_duration_input = QLineEdit("300")
-        self._add_option(layout, self._param_row(
-            "Duration Limit (s):", self.brng_duration_input),
-            self._desc_label(
-                "Maximum duration to analyze for BRNG violations",
-                extra_indent=self.INDENT))
-
         self.brng_skip_colorbars_cb = self._make_checkbox("Skip Color Bars")
         self._add_option(layout, self._indent_row(self.brng_skip_colorbars_cb),
             self._desc_label(
@@ -579,9 +572,6 @@ class ComplexWindow(QWidget, ThemeableMixin):
         )
 
         # BRNG parameters
-        self.brng_duration_input.textChanged.connect(
-            lambda text: self.on_frame_analysis_param_changed('brng_duration_limit', text)
-        )
         self.brng_skip_colorbars_cb.stateChanged.connect(
             lambda state: self.on_boolean_changed(state, ['outputs', 'frame_analysis', 'brng_skip_color_bars'])
         )
@@ -659,7 +649,6 @@ class ComplexWindow(QWidget, ThemeableMixin):
             self.soph_sample_frames_input.setText(str(frame_config.sophisticated_sample_frames))
             self.soph_padding_input.setText(str(frame_config.sophisticated_padding))
             self.auto_retry_borders_cb.setChecked(bool(frame_config.auto_retry_borders))
-            self.brng_duration_input.setText(str(frame_config.brng_duration_limit))
             self.brng_skip_colorbars_cb.setChecked(bool(frame_config.brng_skip_color_bars))
             self.max_border_retries_input.setText(str(getattr(frame_config, 'max_border_retries', 3)))
             self.analysis_period_duration_input.setText(str(frame_config.analysis_period_duration))
@@ -750,7 +739,7 @@ class ComplexWindow(QWidget, ThemeableMixin):
         # Convert to appropriate type
         if param_name in ['simple_border_pixels', 'sophisticated_threshold', 'sophisticated_edge_sample_width',
                         'sophisticated_sample_frames', 'sophisticated_padding', 'sophisticated_viz_time',
-                        'sophisticated_search_window', 'brng_duration_limit',
+                        'sophisticated_search_window',
                         'analysis_period_duration', 'analysis_period_count', 'max_border_retries']:
             try:
                 # Handle empty string case

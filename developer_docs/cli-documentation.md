@@ -134,7 +134,6 @@ class ParsedArguments:
     frame_borders: Optional[str]
     frame_border_pixels: Optional[int]
     frame_no_colorbar_skip: bool
-    frame_brng_duration: Optional[int]
     # qct-parse / CLAMS feature toggles
     enable_clamped_levels: Optional[str]
     enable_clams_detection: Optional[str]
@@ -173,7 +172,6 @@ Examples of supported CLI flags:
 * `--enable-bitplane-check` / `--enable-border-detection` / `--enable-brng-analysis` / `--enable-signalstats` / `--enable-dropped-sample-detection` / `--enable-duplicate-frame-detection`: toggle individual frame analysis sub-steps on or off
 * `--frame-borders`: set border detection mode (`simple` or `sophisticated`)
 * `--frame-border-pixels`: set pixel crop width for simple border mode
-* `--frame-brng-duration`: set max duration (in seconds) for BRNG analysis
 * `--frame-no-colorbar-skip`: disable automatic color bar skipping in frame analysis
 * `--enable-audio-analysis`: toggle qct-parse audio analysis (clipping / channel imbalance / audible-timecode / dropout). Auto-enables `qct_parse.run_tool` if currently off.
 * `--enable-clamped-levels`: toggle qct-parse's broadcast-range level-clamping detector. Auto-enables `qct_parse.run_tool` if currently off. Writes to `tools.qct_parse.detect_clamped_levels`, **not** `outputs.frame_analysis`.
@@ -320,8 +318,6 @@ def run_cli_mode(args):
         frame_updates['outputs']['frame_analysis']['simple_border_pixels'] = args.frame_border_pixels
     if args.frame_no_colorbar_skip:
         frame_updates['outputs']['frame_analysis']['brng_skip_color_bars'] = False
-    if args.frame_brng_duration is not None:
-        frame_updates['outputs']['frame_analysis']['brng_duration_limit'] = args.frame_brng_duration
 
     if frame_updates['outputs']['frame_analysis']:
         config_mgr.update_config('checks', frame_updates)
@@ -421,7 +417,6 @@ The frame analysis sub-system is configured via `checks_config.outputs.frame_ana
 | `--enable-duplicate-frame-detection {on,off}` | `enable_duplicate_frame_detection` | Toggle duplicate-frame detection |
 | `--frame-borders {simple,sophisticated}` | `border_detection_mode` | Border detection algorithm |
 | `--frame-border-pixels N` | `simple_border_pixels` | Crop width (px) for simple mode |
-| `--frame-brng-duration N` | `brng_duration_limit` | Max seconds analyzed for BRNG |
 | `--frame-no-colorbar-skip` | `brng_skip_color_bars` → `False` | Disable automatic color bar skipping |
 
 All frame analysis updates are applied as a single deep-merge `update_config('checks', ...)` call at the end of `run_cli_mode`. If none of the frame analysis flags are supplied, the config is unchanged.

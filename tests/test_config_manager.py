@@ -625,3 +625,25 @@ def test_real_bundled_checks_config_loads(config_mgr):
     assert cfg.fixity is not None
     assert cfg.tools is not None
     assert isinstance(cfg.validate_filename, bool)
+
+
+def test_saved_frame_analysis_config_with_removed_brng_duration_limit_still_loads(sandbox_mgr):
+    """brng_duration_limit was removed; last-used configs and exports written
+    before then still carry it and must load (the key is simply dropped)."""
+    from pathlib import Path
+    from AV_Spex.utils.config_setup import ChecksConfig
+
+    mgr, bundle_dir, user_dir = sandbox_mgr
+    bundled = json.loads(
+        (Path(__file__).parent.parent / "src" / "AV_Spex" / "config" / "checks_config.json").read_text())
+    _write_bundled_config(bundle_dir, "checks", bundled)
+
+    legacy = json.loads(json.dumps(bundled))
+    legacy["outputs"]["frame_analysis"]["brng_duration_limit"] = 120
+    legacy["outputs"]["frame_analysis"]["analysis_period_count"] = 4
+    _write_last_used_config(user_dir, "checks", legacy)
+
+    cfg = mgr.get_config("checks", ChecksConfig, use_last_used=True)
+
+    assert cfg.outputs.frame_analysis.analysis_period_count == 4
+    assert not hasattr(cfg.outputs.frame_analysis, "brng_duration_limit")

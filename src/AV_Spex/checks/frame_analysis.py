@@ -1929,7 +1929,6 @@ class DifferentialBRNGAnalyzer:
 
     def analyze_with_differential_detection(self, 
                                        output_dir: Path,
-                                       duration_limit: int = 300,
                                        skip_start_seconds: float = 0,
                                        qctools_violations: List[FrameViolation] = None,
                                        analysis_periods: List[Tuple[float, int]] = None,
@@ -4790,7 +4789,6 @@ class EnhancedFrameAnalysis:
 
     def analyze(self,
         method: str = 'sophisticated',
-        duration_limit: int = 300,
         skip_color_bars: bool = True,
         max_refinement_iterations: int = 3,
         color_bars_end_time: float = None,
@@ -4802,7 +4800,6 @@ class EnhancedFrameAnalysis:
 
         Args:
             method: 'sophisticated' or 'simple' border detection
-            duration_limit: Maximum duration to analyze (seconds)
             skip_color_bars: Whether to skip color bars at start
             max_refinement_iterations: Maximum border refinement iterations
             color_bars_end_time: End time of color bars if detected
@@ -4831,7 +4828,7 @@ class EnhancedFrameAnalysis:
         # Use the caller's config when given. Reading self.checks_config
         # unconditionally would ignore an explicitly passed FrameAnalysisConfig
         # — the enable_* flags would come from whatever was last saved in the
-        # GUI while method/duration_limit came from the argument.
+        # GUI while method came from the argument.
         if frame_config is None:
             frame_config = self.checks_config.outputs.frame_analysis
         
@@ -5172,8 +5169,7 @@ class EnhancedFrameAnalysis:
                                                           signals=self.signals)
             
             brng_results = self.brng_analyzer.analyze_with_differential_detection(
-                output_dir=self.output_dir, 
-                duration_limit=duration_limit,
+                output_dir=self.output_dir,
                 skip_start_seconds=color_bars_end_time,
                 qctools_violations=violations,
                 analysis_periods=analysis_periods,
@@ -5331,7 +5327,6 @@ class EnhancedFrameAnalysis:
 
                     brng_results = self.brng_analyzer.analyze_with_differential_detection(
                         output_dir=self.output_dir,
-                        duration_limit=duration_limit,
                         skip_start_seconds=color_bars_end_time,
                         qctools_violations=violations,
                         analysis_periods=analysis_periods,
@@ -6101,7 +6096,6 @@ def analyze_frame_quality(video_path: str,
     
     # Extract parameters directly from dataclass
     method = frame_config.border_detection_mode
-    duration_limit = frame_config.brng_duration_limit
     skip_color_bars = bool(frame_config.brng_skip_color_bars)
     max_refinements = frame_config.max_border_retries
     
@@ -6124,7 +6118,6 @@ def analyze_frame_quality(video_path: str,
     
     results = analyzer.analyze(
         method=method,
-        duration_limit=duration_limit,
         skip_color_bars=skip_color_bars,
         max_refinement_iterations=max_refinements,
         color_bars_end_time=color_bars_end_time,

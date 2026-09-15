@@ -19,7 +19,6 @@ Values are the code defaults. "Config" means `FrameAnalysisConfig` in `utils/con
    - `bars_regions` — every detected bars span (head plus any mid-file bars).
 4. Config values read at the entry point (`analyze_frame_quality`):
    - `border_detection_mode` → `simple` or `sophisticated`
-   - `brng_duration_limit` (300)
    - `brng_skip_color_bars` (True)
    - `max_border_retries` (3)
 5. Video geometry and timing are read with OpenCV; if OpenCV can't open the file, geometry comes
@@ -511,8 +510,6 @@ All written to `{video_id}_qc_metadata/`:
 ### Settings that are not used
 - **`sophisticated_viz_time` / `sophisticated_search_window`** (bundled JSON only, not in
   `FrameAnalysisConfig`): the border visualization always uses 150 s / 120 s.
-- **`brng_duration_limit` / `--frame-brng-duration`**: passed into BRNG analysis as
-  `duration_limit` but never read. Analysis length is set only by period count × duration.
 - **`skip_start_seconds`** in BRNG analysis: passed, never read.
 - **`brng_skip_color_bars` / `--frame-no-colorbar-skip`** affects only the QCTools violation scan
   (1.5) and the CSV fallback (1.1). Periods, signalstats and BRNG still avoid the head bars when an
@@ -550,7 +547,5 @@ All written to `{video_id}_qc_metadata/`:
   spacing, which matches the code, but omits that border hints only exist in sophisticated mode and
   need at least `count` usable hints.
 - **Help window — Analysis Periods**: "bars plus a 10-second margin" — the first pass uses 20 s.
-- **Help / GUI docs — Duration Limit**: described as capping how much video is analyzed; it has no
-  effect.
 - **GUI docs — Skip Color Bars**: says bars "detected by qct-parse"; it's the qct-parse + CLAMS
   consensus.
