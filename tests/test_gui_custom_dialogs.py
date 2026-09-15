@@ -875,3 +875,54 @@ def test_checks_profile_dialog_keeps_mkvalidator_setting_it_has_no_control_for(q
     fresh.name_input.setText("Fresh")
     assert fresh.get_profile_from_form().tools.mkvalidator == BasicToolConfig(
         check_tool=False, run_tool=False)
+
+
+def _every_value_changed(profile_dict):
+    """Return a copy of an asdict'd ChecksProfile with every setting moved off its default."""
+    alternatives = {
+        "qctools_ext": "qctools.mkv",
+        "border_detection_mode": "sophisticated",
+        "checksum_algorithm": "sha256",
+        "stream_hash_algorithm": "sha256",
+        "evaluateBarsReference": "smpte",
+        "video_file_extension": "mov",
+        "mediaconch_policy": "Some_Policy.xml",
+    }
+
+    def change(key, value):
+        if isinstance(value, dict):
+            return {k: change(k, v) for k, v in value.items()}
+        if isinstance(value, bool):
+            return not value
+        if isinstance(value, int):
+            return value + 7
+        if isinstance(value, float):
+            return value + 0.5
+        if key in alternatives:
+            return alternatives[key]
+        return value
+
+    changed = {k: change(k, v) for k, v in profile_dict.items() if k not in ("name", "description")}
+    changed["name"], changed["description"] = "Round Trip", "every field changed"
+    return changed
+
+
+def test_checks_profile_dialog_round_trips_every_setting(qapp, silent_dialogs):
+    """Load a profile with every setting changed, save it back: nothing may be lost.
+
+    Guards against a new ChecksConfig field being added without a dialog
+    control (or carry-over), which silently resets it whenever a profile is
+    saved from this dialog.
+    """
+    from dataclasses import asdict
+    from AV_Spex.gui.gui_custom_profiles import CustomProfileDialog
+    from AV_Spex.utils.config_manager import ConfigManager
+    from AV_Spex.utils.config_setup import ChecksProfile
+
+    original = ConfigManager()._deserialize_dataclass(
+        ChecksProfile, _every_value_changed(asdict(ChecksProfile(name="x"))))
+
+    dialog = CustomProfileDialog(edit_profile=original)
+    saved = dialog.get_profile_from_form()
+
+    assert asdict(saved) == asdict(original)
