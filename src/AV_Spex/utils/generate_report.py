@@ -4479,10 +4479,10 @@ BRNG_METHODOLOGY_HTML = """
                 signalstats diagnosis. Periods diagnosed as <em>border-dominated</em> or <em>minimal</em> 
                 use stricter detection thresholds (requiring stronger evidence to classify a pixel as a 
                 violation), reducing false positives in regions where actual content violations are unlikely. 
-                Periods with <em>content violations</em> use standard sensitivity. When head switching 
-                artifacts were detected during border detection, the bottom-edge analysis zone is 
-                automatically widened to classify head switching noise as edge artifacts rather than 
-                content violations.
+                Periods with <em>content violations</em> use standard sensitivity. Border detection already crops 
+                the average head switching height; when head switching reaches further than that crop, 
+                the bottom-edge analysis zone is widened to cover the remainder so the noise is 
+                classified as an edge artifact rather than a content violation.
             </p>
             <p style="margin: 0; color: #777;">
                 Because the differential detector compares two decoded video frames and runs multi-method 

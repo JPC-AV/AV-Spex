@@ -462,7 +462,7 @@ A pixel is classified as a violation only when at least 2 of the 3 methods agree
 
 **Violation classification**: Each frame with detected violations is classified by spatial pattern — *sub-black* (violations concentrated in low-luma zones), *highlight clipping* (high-luma zones), *edge artifacts* (within 15 px of frame edges, suggesting border/blanking issues), *linear blanking patterns* (edge violations forming continuous horizontal or vertical lines), or *general broadcast range violations*.
 
-**Adaptive detection**: When signalstats results are available, periods diagnosed as border-dominated or minimal use stricter detection thresholds to reduce false positives, while periods with content violations use standard sensitivity. When head-switching artifacts were detected during border detection, the bottom-edge analysis zone is widened so head-switching noise is classified as edge artifacts rather than content violations.
+**Adaptive detection**: When signalstats results are available, periods diagnosed as border-dominated or minimal use stricter detection thresholds to reduce false positives, while periods with content violations use standard sensitivity. Border detection already crops the average head-switching height off the bottom of the picture; when head switching reaches further than that crop in more than 30% of sampled frames, the bottom-edge analysis zone is widened to cover the remainder (up to 40 px), so that noise is classified as an edge artifact rather than a content violation.
 
 BRNG analysis examines the same analysis periods as Signalstats (see **Analysis Periods** below); **Skip Color Bars** excludes the detected color-bars section from analysis.
 

@@ -431,7 +431,13 @@ Then:
    - Frame BRNG % = violation pixels / cropped frame pixels × 100.
 
 ### 5.6 Per violation frame — classify the pattern
-1. **Edge strips**: 15 px on each side (see "Known issues" on the bottom-edge widening).
+1. **Edge strips**: 15 px on each side. The bottom strip is widened for head switching the crop
+   didn't remove (sophisticated mode only):
+   - residual = head-switching `max_height_px` − the active area's bottom crop (border detection
+     already cropped the *average* height plus padding);
+   - if head switching was seen in > 30 % of sampled frames and the residual is > 15 px, the bottom
+     strip becomes residual + 5 px, capped at 40 px;
+   - all bottom-strip measurements (linear score, blanking depth, adjacent band) use that width.
 2. **Interior density** = violation % of the area inside the strips.
 3. For each edge:
    - **Violation %** in the strip.
@@ -516,10 +522,6 @@ All written to `{video_id}_qc_metadata/`:
   end time is passed in.
 
 ### Probable bugs
-- **Head-switching bottom-edge widening never happens.** BRNG looks for
-  `head_switching['artifact_height']` and `['affected_percentage']`, but border detection writes
-  `avg_height_px` and `percentage`, so both read as 0 and the bottom strip stays 15 px
-  (`_detect_edge_violations_enhanced`).
 - **Refinement loop ignores its own stop check.** `_is_meaningful_improvement()` is computed each
   iteration but its result is never used; the loop runs until BRNG stops asking for adjustment or
   the retry limit is hit.
@@ -537,8 +539,7 @@ All written to `{video_id}_qc_metadata/`:
   separator would make every line unparseable. Unverified whether frame side data triggers it here.
 
 ### Existing docs that disagree with the code
-- **Help window — BRNG**: says three voting methods; there are four (green-drop added). Also
-  describes the head-switching bottom-zone widening, which doesn't take effect (above).
+- **Help window — BRNG**: says three voting methods; there are four (green-drop added).
 - **Help / README — Border detection**: "iterative refinement" is not mentioned as
   sophisticated-only; simple mode never refines.
 - **Help / README — Signalstats**: "with border detection off, signalstats measures the full frame

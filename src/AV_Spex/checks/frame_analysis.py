@@ -2718,6 +2718,37 @@ class DifferentialBRNGAnalyzer:
 
         return diagnostics if diagnostics else ["General broadcast range violations"]
 
+    def _head_switching_bottom_edge_width(self, edge_width: int) -> int:
+        """Bottom edge-strip width, widened for head switching the crop didn't remove.
+
+        Sophisticated border detection already crops the *average* head-switching
+        height (plus padding) off the bottom of the active area BRNG analyzes, so
+        only the part of the artifact that reaches past that crop can still show
+        up in the analyzed frame: max_height_px minus the bottom crop. When that
+        residual is taller than the normal strip, and head switching was seen in
+        more than 30% of sampled frames, the bottom strip grows to cover it (+5 px
+        margin, capped at 40 px) so the noise is classified as an edge artifact
+        rather than a content violation. Measuring from the crop, not the full
+        frame, keeps the strip from reaching into real picture.
+        """
+        context = getattr(self, 'upstream_context', None)
+        hs = context.head_switching if context else None
+        if not hs or not hs.get('detected'):
+            return edge_width
+
+        affected_pct = hs.get('percentage', 0) or 0
+        max_height = hs.get('max_height_px', 0) or 0
+        bottom_crop = (context.border_widths or {}).get('bottom', 0) or 0
+        residual = max_height - bottom_crop
+
+        if affected_pct > 30 and residual > edge_width:
+            widened = min(residual + 5, 40)
+            logger.debug(f"    Bottom edge width expanded to {widened}px "
+                         f"(head switching reaches {max_height}px, {bottom_crop}px already "
+                         f"cropped, in {affected_pct:.0f}% of frames)")
+            return widened
+        return edge_width
+
     def _detect_edge_violations_enhanced(self, violation_mask, edge_width=15):
         """
         Enhanced edge violation detection that identifies blanking patterns
@@ -2742,19 +2773,12 @@ class DifferentialBRNGAnalyzer:
             'interior_density': 0.0
         }
         
-        # Determine per-edge widths. Widen bottom edge if head switching was detected
-        # upstream — head switching noise produces expected BRNG violations that should
-        # be classified as edge artifacts, not content issues.
-        bottom_edge_width = edge_width
-        if (hasattr(self, 'upstream_context') and self.upstream_context 
-            and self.upstream_context.head_switching):
-            hs = self.upstream_context.head_switching
-            hs_height = hs.get('artifact_height', 0)
-            hs_pct = hs.get('affected_percentage', 0)
-            if hs_pct > 30 and hs_height > edge_width:
-                bottom_edge_width = min(hs_height + 5, 40)  # Cap at 40px
-                logger.debug(f"    Bottom edge width expanded to {bottom_edge_width}px "
-                           f"(head switching: {hs_height}px in {hs_pct:.0f}% of frames)")
+        # Per-edge strip widths. The bottom strip is widened when head switching
+        # reaches past what border detection already cropped (see
+        # _head_switching_bottom_edge_width).
+        bottom_edge_width = self._head_switching_bottom_edge_width(edge_width)
+        strip_widths = {'left': edge_width, 'right': edge_width,
+                        'top': edge_width, 'bottom': bottom_edge_width}
         
         # Calculate interior violation density as baseline for comparison.
         # This is the region inset by edge_width on all sides (using bottom_edge_width for bottom).
@@ -2781,6 +2805,8 @@ class DifferentialBRNGAnalyzer:
             
             edge_info['edge_percentages'][edge_name] = violation_percentage
             
+            strip = strip_widths[edge_name]
+
             # Detect linear patterns (even if not perfectly continuous)
             linear_score = 0
             if orientation == 'vertical':
@@ -2791,7 +2817,7 @@ class DifferentialBRNGAnalyzer:
                         if len(violation_positions) >= 4:  
                             if edge_name == 'left' and np.max(violation_positions) <= 2:
                                 linear_score += 1
-                            elif edge_name == 'right' and np.min(violation_positions) >= edge_width - 3:
+                            elif edge_name == 'right' and np.min(violation_positions) >= strip - 3:
                                 linear_score += 1
                 
                 linear_percentage = (linear_score / edge_region.shape[0]) * 100
@@ -2805,7 +2831,7 @@ class DifferentialBRNGAnalyzer:
                         if len(violation_positions) >= 2:
                             if edge_name == 'top' and np.max(violation_positions) <= 3:
                                 linear_score += 1
-                            elif edge_name == 'bottom' and np.min(violation_positions) >= edge_width - 4:
+                            elif edge_name == 'bottom' and np.min(violation_positions) >= strip - 4:
                                 linear_score += 1
                 
                 linear_percentage = (linear_score / edge_region.shape[1]) * 100
@@ -2822,7 +2848,7 @@ class DifferentialBRNGAnalyzer:
                             if edge_name == 'left':
                                 depth = np.max(row_violations)
                             else:  # right
-                                depth = edge_width - np.min(row_violations)
+                                depth = strip - np.min(row_violations)
                             max_depth = max(max_depth, depth)
                 else:  # horizontal
                     for col in range(edge_region.shape[1]):
@@ -2831,7 +2857,7 @@ class DifferentialBRNGAnalyzer:
                             if edge_name == 'top':
                                 depth = np.max(col_violations)
                             else:  # bottom
-                                depth = edge_width - np.min(col_violations)
+                                depth = strip - np.min(col_violations)
                             max_depth = max(max_depth, depth)
                 
                 edge_info['blanking_depth'][edge_name] = max_depth
@@ -2855,7 +2881,7 @@ class DifferentialBRNGAnalyzer:
             if edge_name == 'top':
                 adjacent = violation_mask[edge_width:edge_width + adjacent_band_depth, :]
             elif edge_name == 'bottom':
-                adjacent = violation_mask[-(edge_width + adjacent_band_depth):-edge_width, :]
+                adjacent = violation_mask[-(strip + adjacent_band_depth):-strip, :]
             elif edge_name == 'left':
                 adjacent = violation_mask[:, edge_width:edge_width + adjacent_band_depth]
             else:  # right

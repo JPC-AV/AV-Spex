@@ -1886,3 +1886,56 @@ def test_black_sample_with_a_failed_period_reports_last_resort(tmp_path):
     # Neither reason is lost to the precedence choice
     assert "Least-black candidate used." in result.period_confidence_note
     assert "2 of 3" in result.period_confidence_note
+
+
+# ---------------------------------------------------------------------------
+# Head-switching bottom-edge widening
+#
+# It used to read 'artifact_height' / 'affected_percentage', keys border
+# detection never writes, so it never fired. It now widens only by how far
+# head switching reaches past the bottom crop border detection already made.
+# ---------------------------------------------------------------------------
+
+def _brng_analyzer_with_head_switching(head_switching, bottom_crop):
+    analyzer = fa.DifferentialBRNGAnalyzer.__new__(fa.DifferentialBRNGAnalyzer)
+    analyzer.upstream_context = fa.UpstreamAnalysisContext(
+        period_diagnoses={}, period_active_area_brng={}, period_full_frame_brng={},
+        avg_active_area_brng=0.0, overall_diagnosis="",
+        head_switching=head_switching,
+        border_widths={'left': 14, 'right': 17, 'top': 5, 'bottom': bottom_crop},
+    )
+    return analyzer
+
+
+@pytest.mark.parametrize("head_switching, bottom_crop, expected", [
+    # JPC_AV_03801: reaches 30px, 11px cropped -> 19px residual -> 24px strip
+    ({'detected': True, 'percentage': 55.0, 'avg_height_px': 6, 'max_height_px': 30}, 11, 24),
+    # 21419511_noNoise: reaches 30px, 19px cropped -> 11px residual, strip covers it
+    ({'detected': True, 'percentage': 70.0, 'avg_height_px': 8, 'max_height_px': 30}, 19, 15),
+    # Seen in too few frames
+    ({'detected': True, 'percentage': 25.0, 'avg_height_px': 6, 'max_height_px': 30}, 11, 15),
+    # Very tall residual is capped
+    ({'detected': True, 'percentage': 90.0, 'avg_height_px': 6, 'max_height_px': 80}, 11, 40),
+    # Not detected / absent
+    ({'detected': False, 'percentage': 90.0, 'max_height_px': 30}, 0, 15),
+    (None, 0, 15),
+])
+def test_head_switching_bottom_edge_width(head_switching, bottom_crop, expected):
+    analyzer = _brng_analyzer_with_head_switching(head_switching, bottom_crop)
+    assert analyzer._head_switching_bottom_edge_width(15) == expected
+
+
+def test_head_switching_residual_band_is_classified_as_bottom_edge():
+    """A 35px band of violations at the bottom: without widening it spills past
+    the 15px strip into the adjacent band and reads as content; with the
+    head-switching residual covering it, it is a bottom edge artifact."""
+    mask = np.zeros((436, 670), dtype=np.uint8)
+    mask[-35:, :] = 255
+
+    no_hs = _brng_analyzer_with_head_switching(None, 11)
+    assert 'bottom' not in no_hs._detect_edge_violations_enhanced(mask)['edges_affected']
+
+    # reaches 41px, 11px cropped -> 30px residual -> 35px strip
+    hs = {'detected': True, 'percentage': 80.0, 'avg_height_px': 6, 'max_height_px': 41}
+    with_hs = _brng_analyzer_with_head_switching(hs, 11)
+    assert 'bottom' in with_hs._detect_edge_violations_enhanced(mask)['edges_affected']
