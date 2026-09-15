@@ -647,3 +647,21 @@ def test_saved_frame_analysis_config_with_removed_brng_duration_limit_still_load
 
     assert cfg.outputs.frame_analysis.analysis_period_count == 4
     assert not hasattr(cfg.outputs.frame_analysis, "brng_duration_limit")
+
+
+def test_migrate_renames_signalstats_fields_in_checks_profiles(config_mgr):
+    """Custom checks profiles saved before the rename carry the old field names."""
+    data = {"custom_profiles": {
+        "Old": {"name": "Old", "outputs": {"frame_analysis": {
+            "signalstats_duration": 45, "signalstats_periods": 5}}},
+        "New": {"name": "New", "outputs": {"frame_analysis": {
+            "analysis_period_duration": 90, "analysis_period_count": 2}}},
+        "NoFrameAnalysis": {"name": "NoFrameAnalysis", "outputs": {}},
+    }}
+
+    result = config_mgr._migrate_config_data(data, "profiles_checks")
+
+    old = result["custom_profiles"]["Old"]["outputs"]["frame_analysis"]
+    assert old == {"analysis_period_duration": 45, "analysis_period_count": 5}
+    new = result["custom_profiles"]["New"]["outputs"]["frame_analysis"]
+    assert new == {"analysis_period_duration": 90, "analysis_period_count": 2}

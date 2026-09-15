@@ -217,14 +217,9 @@ class ConfigManager:
                 
                 # Migrate renamed frame_analysis period fields
                 if 'frame_analysis' in config_data['outputs']:
-                    fa = config_data['outputs']['frame_analysis']
-                    if 'signalstats_duration' in fa and 'analysis_period_duration' not in fa:
-                        fa['analysis_period_duration'] = fa.pop('signalstats_duration')
-                        logger.info("Migrated 'signalstats_duration' → 'analysis_period_duration'")
-                    if 'signalstats_periods' in fa and 'analysis_period_count' not in fa:
-                        fa['analysis_period_count'] = fa.pop('signalstats_periods')
-                        logger.info("Migrated 'signalstats_periods' → 'analysis_period_count'")
-            
+                    self._migrate_frame_analysis_period_fields(
+                        config_data['outputs']['frame_analysis'])
+
             # Migrate fixity section
             if 'fixity' in config_data:
                 for key in ['check_fixity', 'validate_stream_fixity', 'embed_stream_fixity', 
@@ -276,8 +271,26 @@ class ConfigManager:
                             tools['qct_parse']['audio_analysis'] = old_clipping or old_imbalance
                         tools['qct_parse'].pop('detect_audio_clipping', None)
                         tools['qct_parse'].pop('detect_channel_imbalance', None)
-        
+
+        elif config_name == 'profiles_checks':
+            # Custom checks profiles embed a full frame_analysis block, so a
+            # profile saved before the period-field rename still carries the
+            # old names — which deserialization would silently drop
+            for profile in (config_data.get('custom_profiles') or {}).values():
+                fa = ((profile or {}).get('outputs') or {}).get('frame_analysis')
+                if isinstance(fa, dict):
+                    self._migrate_frame_analysis_period_fields(fa)
+
         return config_data
+
+    def _migrate_frame_analysis_period_fields(self, fa: dict) -> None:
+        """Rename signalstats_duration/_periods to the shared analysis_period_* names, in place."""
+        if 'signalstats_duration' in fa and 'analysis_period_duration' not in fa:
+            fa['analysis_period_duration'] = fa.pop('signalstats_duration')
+            logger.info("Migrated 'signalstats_duration' → 'analysis_period_duration'")
+        if 'signalstats_periods' in fa and 'analysis_period_count' not in fa:
+            fa['analysis_period_count'] = fa.pop('signalstats_periods')
+            logger.info("Migrated 'signalstats_periods' → 'analysis_period_count'")
 
     # Profile-bearing configs, mapped to the key holding their profiles dict.
     _PROFILE_CONFIG_KEYS = {

@@ -28,6 +28,9 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
         super().__init__(parent)
         self.profile = None
         self.edit_mode = edit_profile is not None
+        # mkvalidator has no control in this dialog; keep whatever setting was
+        # loaded (edited profile or current config) so saving doesn't reset it
+        self._mkvalidator = BasicToolConfig(check_tool=False, run_tool=False)
         self.setWindowTitle("Custom Profile Editor" if self.edit_mode else "Create Custom Profile")
         self.setModal(True)
 
@@ -657,33 +660,32 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
         signalstats_layout.addWidget(signalstats_desc)
         signalstats_layout.addSpacing(10)
         
-        # Duration
-        duration_row = QHBoxLayout()
-        duration_label = QLabel("Duration (s):")
-        duration_label.setStyleSheet("font-weight: bold;")
-        self.signalstats_duration_input = QLineEdit("60")
-        self.signalstats_duration_input.setMaximumWidth(60)
-        duration_row.addWidget(duration_label)
-        duration_row.addWidget(self.signalstats_duration_input)
-        duration_row.addStretch()
-        signalstats_layout.addLayout(duration_row)
-        duration_desc = QLabel("How long to run signalstats analysis")
-        duration_desc.setIndent(20)
-        signalstats_layout.addWidget(duration_desc)
-        
-        # Analysis Periods
+        # Analysis periods (shared by signalstats and BRNG analysis)
         periods_row = QHBoxLayout()
-        periods_label = QLabel("Analysis Periods:")
+        periods_label = QLabel("Number of Periods:")
         periods_label.setStyleSheet("font-weight: bold;")
-        self.signalstats_periods_input = QLineEdit("3")
-        self.signalstats_periods_input.setMaximumWidth(60)
+        self.analysis_period_count_input = QLineEdit("3")
+        self.analysis_period_count_input.setMaximumWidth(60)
         periods_row.addWidget(periods_label)
-        periods_row.addWidget(self.signalstats_periods_input)
+        periods_row.addWidget(self.analysis_period_count_input)
         periods_row.addStretch()
         signalstats_layout.addLayout(periods_row)
-        periods_desc = QLabel("Number of analysis periods to spread across video")
+        periods_desc = QLabel("How many time windows to sample (shared by Signalstats and BRNG analysis)")
         periods_desc.setIndent(20)
         signalstats_layout.addWidget(periods_desc)
+
+        duration_row = QHBoxLayout()
+        duration_label = QLabel("Period Duration (s):")
+        duration_label.setStyleSheet("font-weight: bold;")
+        self.analysis_period_duration_input = QLineEdit("60")
+        self.analysis_period_duration_input.setMaximumWidth(60)
+        duration_row.addWidget(duration_label)
+        duration_row.addWidget(self.analysis_period_duration_input)
+        duration_row.addStretch()
+        signalstats_layout.addLayout(duration_row)
+        duration_desc = QLabel("Length of each analysis period")
+        duration_desc.setIndent(20)
+        signalstats_layout.addWidget(duration_desc)
         
         signalstats_group.setLayout(signalstats_layout)
         parent_layout.addWidget(signalstats_group)
@@ -754,8 +756,8 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
                 
                 # Signalstats
                 self.enable_signalstats_check.setChecked(bool(fa.enable_signalstats))
-                self.signalstats_duration_input.setText(str(fa.signalstats_duration))
-                self.signalstats_periods_input.setText(str(getattr(fa, 'signalstats_periods', 3)))
+                self.analysis_period_count_input.setText(str(fa.analysis_period_count))
+                self.analysis_period_duration_input.setText(str(fa.analysis_period_duration))
                     
             # Load fixity (now booleans)
             self.fixity_checks['check_fixity'].setChecked(current_config.fixity.check_fixity)
@@ -808,6 +810,8 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
             self.bars_ref_detected_radio.setChecked(bars_ref != 'smpte')
             self.audio_analysis_check.setChecked(getattr(qct_config, 'audio_analysis', False))
 
+            self._remember_mkvalidator(current_config.tools)
+
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load current config: {str(e)}")
     
@@ -856,8 +860,8 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
             
             # Signalstats
             self.enable_signalstats_check.setChecked(bool(getattr(fa, 'enable_signalstats', False)))
-            self.signalstats_duration_input.setText(str(getattr(fa, 'signalstats_duration', 60)))
-            self.signalstats_periods_input.setText(str(getattr(fa, 'signalstats_periods', 3)))
+            self.analysis_period_count_input.setText(str(getattr(fa, 'analysis_period_count', 3)))
+            self.analysis_period_duration_input.setText(str(getattr(fa, 'analysis_period_duration', 60)))
         
         # Load fixity (now booleans)
         self.fixity_checks['check_fixity'].setChecked(profile.fixity.check_fixity)
@@ -910,6 +914,15 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
         self.bars_ref_detected_radio.setChecked(bars_ref != 'smpte')
         self.audio_analysis_check.setChecked(getattr(qct_config, 'audio_analysis', False))
 
+        self._remember_mkvalidator(profile.tools)
+
+    def _remember_mkvalidator(self, tools):
+        """Keep the loaded mkvalidator setting (no control for it in this dialog)."""
+        mkv = getattr(tools, 'mkvalidator', None)
+        if mkv is not None:
+            self._mkvalidator = BasicToolConfig(
+                check_tool=bool(mkv.check_tool), run_tool=bool(mkv.run_tool))
+
     def get_profile_from_form(self):
         """Create a ChecksProfile from the form data."""
         # Validate required fields
@@ -933,8 +946,8 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
             auto_retry_borders=self.auto_retry_borders_check.isChecked(),
             max_border_retries=int(self.max_border_retries_input.text() or 3),
             brng_skip_color_bars=self.brng_skip_colorbars_check.isChecked(),
-            signalstats_duration=int(self.signalstats_duration_input.text() or 60),
-            signalstats_periods=int(self.signalstats_periods_input.text() or 3)
+            analysis_period_duration=int(self.analysis_period_duration_input.text() or 60),
+            analysis_period_count=int(self.analysis_period_count_input.text() or 3)
         )
         
         # Create outputs config (now with booleans)
@@ -988,6 +1001,10 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
                 thumbExport=self.thumb_export_check.isChecked(),
                 evaluateBarsReference=('smpte' if self.bars_ref_smpte_radio.isChecked() else 'detected'),
                 audio_analysis=self.audio_analysis_check.isChecked()
+            ),
+            mkvalidator=BasicToolConfig(
+                check_tool=self._mkvalidator.check_tool,
+                run_tool=self._mkvalidator.run_tool
             )
         )
         
