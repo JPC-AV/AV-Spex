@@ -665,3 +665,20 @@ def test_migrate_renames_signalstats_fields_in_checks_profiles(config_mgr):
     assert old == {"analysis_period_duration": 45, "analysis_period_count": 5}
     new = result["custom_profiles"]["New"]["outputs"]["frame_analysis"]
     assert new == {"analysis_period_duration": 90, "analysis_period_count": 2}
+
+
+def test_bundled_frame_analysis_keys_are_all_real_config_fields():
+    """A bundled key the dataclass doesn't define is silently dropped on load,
+    so it looks configurable but does nothing (sophisticated_viz_time,
+    sophisticated_search_window and signalstats_start_time sat there unused)."""
+    from dataclasses import fields
+    from pathlib import Path
+    from AV_Spex.utils.config_setup import FrameAnalysisConfig
+
+    bundled = json.loads(
+        (Path(__file__).parent.parent / "src" / "AV_Spex" / "config" / "checks_config.json").read_text())
+    keys = set(bundled["outputs"]["frame_analysis"])
+    real = {f.name for f in fields(FrameAnalysisConfig)}
+
+    assert keys - real == set()
+    assert real - keys == set()

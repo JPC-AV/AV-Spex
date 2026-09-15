@@ -1667,7 +1667,6 @@ def test_no_analysis_periods_returns_none_rather_than_crashing(tmp_path):
 
     result = analyzer.analyze_with_differential_detection(
         output_dir=tmp_path, analysis_periods=None,
-        skip_start_seconds=0.0,
     )
 
     assert result is None

@@ -1115,9 +1115,8 @@ class ChecksWindow(QWidget, ThemeableMixin):
         
         # Convert to appropriate type
         if param_name in ['simple_border_pixels', 'sophisticated_threshold', 'sophisticated_edge_sample_width',
-                        'sophisticated_sample_frames', 'sophisticated_padding', 'sophisticated_viz_time',
-                        'sophisticated_search_window', 'signalstats_start_time',
-                        'signalstats_duration']:
+                        'sophisticated_sample_frames', 'sophisticated_padding',
+                        'analysis_period_duration', 'analysis_period_count', 'max_border_retries']:
             try:
                 # Handle empty string case
                 value = int(value) if value.strip() else 0

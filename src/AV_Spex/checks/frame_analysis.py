@@ -1983,7 +1983,6 @@ class DifferentialBRNGAnalyzer:
 
     def analyze_with_differential_detection(self, 
                                        output_dir: Path,
-                                       skip_start_seconds: float = 0,
                                        qctools_violations: List[FrameViolation] = None,
                                        analysis_periods: List[Tuple[float, int]] = None,
                                        upstream_context: 'UpstreamAnalysisContext' = None,
@@ -5265,7 +5264,6 @@ class EnhancedFrameAnalysis:
             
             brng_results = self.brng_analyzer.analyze_with_differential_detection(
                 output_dir=self.output_dir,
-                skip_start_seconds=brng_bars_end,
                 qctools_violations=violations,
                 analysis_periods=analysis_periods,
                 upstream_context=upstream_context,
@@ -5422,7 +5420,6 @@ class EnhancedFrameAnalysis:
 
                     brng_results = self.brng_analyzer.analyze_with_differential_detection(
                         output_dir=self.output_dir,
-                        skip_start_seconds=brng_bars_end,
                         qctools_violations=violations,
                         analysis_periods=analysis_periods,
                         upstream_context=upstream_context,

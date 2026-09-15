@@ -26,12 +26,12 @@ inputs) but **not** from the CLI — edit the saved config or use the GUI.
 
 Two gotchas:
 
-- The shipped `config/checks_config.json` still carries the **old** key names
-  (`signalstats_duration`, `signalstats_periods`). `ConfigManager._migrate_config_data()`
-  (`utils/config_manager.py:217-225`) renames them on load, so the dataclass defaults and the JSON
-  agree; new code must use the `analysis_period_*` names.
-- `signalstats_start_time` (also in the JSON) is **vestigial**. The content start is derived from
-  the color-bars end time at call time (`content_start_after_bars()`), not from this field.
+- Older configs carry the **old** key names (`signalstats_duration`, `signalstats_periods`).
+  `ConfigManager._migrate_config_data()` renames them on load (for the checks config and for saved
+  checks profiles); the shipped `config/checks_config.json` uses the `analysis_period_*` names, and
+  new code must too.
+- The removed `signalstats_start_time` key may still appear in old saved configs; it is ignored on
+  load. The content start is derived from the color-bars end time (`content_start_after_bars()`).
 
 ---
 

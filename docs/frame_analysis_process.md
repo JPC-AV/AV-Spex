@@ -539,9 +539,7 @@ All written to `{video_id}_qc_metadata/`:
 ## 7. Discrepancies and likely issues found while writing this
 
 ### Settings that are not used
-- **`sophisticated_viz_time` / `sophisticated_search_window`** (bundled JSON only, not in
-  `FrameAnalysisConfig`): the border visualization always uses 150 s / 120 s.
-- **`skip_start_seconds`** in BRNG analysis: passed, never read.
+None open.
 
 ### Probable bugs
 None open.

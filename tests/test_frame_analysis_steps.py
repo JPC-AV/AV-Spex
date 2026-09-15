@@ -464,7 +464,6 @@ def test_skip_color_bars_off_keeps_bars_in_signalstats_and_brng(monkeypatch, tmp
     ss = analyzer.signalstats_analyzer.analyze_with_signalstats.call_args.kwargs
     assert ss['color_bars_end_time'] == 0
     assert ss['black_segments'] == []
-    assert brng_calls[0]['skip_start_seconds'] == 0
     # duplicate-frame detection still excludes the bars
     assert dup[0]['color_bars_end_time'] == 52.0
     assert (30.0, 52.0) in dup[0]['black_segments'] and (900.0, 910.0) in dup[0]['black_segments']
