@@ -117,9 +117,8 @@ Runs right after the violation scan, only if violations were found.
 8. Sort by start time. These are the **QCTools candidates**.
 
 ### 2.2 Stage 2 — Final selection (`_find_analysis_periods`, called from signalstats)
-1. **Effective start** = `max(content_start, bars_end) + 10`. On the first signalstats pass,
-   `content_start` is `bars_end + 10` (or 10 with no bars), so periods may start no earlier than
-   **bars end + 20 s** (or 20 s).
+1. **Effective start** = head bars end + **10 s** (`BARS_SAFETY_MARGIN_SECONDS`), or 10 s with no
+   bars — the same on every pass (first signalstats pass, refinement re-runs, BRNG fallback).
 2. If duration is unknown **and** there are no QCTools candidates → no periods (signalstats reports
    "could not run").
 3. Choose a placement strategy, first that applies:
@@ -274,7 +273,7 @@ Each iteration, up to `max_border_retries` (3), while BRNG still says adjustment
    becomes `sophisticated_refined`.
 2. Save `{video_id}_border_detection_refined_iter{N}.jpg`.
 3. If signalstats is enabled, re-run it with the new active area (period selection runs again from
-   the QCTools candidates; effective start is now bars end + 10). The stage-3 period refinement
+   the QCTools candidates; effective start bars end + 10 s as before). The stage-3 period refinement
    (section 2.5) is **not** re-applied.
 4. Re-run BRNG on the new active area and periods.
 5. Record the iteration: area change, BRNG frame count before/after, edge violation %, and whether
@@ -541,8 +540,6 @@ All written to `{video_id}_qc_metadata/`:
   end time is passed in.
 
 ### Probable bugs
-- **Effective start differs between passes**: bars end + 20 s on the first signalstats pass, bars
-  end + 10 s on refinement re-runs and in BRNG fallback validation.
 - The active-area ffprobe pass uses `-of csv=p=0`, which the project otherwise avoids because
   side data can add a trailing separator. Parsing splits on the last comma, so a trailing
   separator would make every line unparseable. Unverified whether frame side data triggers it here.
@@ -554,6 +551,5 @@ All written to `{video_id}_qc_metadata/`:
 - **Help / report — "Period selection priority"**: lists QCTools clusters → border hints → even
   spacing, which matches the code, but omits that border hints only exist in sophisticated mode and
   need at least `count` usable hints.
-- **Help window — Analysis Periods**: "bars plus a 10-second margin" — the first pass uses 20 s.
 - **GUI docs — Skip Color Bars**: says bars "detected by qct-parse"; it's the qct-parse + CLAMS
   consensus.

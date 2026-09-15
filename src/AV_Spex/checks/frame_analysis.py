@@ -851,6 +851,18 @@ DURATION_UNKNOWN_REASON = (
     "supply one"
 )
 
+# Analysis periods start no earlier than this many seconds after the head color
+# bars end (or after the start of the file when there are no bars). Every
+# period-placement path adds it exactly once — the first signalstats pass used
+# to add it twice (20s) while refinement re-runs and BRNG fallbacks added it
+# once (10s).
+BARS_SAFETY_MARGIN_SECONDS = 10
+
+
+def content_start_after_bars(color_bars_end_time) -> float:
+    """Earliest time an analysis period may start, given the head bars end (or None)."""
+    return (color_bars_end_time or 0) + BARS_SAFETY_MARGIN_SECONDS
+
 
 def _positive_finite(value) -> Optional[float]:
     """Return `value` as a float when it is a real positive number, else None.
@@ -3833,8 +3845,10 @@ class IntegratedSignalstatsAnalyzer:
         or replaces any that overlap significantly with all-black content.
         """
         
-        # Start after color bars with a safety margin
-        effective_start = max(content_start, color_bars_end or 0) + 10
+        # Start after color bars with a safety margin. content_start is an
+        # optional extra floor (no current caller sets one); the margin is
+        # applied once here, so callers must not add it themselves.
+        effective_start = max(content_start or 0, content_start_after_bars(color_bars_end))
         
         logger.debug(f"  Content starts at {effective_start:.1f}s (after color bars at {(color_bars_end or 0):.1f}s)\n")
 
@@ -5072,7 +5086,7 @@ class EnhancedFrameAnalysis:
             logger.info("Running signalstats analysis on active picture area to identify key analysis periods...")
             signalstats_results = self.signalstats_analyzer.analyze_with_signalstats(
                 border_data=border_results,
-                content_start_time=color_bars_end_time + 10 if color_bars_end_time else 10,
+                content_start_time=0,
                 color_bars_end_time=color_bars_end_time,
                 analysis_duration=frame_config.analysis_period_duration,
                 num_periods=frame_config.analysis_period_count,
@@ -5170,7 +5184,7 @@ class EnhancedFrameAnalysis:
                     logger.info(f"Creating evenly distributed analysis periods (no QCTools violations found)\n")
                     video_duration = self._get_video_duration()
                     if video_duration:
-                        content_start = color_bars_end_time + 10  # Start 10s after color bars
+                        content_start = content_start_after_bars(color_bars_end_time)
                         content_duration = video_duration - content_start - 10  # Leave 10s at end
                         if content_duration > 0:
                             period_duration = frame_config.analysis_period_duration
@@ -5199,7 +5213,7 @@ class EnhancedFrameAnalysis:
                 if avoid_segments and analysis_periods:
                     analysis_periods = self.signalstats_analyzer._validate_periods_against_black_segments(
                         analysis_periods, avoid_segments,
-                        effective_start=(color_bars_end_time or 0) + 10,
+                        effective_start=content_start_after_bars(color_bars_end_time),
                         period_duration=frame_config.analysis_period_duration
                     )
             
@@ -5948,7 +5962,7 @@ class EnhancedFrameAnalysis:
         if black_segments and replacements_made > 0:
             refined = self.signalstats_analyzer._validate_periods_against_black_segments(
                 refined, black_segments,
-                effective_start=(color_bars_end_time or 0) + 10,
+                effective_start=content_start_after_bars(color_bars_end_time),
                 period_duration=period_duration
             )
         

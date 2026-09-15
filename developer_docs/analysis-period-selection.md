@@ -31,8 +31,7 @@ Two gotchas:
   (`utils/config_manager.py:217-225`) renames them on load, so the dataclass defaults and the JSON
   agree; new code must use the `analysis_period_*` names.
 - `signalstats_start_time` (also in the JSON) is **vestigial**. The content start is derived from
-  the color-bars end time at call time (`analyze()` passes
-  `content_start_time = color_bars_end_time + 10`), not from this field.
+  the color-bars end time at call time (`content_start_after_bars()`), not from this field.
 
 ---
 
@@ -109,8 +108,10 @@ they still have to survive stage 2.
 `SignalstatsAnalyzer._find_analysis_periods()` (`frame_analysis.py:3291-3365`). Called from
 `analyze_with_signalstats()`; this is where the periods that actually get analyzed are fixed.
 
-`effective_start = max(content_start, color_bars_end or 0) + 10` — the 10s is safety margin past
-the bars.
+`effective_start = max(content_start, content_start_after_bars(color_bars_end))` — head bars end
+plus `BARS_SAFETY_MARGIN_SECONDS` (10s). The margin is added once, here; callers pass
+`content_start_time=0` (the first signalstats pass used to pre-add it, giving 20s). The BRNG
+fallback and post-refinement validation use `content_start_after_bars()` directly.
 
 Three prioritized sources:
 

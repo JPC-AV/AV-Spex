@@ -2046,3 +2046,31 @@ def test_period_refinement_keeps_periods_without_a_comparison():
         period_duration=60, color_bars_end_time=0)
 
     assert refined == current
+
+
+# ---------------------------------------------------------------------------
+# Bars safety margin is applied once, the same on every pass
+#
+# The first signalstats pass passed content_start_time = bars_end + 10 and
+# _find_analysis_periods added another 10 (bars + 20s); refinement re-runs and
+# BRNG fallbacks used bars + 10s.
+# ---------------------------------------------------------------------------
+
+def _period_finder(duration=600.0):
+    analyzer = fa.IntegratedSignalstatsAnalyzer.__new__(fa.IntegratedSignalstatsAnalyzer)
+    analyzer.duration = duration
+    analyzer.last_resort_period_note = None
+    return analyzer
+
+
+@pytest.mark.parametrize("bars_end, expected_first_start", [(52.0, 62.0), (None, 10.0), (0, 10.0)])
+def test_even_periods_start_one_margin_after_bars(bars_end, expected_first_start):
+    periods = _period_finder()._find_analysis_periods(
+        0, bars_end, 60, 3, None, qctools_periods=None, black_segments=[])
+    assert periods[0][0] == pytest.approx(expected_first_start)
+
+
+def test_margin_helper_matches_constant():
+    assert fa.BARS_SAFETY_MARGIN_SECONDS == 10
+    assert fa.content_start_after_bars(52.0) == 62.0
+    assert fa.content_start_after_bars(None) == 10.0

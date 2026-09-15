@@ -412,3 +412,10 @@ def test_find_analysis_periods_accepts_no_bars():
                                               qctools_periods=None, black_segments=[])
 
     assert len(periods) == 3
+
+
+def test_first_signalstats_pass_does_not_pre_add_the_bars_margin(monkeypatch, tmp_path):
+    """The margin is added once, inside period selection; analyze() must not add it too."""
+    results, brng_calls, analyzer = _run_without_bars(monkeypatch, tmp_path, enable_signalstats=True)
+    call = analyzer.signalstats_analyzer.analyze_with_signalstats.call_args
+    assert call.kwargs['content_start_time'] == 0
