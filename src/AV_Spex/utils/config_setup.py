@@ -316,6 +316,14 @@ def is_mkv_extension(ext: str) -> bool:
     """True if the given extension string refers to a Matroska (.mkv) container."""
     return ext.lower().lstrip('.') == "mkv"
 
+
+# Settings that only work on Matroska input, forced off (and grayed in the GUI)
+# when a non-MKV extension is configured. Stream fixity uses mkvextract/
+# mkvpropedit; mediatrace reads Matroska SimpleTags; mkvalidator validates
+# Matroska conformance.
+MKV_ONLY_FIXITY_FIELDS = ("embed_stream_fixity", "validate_stream_fixity", "overwrite_stream_fixity")
+MKV_ONLY_TOOLS = ("mediatrace", "mkvalidator")
+
 # Output configuration
 @dataclass
 class OutputsConfig:

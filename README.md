@@ -402,7 +402,7 @@ av-spex [path/to/directory]
 - Six `--enable-*` sub-step toggles plus `--frame-borders`, `--frame-border-pixels`, and `--frame-no-colorbar-skip` — see [Frame Analysis CLI Flags](#frame-analysis-cli-flags) above
 
 **Input settings:**
-- `--video-file-extension {mkv,mov,mp4,avi,mxf}` — Which container to look for in the input directory (default: `mkv`). A non-MKV selection automatically turns off embedded stream fixity and the mediatrace custom-tag check, and skips the ffprobe signal flow (`ENCODER_SETTINGS`) check, since those only work on Matroska.
+- `--video-file-extension {mkv,mov,mp4,avi,mxf}` — Which container to look for in the input directory (default: `mkv`). A non-MKV selection automatically turns off embedded stream fixity, the mediatrace custom-tag check, and mkvalidator, and skips the ffprobe signal flow (`ENCODER_SETTINGS`) check, since those only work on Matroska.
 
 **Output settings:**
 - `--access-trim-color-bars {on,off}` — Skip head color bars in the access file

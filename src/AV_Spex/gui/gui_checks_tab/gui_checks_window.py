@@ -10,7 +10,8 @@ from PyQt6.QtGui import QPalette
 
 from AV_Spex.gui.gui_theme_manager import ThemeManager, ThemeableMixin
 from AV_Spex.utils.config_setup import (
-    ChecksConfig, SpexConfig, SUPPORTED_VIDEO_EXTENSIONS, is_mkv_extension
+    ChecksConfig, SpexConfig, SUPPORTED_VIDEO_EXTENSIONS, is_mkv_extension,
+    MKV_ONLY_FIXITY_FIELDS, MKV_ONLY_TOOLS
 )
 from AV_Spex.utils.config_manager import ConfigManager
 
@@ -66,8 +67,8 @@ class ChecksWindow(QWidget, ThemeableMixin):
         ext_label.setStyleSheet("font-weight: bold;")
         ext_desc = QLabel(
             "Container extension of the input video file. Non-MKV containers can't carry "
-            "embedded stream fixity, custom Matroska tags (mediatrace), or signal flow, "
-            "so those options are disabled automatically."
+            "embedded stream fixity, custom Matroska tags (mediatrace), Matroska validation "
+            "(mkvalidator), or signal flow, so those options are disabled automatically."
         )
         ext_desc.setIndent(20)
         ext_desc.setStyleSheet("color: gray; font-size: 10px;")
@@ -801,8 +802,8 @@ class ChecksWindow(QWidget, ThemeableMixin):
     def _update_mkv_dependent_widgets(self, is_mkv):
         """Enable/disable the MKV-only features to match the selected extension.
 
-        Stream fixity (mkvextract/mkvpropedit) and the mediatrace custom Matroska
-        tag check only work on Matroska containers, and signal flow is embedded as
+        Stream fixity (mkvextract/mkvpropedit), the mediatrace custom Matroska
+        tag check and mkvalidator only work on Matroska containers, and signal flow is embedded as
         an MKV tag — so gray them out for non-MKV input. Also grays the signal-flow
         card on the Spex tab when a MainWindow reference is available.
         """
@@ -810,10 +811,11 @@ class ChecksWindow(QWidget, ThemeableMixin):
         self.overwrite_stream_cb.setEnabled(is_mkv)
         self.validate_stream_cb.setEnabled(is_mkv)
         self.stream_hash_algorithm_combo.setEnabled(is_mkv)
-        mediatrace_widgets = self.tool_widgets.get('mediatrace')
-        if mediatrace_widgets:
-            mediatrace_widgets['check'].setEnabled(is_mkv)
-            mediatrace_widgets['run'].setEnabled(is_mkv)
+        for tool_name in MKV_ONLY_TOOLS:
+            tool_widgets = self.tool_widgets.get(tool_name)
+            if tool_widgets:
+                tool_widgets['check'].setEnabled(is_mkv)
+                tool_widgets['run'].setEnabled(is_mkv)
 
         # Cross-tab: gray the signal-flow card on the Spex tab if it exists.
         spex_tab = getattr(self.main_window, 'spex_tab', None)
@@ -824,7 +826,7 @@ class ChecksWindow(QWidget, ThemeableMixin):
         """Persist the selected extension and auto-disable MKV-only features.
 
         Mirrors the CLI guardrail in av_spex_the_file.py: for non-MKV input we
-        force stream fixity + mediatrace off. The ffprobe signal-flow
+        force stream fixity, mediatrace and mkvalidator off. The ffprobe signal-flow
         (ENCODER_SETTINGS) check skips non-MKV input by extension, so no spex
         config mutation is needed here.
         """
@@ -844,20 +846,20 @@ class ChecksWindow(QWidget, ThemeableMixin):
             cb.blockSignals(True)
             cb.setChecked(False)
             cb.blockSignals(False)
-        mediatrace_widgets = self.tool_widgets.get('mediatrace')
-        if mediatrace_widgets:
-            for cb in (mediatrace_widgets['check'], mediatrace_widgets['run']):
-                cb.blockSignals(True)
-                cb.setChecked(False)
-                cb.blockSignals(False)
+        for tool_name in MKV_ONLY_TOOLS:
+            tool_widgets = self.tool_widgets.get(tool_name)
+            if tool_widgets:
+                for cb in (tool_widgets['check'], tool_widgets['run']):
+                    cb.blockSignals(True)
+                    cb.setChecked(False)
+                    cb.blockSignals(False)
 
         config_mgr.update_config('checks', {
-            'fixity': {
-                'embed_stream_fixity': False,
-                'validate_stream_fixity': False,
-                'overwrite_stream_fixity': False,
+            'fixity': {field: False for field in MKV_ONLY_FIXITY_FIELDS},
+            'tools': {
+                tool_name: {'run_tool': False, 'check_tool': False}
+                for tool_name in MKV_ONLY_TOOLS
             },
-            'tools': {'mediatrace': {'run_tool': False, 'check_tool': False}},
         })
         config_mgr.save_config('checks', is_last_used=True)
 

@@ -926,3 +926,35 @@ def test_checks_profile_dialog_round_trips_every_setting(qapp, silent_dialogs):
     saved = dialog.get_profile_from_form()
 
     assert asdict(saved) == asdict(original)
+
+
+# ---------------------------------------------------------------------------
+# Checks tab: MKV-only settings are grayed and forced off for non-MKV input
+# ---------------------------------------------------------------------------
+
+def test_checks_tab_non_mkv_extension_grays_and_forces_off_mkvalidator(qapp, silent_dialogs, monkeypatch):
+    from AV_Spex.gui.gui_checks_tab import gui_checks_window
+    from AV_Spex.gui.gui_checks_tab.gui_checks_window import ChecksWindow
+
+    updates = []
+    monkeypatch.setattr(gui_checks_window.config_mgr, "update_config",
+                        lambda name, data: updates.append(data))
+    monkeypatch.setattr(gui_checks_window.config_mgr, "save_config", lambda *a, **kw: None)
+
+    window = ChecksWindow()
+    mkv = window.tool_widgets['mkvalidator']
+    mkv['run'].setChecked(True)
+    mkv['check'].setChecked(True)
+    updates.clear()
+
+    window.on_video_extension_changed('mov')
+
+    for key in ('run', 'check'):
+        assert not mkv[key].isEnabled()
+        assert not mkv[key].isChecked()
+    tools_update = next(u['tools'] for u in updates if 'tools' in u)
+    assert tools_update['mkvalidator'] == {'run_tool': False, 'check_tool': False}
+    assert tools_update['mediatrace'] == {'run_tool': False, 'check_tool': False}
+
+    window.on_video_extension_changed('mkv')
+    assert mkv['run'].isEnabled() and mkv['check'].isEnabled()

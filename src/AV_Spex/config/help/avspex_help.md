@@ -152,7 +152,7 @@ The Checks tab controls which tools and processing steps are run. It includes:
 
   **Manage Profiles** opens a dialog listing your saved checks profiles, with buttons to create, edit, delete, and apply them. **Save Current as Profile** stores whatever the checkboxes currently say as a new named profile of your own.
 - **Checks Options**: The individual settings, grouped by what they affect. Every checkbox carries its description inline, so nothing is hidden behind a tooltip:
-  - **Input** — **Video File Extension**, the container AV Spex looks for in each input directory. Choosing a non-MKV container automatically disables the options that only work on Matroska: embedded stream fixity, the mediatrace custom-tag check, and the signal flow check
+  - **Input** — **Video File Extension**, the container AV Spex looks for in each input directory. Choosing a non-MKV container automatically disables the options that only work on Matroska: embedded stream fixity, the mediatrace custom-tag check, mkvalidator, and the signal flow check
   - **Validation** — **Validate Filename**, checking the input filename against the active Filename profile
   - **Outputs** — the access copy with its sub-options, and the HTML report. Sub-options that depend on another setting say so on a *Requires:* line and stay grayed out until that setting is on (the QCTools file extension lives on the Complex tab, with the rest of the QCTools settings)
   - **Fixity** — the whole-file and embedded stream fixity steps, each with its own hash algorithm dropdown (`md5` or `sha256`)
@@ -657,7 +657,7 @@ av-spex [path/to/directory]
 - `--frame-no-colorbar-skip` — Analyze the detected color bars instead of skipping them
 
 **Input settings:**
-- `--video-file-extension {mkv,mov,mp4,avi,mxf}` — Which container to look for in the input directory (default: `mkv`). A non-MKV selection automatically turns off embedded stream fixity and the mediatrace custom-tag check, and skips the ffprobe signal flow (`ENCODER_SETTINGS`) check, since those only work on Matroska.
+- `--video-file-extension {mkv,mov,mp4,avi,mxf}` — Which container to look for in the input directory (default: `mkv`). A non-MKV selection automatically turns off embedded stream fixity, the mediatrace custom-tag check, and mkvalidator, and skips the ffprobe signal flow (`ENCODER_SETTINGS`) check, since those only work on Matroska.
 
 **Output settings:**
 - `--access-trim-color-bars {on,off}` — Skip head color bars in the access file

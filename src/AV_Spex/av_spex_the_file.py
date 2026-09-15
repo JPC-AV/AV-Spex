@@ -23,7 +23,7 @@ from .processing.avspex_processor import AVSpexProcessor
 from .utils import dir_setup
 from .utils import config_edit
 from .utils.log_setup import logger
-from .utils.config_setup import SpexConfig, FilenameConfig, ChecksConfig, SUPPORTED_VIDEO_EXTENSIONS, is_mkv_extension
+from .utils.config_setup import SpexConfig, FilenameConfig, ChecksConfig, SUPPORTED_VIDEO_EXTENSIONS
 from .utils import exiftool_import, mediainfo_import, ffprobe_import
 from .utils.config_manager import ConfigManager
 from .utils.config_io import ConfigIO
@@ -687,33 +687,13 @@ def run_cli_mode(args):
         config_mgr.update_config('checks', {'video_file_extension': args.video_file_extension})
         config_mgr.save_config('checks', is_last_used=True)
 
-    resolved_ext = config_mgr.get_config('checks', ChecksConfig).video_file_extension
-    if not is_mkv_extension(resolved_ext):
-        current = config_mgr.get_config('checks', ChecksConfig)
-
-        # Stream fixity uses mkvextract/mkvpropedit; mediatrace reads Matroska
-        # SimpleTags. Neither works on non-MKV containers.
-        fixity_off = {}
-        for f in ('embed_stream_fixity', 'validate_stream_fixity', 'overwrite_stream_fixity'):
-            if getattr(current.fixity, f):
-                fixity_off[f] = False
-        tools_off = {}
-        if current.tools.mediatrace.run_tool or current.tools.mediatrace.check_tool:
-            tools_off['mediatrace'] = {'run_tool': False, 'check_tool': False}
-
-        if fixity_off or tools_off:
-            checks_updates = {}
-            if fixity_off:
-                checks_updates['fixity'] = fixity_off
-            if tools_off:
-                checks_updates['tools'] = tools_off
-            config_mgr.update_config('checks', checks_updates)
-            config_mgr.save_config('checks', is_last_used=True)
-            logger.warning(
-                f"Input extension '{resolved_ext}' is not MKV; embedded stream fixity and the "
-                "mediatrace custom-tag check only work on Matroska. Forcing them off. "
-                "The ffprobe signal-flow (ENCODER_SETTINGS) check is skipped for non-MKV input."
-            )
+    # Stream fixity, mediatrace and mkvalidator only work on Matroska; force
+    # them off for other containers (same guardrail as applying a profile)
+    if config_edit.enforce_extension_compatibility():
+        config_mgr.save_config('checks', is_last_used=True)
+        logger.warning(
+            "The ffprobe signal-flow (ENCODER_SETTINGS) check is also skipped for non-MKV input."
+        )
 
     # Print requested config profile(s) last, so the output reflects every
     # config change applied above (profiles, tool toggles, frame-analysis,

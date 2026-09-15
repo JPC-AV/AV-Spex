@@ -10,7 +10,8 @@ from AV_Spex.utils.config_setup import (
     FilenameSection, FilenameConfig, SignalflowConfig, SignalflowProfile,
     ChecksProfile, ChecksProfilesConfig,
     ExiftoolConfig, ExiftoolProfile, MediainfoConfig, MediainfoProfile,
-    FfprobeConfig, FfprobeProfile, is_mkv_extension, is_protected_profile
+    FfprobeConfig, FfprobeProfile, is_mkv_extension, is_protected_profile,
+    MKV_ONLY_FIXITY_FIELDS, MKV_ONLY_TOOLS
 )
 from AV_Spex.utils.config_manager import ConfigManager
 
@@ -577,10 +578,12 @@ def enforce_extension_compatibility():
     """Force off the checks that only work on Matroska when the configured
     input extension is non-MKV.
 
-    Embedded stream fixity uses mkvextract/mkvpropedit and the mediatrace
-    custom-tag check reads Matroska SimpleTags; neither works on other
-    containers. This mirrors the CLI guardrail (av_spex_the_file) and the GUI
-    graying (gui_checks_window), and is re-applied here because applying a
+    Embedded stream fixity uses mkvextract/mkvpropedit, the mediatrace
+    custom-tag check reads Matroska SimpleTags, and mkvalidator validates
+    Matroska conformance; none of them work on other containers (the lists
+    live in config_setup.MKV_ONLY_FIXITY_FIELDS / MKV_ONLY_TOOLS). Called by
+    the CLI guardrail (av_spex_the_file) and mirrored by the GUI graying
+    (gui_checks_window). Also re-applied after applying a profile, because a
     profile replaces the fixity/tools sections wholesale and can re-enable
     these MKV-only options on a non-MKV configuration.
 
@@ -591,14 +594,16 @@ def enforce_extension_compatibility():
     if is_mkv_extension(ext):
         return False
 
-    fixity_off = {}
-    for field in ('embed_stream_fixity', 'validate_stream_fixity', 'overwrite_stream_fixity'):
-        if getattr(checks_config.fixity, field):
-            fixity_off[field] = False
+    fixity_off = {
+        field: False for field in MKV_ONLY_FIXITY_FIELDS
+        if getattr(checks_config.fixity, field)
+    }
 
     tools_off = {}
-    if checks_config.tools.mediatrace.run_tool or checks_config.tools.mediatrace.check_tool:
-        tools_off['mediatrace'] = {'run_tool': False, 'check_tool': False}
+    for tool_name in MKV_ONLY_TOOLS:
+        tool = getattr(checks_config.tools, tool_name)
+        if tool.run_tool or tool.check_tool:
+            tools_off[tool_name] = {'run_tool': False, 'check_tool': False}
 
     if not (fixity_off or tools_off):
         return False
@@ -610,8 +615,9 @@ def enforce_extension_compatibility():
         updates['tools'] = tools_off
     config_mgr.update_config('checks', updates)
     logger.warning(
-        f"Input extension '{ext}' is not MKV; embedded stream fixity and the "
-        "mediatrace custom-tag check only work on Matroska. Forcing them off."
+        f"Input extension '{ext}' is not MKV; embedded stream fixity, the "
+        "mediatrace custom-tag check, and mkvalidator only work on Matroska. "
+        "Forcing them off."
     )
     return True
 

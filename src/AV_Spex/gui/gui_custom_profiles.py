@@ -140,7 +140,8 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
         info_layout.addLayout(ext_layout)
         ext_desc = QLabel(
             "Container extension of the input video file. Non-MKV containers can't carry "
-            "embedded stream fixity, custom Matroska tags (mediatrace), or signal flow.")
+            "embedded stream fixity, custom Matroska tags (mediatrace), Matroska validation (mkvalidator), "
+            "or signal flow; those are turned off when the profile is applied.")
         ext_desc.setIndent(20)
         ext_desc.setWordWrap(True)
         info_layout.addWidget(ext_desc)
