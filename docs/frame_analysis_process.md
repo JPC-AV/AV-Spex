@@ -198,12 +198,14 @@ candidates.
 Produces the **active area** `(x, y, width, height)` used to crop signalstats and BRNG.
 
 ### 3.1 Simple mode
-1. Crop **25 px** from every side.
-2. If that leaves no picture (tiny frame), use the whole frame.
+1. Crop `simple_border_pixels` (**25 px** default; `--frame-border-pixels`) from every side.
+   A negative value is treated as 0.
+2. If that leaves no picture (crop wider than the frame), use the whole frame.
 3. No quality hints, no head-switching check.
 
 ### 3.2 Sophisticated mode
-1. If OpenCV can't open the file → fall back to simple mode.
+1. If OpenCV can't open the file → fall back to simple mode (using `simple_border_pixels`, as do
+   the other fallbacks below).
 2. **Choose frames to measure**:
    1. Read up to the first 30 of the top-100 QCTools violation frames.
    2. If fewer than 30 suitable frames, also read 50 frames evenly spaced across the whole file
@@ -495,8 +497,6 @@ All written to `{video_id}_qc_metadata/`:
 ## 7. Discrepancies and likely issues found while writing this
 
 ### Settings that are not used
-- **`simple_border_pixels` / `--frame-border-pixels`**: simple mode always crops 25 px;
-  `_detect_simple_borders()` is called without the setting.
 - **`sophisticated_threshold`, `sophisticated_edge_sample_width`, `sophisticated_sample_frames`,
   `sophisticated_padding`** (and `sophisticated_viz_time` / `sophisticated_search_window` in the
   JSON): the values 10 / 100 / 30 / 5 / 150 / 120 are hardcoded. The GUI exposes some of these.

@@ -909,6 +909,54 @@ def test_simple_borders_stay_positive_when_opencv_is_broken(monkeypatch):
     assert w > 0 and h > 0, "a non-positive crop reaches ffmpeg as crop=-1:-1:0:0"
 
 
+def _bare_border_detector(width=720, height=486):
+    det = fa.SophisticatedBorderDetector.__new__(fa.SophisticatedBorderDetector)
+    det.video_path = "/v/in.mkv"
+    det.signals = None
+    det.check_cancelled = lambda: False
+    det.width, det.height = width, height
+    det.fps, det.total_frames, det.duration = 30000 / 1001, 1000, 33.4
+    det.opencv_usable = True
+    return det
+
+
+def test_simple_mode_uses_configured_border_pixels():
+    """simple_border_pixels / --frame-border-pixels used to be ignored (always 25)."""
+    det = _bare_border_detector()
+
+    result = det.detect_borders_with_quality_assessment(
+        method='simple', simple_border_pixels=10)
+
+    assert result.active_area == (10, 10, 700, 466)
+    assert result.detection_method == 'simple'
+
+
+def test_sophisticated_fallback_uses_configured_border_pixels(monkeypatch):
+    """When sophisticated detection can't decode frames it falls back to simple
+    mode, which should honour the configured crop as well."""
+    monkeypatch.setattr(fa.cv2, "VideoCapture", lambda *a, **kw: _DeadCapture())
+    det = _bare_border_detector()
+
+    result = det.detect_borders_with_quality_assessment(
+        method='sophisticated', simple_border_pixels=40)
+
+    assert result.active_area == (40, 40, 640, 406)
+
+
+@pytest.mark.parametrize("pixels, expected", [
+    (0, (0, 0, 720, 486)),
+    (-5, (0, 0, 720, 486)),       # negative is clamped to no crop
+    (400, (0, 0, 720, 486)),      # crop larger than the frame falls back to full frame
+])
+def test_simple_border_pixels_edge_values(pixels, expected):
+    det = _bare_border_detector()
+
+    result = det.detect_borders_with_quality_assessment(
+        method='simple', simple_border_pixels=pixels)
+
+    assert result.active_area == expected
+
+
 def test_ffprobe_video_properties_derives_frame_count_from_duration(monkeypatch):
     """Matroska omits nb_frames, so it has to come from duration * fps."""
     completed = MagicMock()

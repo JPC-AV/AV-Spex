@@ -1128,21 +1128,41 @@ class SophisticatedBorderDetector:
 
     def detect_borders_with_quality_assessment(self,
                                               violations: List[FrameViolation] = None,
-                                              method: str = 'sophisticated') -> BorderDetectionResult:
+                                              method: str = 'sophisticated',
+                                              simple_border_pixels: int = 25) -> BorderDetectionResult:
         """
         Detect borders using sophisticated quality assessment or simple method.
-        
+
         Args:
             violations: List of frames with known violations for focused detection
             method: 'sophisticated' or 'simple'
+            simple_border_pixels: Crop per edge for simple mode, and for the
+                simple fallback when sophisticated detection cannot run
         """
+        self.simple_border_pixels = simple_border_pixels
         if method == 'simple':
             return self._detect_simple_borders()
         else:
             return self._detect_sophisticated_borders(violations)
-    
-    def _detect_simple_borders(self, border_size: int = 25) -> BorderDetectionResult:
-        """Simple fixed-size border detection"""
+
+    def _detect_simple_borders(self, border_size: int = None) -> BorderDetectionResult:
+        """Simple fixed-size border detection.
+
+        border_size defaults to the simple_border_pixels passed to
+        detect_borders_with_quality_assessment() (25 if never set), so the
+        sophisticated-mode fallbacks honour the configured crop too.
+        """
+        if border_size is None:
+            border_size = getattr(self, 'simple_border_pixels', 25)
+        try:
+            border_size = int(border_size)
+        except (TypeError, ValueError):
+            logger.warning(f"  Invalid simple border size {border_size!r}, using 25px")
+            border_size = 25
+        if border_size < 0:
+            logger.warning(f"  Negative simple border size {border_size}px, using 0px")
+            border_size = 0
+
         active_x = border_size
         active_y = border_size
         active_width = self.width - (2 * border_size)
@@ -4898,7 +4918,8 @@ class EnhancedFrameAnalysis:
             logger.info(f"Detecting borders using {method} method...")
             border_results = self.border_detector.detect_borders_with_quality_assessment(
                 violations=violations,
-                method=method
+                method=method,
+                simple_border_pixels=frame_config.simple_border_pixels
             )
             results['initial_borders'] = asdict(border_results)
 
