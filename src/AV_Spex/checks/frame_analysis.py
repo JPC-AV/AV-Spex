@@ -2133,7 +2133,12 @@ class DifferentialBRNGAnalyzer:
                 
                 self._emit_progress(period_end)
             
-            violations = all_violations
+            # Each period's list is sorted worst-first, but concatenating them
+            # put the first period's frames ahead of worse frames from later
+            # periods. Consumers treat violations[0] / violations[:5] as the
+            # worst frames (refinement improvement check, thumbnail choice,
+            # worst_frames), so rank across all periods.
+            violations = sorted(all_violations, key=lambda v: v.violation_score, reverse=True)
 
             # Every period failing means nothing was examined. Returning an empty
             # violation list here would be reported as "No BRNG violations

@@ -293,8 +293,7 @@ Each iteration, up to `max_border_retries` (3), while BRNG still says adjustment
 6. **Stop early if the round made no meaningful improvement** (`_is_meaningful_improvement`, comparing
    this round's BRNG result with the previous one). A round counts as improved if any of:
    - violation frames fell by more than 20 %;
-   - the first-listed violation frame's violation % fell by more than 20 % (intended as the worst
-     frame, but see section 7: it is the worst frame of the *first analyzed period*);
+   - the worst violation frame's violation % fell by more than 20 %;
    - edge violation % is still above 50 % **and** the borders actually moved (keep trying);
    - edge violation % fell by more than 30 %.
 
@@ -513,15 +512,15 @@ Then:
    - edge violation % > 60 and continuous edge % = 0
    - continuous edge % > 10 on 2+ edges
    - any edge's average linear score > 40
-7. **Summary statistics**: violation frame count, average and max frame BRNG %.
+7. **Summary statistics**: violation frame count, average and max frame BRNG %. The violation frames
+   from all periods are ranked together, worst first (`violations[0]` is the worst frame analyzed).
 8. **Assessment sentence**: average frame BRNG % (labelled "low-level" below 10 %, "minimal" below
    0.1 %); edge share wording at > 70 %, > 40 %, > 0 %; linear blanking noted above 20 %.
 
 ### 5.8 Thumbnails
 1. Clear `brng_thumbnails/` from previous runs.
 2. Order violation frames: those in content-violation periods first, then undiagnosed, then
-   border-violation periods. Within each group frames keep analysis order — period by period, each
-   period's frames sorted by BRNG value — not one global BRNG ranking (section 7).
+   border-violation periods. Within each group, frames are in BRNG order, worst first.
 3. Take the first, then add frames at least **5 s** from every selected frame, up to **5**.
    If still short, fill with the next best regardless of spacing.
 4. For each, build a 4-panel image: Original | BRNG Highlighted / Violations Only (magenta pixels
@@ -552,13 +551,7 @@ All written to `{video_id}_qc_metadata/`:
 None open.
 
 ### Probable bugs
-- **BRNG violations are never ranked across periods.** Each period's violation frames are sorted by
-  BRNG value, then the per-period lists are concatenated (`analyze_with_differential_detection`) and
-  never re-sorted. Everything that treats the list as "worst first" actually gets the first period's
-  frames first:
-  - the refinement loop's "worst frame fell by more than 20 %" check (section 3.5);
-  - the first BRNG thumbnail pick within its priority group (section 5.8);
-  - `worst_frames` (the "top 5 violations") in `processing_mgmt._format_frame_analysis_results`.
+None open.
 
 ### Existing docs that disagree with the code
 None open.

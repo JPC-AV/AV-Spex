@@ -2141,3 +2141,51 @@ def test_active_area_probe_counts_every_frame(monkeypatch):
     assert result['frames_analyzed'] == 3
     assert result['frames_with_violations'] == 2
     assert result['brng_frames'] == [(0.0, 0.209591), (0.033, 0.21153)]   # N/A pts has no timestamp
+
+
+# ---------------------------------------------------------------------------
+# BRNG violations are ranked across periods
+#
+# Each period's frames were sorted worst-first, then the lists were
+# concatenated and never re-sorted, so violations[0] meant "worst frame of the
+# first analyzed period". The refinement improvement check, the first
+# thumbnail pick and worst_frames all read it as the overall worst.
+# ---------------------------------------------------------------------------
+
+def _violation(ts, pct):
+    return fa.FrameViolation(frame_num=int(ts * 30), timestamp=ts, brng_value=pct,
+                             violation_score=pct / 100, violation_pixels=int(pct * 10),
+                             violation_percentage=pct, diagnostics=[])
+
+
+def test_brng_violations_are_ranked_across_periods(tmp_path):
+    per_period = iter([
+        [_violation(110.0, 2.0), _violation(130.0, 1.0)],     # period 1: mild
+        [_violation(250.0, 9.0), _violation(270.0, 0.5)],     # period 2: holds the worst frame
+    ])
+    stats = {"qctools_frames_targeted": 0, "frames_mapped_to_period": 0,
+             "total_samples_analyzed": 2, "frames_checked": 2, "violations_found": 2}
+
+    analyzer = _stub_brng_analyzer()
+    analyzer._analyze_differential_violations = lambda *a, **kw: (next(per_period), stats)
+    picked = []
+    analyzer._create_diagnostic_thumbnails = lambda selected, *a, **kw: picked.extend(selected) or []
+
+    result = analyzer.analyze_with_differential_detection(
+        output_dir=tmp_path, analysis_periods=[(100.0, 60), (240.0, 60)])
+
+    assert [v.violation_percentage for v in result.violations] == [9.0, 2.0, 1.0, 0.5]
+    assert picked[0].timestamp == 250.0      # first thumbnail is the overall worst frame
+
+
+def test_improvement_check_compares_overall_worst_frames():
+    """Worst frame dropped 9% -> 2% (in a later period): that is an improvement."""
+    def result(*pcts):
+        return fa.BRNGAnalysisResult(
+            violations=sorted((_violation(float(i), p) for i, p in enumerate(pcts)),
+                              key=lambda v: v.violation_score, reverse=True),
+            aggregate_patterns={'edge_violation_percentage': 10.0}, actionable_report={},
+            thumbnails=[], requires_border_adjustment=True)
+
+    obj = fa.EnhancedFrameAnalysis.__new__(fa.EnhancedFrameAnalysis)
+    assert obj._is_meaningful_improvement(result(3.0, 9.0), result(2.0, 1.9)) is True
