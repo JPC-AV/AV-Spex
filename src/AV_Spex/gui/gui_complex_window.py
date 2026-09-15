@@ -315,26 +315,28 @@ class ComplexWindow(QWidget, ThemeableMixin):
         self._add_option(soph_layout, self._param_row(
             "Brightness Threshold:", self.soph_threshold_input),
             self._desc_label(
-                "0 = pure black, 255 = pure white", extra_indent=self.INDENT))
+                "Brightness an edge row or column must exceed to count as picture "
+                "(0 = pure black, 255 = pure white)", extra_indent=self.INDENT))
 
         self.soph_edge_width_input = QLineEdit("100")
         self._add_option(soph_layout, self._param_row(
             "Edge Sample Width:", self.soph_edge_width_input),
             self._desc_label(
-                "Pixels to examine from each edge", extra_indent=self.INDENT))
+                "Pixels to search in from the left and right edges",
+                extra_indent=self.INDENT))
 
         self.soph_sample_frames_input = QLineEdit("30")
         self._add_option(soph_layout, self._param_row(
             "Sample Frames:", self.soph_sample_frames_input),
             self._desc_label(
-                "Number of frames to sample across the video",
+                "Number of well-exposed frames to measure borders on (minimum 5)",
                 extra_indent=self.INDENT))
 
         self.soph_padding_input = QLineEdit("5")
         self._add_option(soph_layout, self._param_row(
             "Padding:", self.soph_padding_input),
             self._desc_label(
-                "Extra margin around detected borders",
+                "Extra pixels trimmed from each side of the detected picture area",
                 extra_indent=self.INDENT))
 
         self.auto_retry_borders_cb = self._make_checkbox(

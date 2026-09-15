@@ -206,20 +206,31 @@ Produces the **active area** `(x, y, width, height)` used to crop signalstats an
 ### 3.2 Sophisticated mode
 1. If OpenCV can't open the file → fall back to simple mode (using `simple_border_pixels`, as do
    the other fallbacks below).
+   Settings (Complex tab or JSON; values are checked here — a non-number uses the default, a value
+   below the minimum is raised to it, each with a warning):
+
+   | Setting | Default | Minimum | Controls |
+   |---|---|---|---|
+   | `sophisticated_sample_frames` (N) | 30 | 5 | frames measured |
+   | `sophisticated_threshold` | 10 | 0 | brightness that counts as picture |
+   | `sophisticated_edge_sample_width` | 100 | 1 | left/right search depth |
+   | `sophisticated_padding` | 5 | 0 | safety margin per side |
+
 2. **Choose frames to measure**:
-   1. Read up to the first 30 of the top-100 QCTools violation frames.
-   2. If fewer than 30 suitable frames, also read 50 frames evenly spaced across the whole file
-      (including bars and black).
+   1. Read up to the first N of the top-100 QCTools violation frames.
+   2. If fewer than N suitable frames, also read `max(50, N × 5/3)` frames evenly spaced across the
+      whole file (including bars and black).
    3. Frame suitability (grayscale, 8-bit): rejected if mean < 15 (too dark), mean > 240 (too
       bright), or standard deviation < 15 (low contrast).
    4. Quality score = average of brightness score `1 − |mean − 120| / 120` and contrast score
       `min(std / 50, 1)`.
-   5. Keep the 30 highest-scoring frames.
+   5. Keep the N highest-scoring frames.
 3. Fewer than **5** suitable frames → fall back to simple mode.
-4. **Measure borders on each frame** (grayscale, threshold = mean brightness > 10):
-   - left: first column (scanning in from the left, up to 100 columns) whose mean > 10;
-   - right: same from the right edge, up to 100 columns;
-   - top: first row (scanning down, up to **20** rows) whose middle-third mean > 10;
+4. **Measure borders on each frame** (grayscale; "picture" = mean brightness > threshold):
+   - left: first column (scanning in from the left, up to edge-width columns) above threshold;
+   - right: same from the right edge;
+   - top: first row (scanning down, up to **20** rows — not affected by edge width) whose
+     middle-third mean is above threshold;
    - bottom: same from the bottom, up to 20 rows.
    - Take the **median** of each side across all frames (0 if never found).
 5. **Head switching** (sampled independently of the frames above):
@@ -233,7 +244,8 @@ Produces the **active area** `(x, y, width, height)` used to crop signalstats an
    columns with mean < 20 and std < 10. If the blanking reaches further in than the measured
    left/right border, move that border to the blanking edge + 2 px.
 7. **Bottom crop** = the larger of the measured bottom border and the average head-switching height.
-8. Active area = frame minus the four borders, then shrunk by a **5 px** safety pad on every side.
+8. Active area = frame minus the four borders, then shrunk by the padding on every side. If that
+   leaves no picture, fall back to simple mode.
 9. Quality hints for period selection = timestamps of the top 10 quality frames.
 
 ### 3.3 Border visualization (both modes)
@@ -497,9 +509,8 @@ All written to `{video_id}_qc_metadata/`:
 ## 7. Discrepancies and likely issues found while writing this
 
 ### Settings that are not used
-- **`sophisticated_threshold`, `sophisticated_edge_sample_width`, `sophisticated_sample_frames`,
-  `sophisticated_padding`** (and `sophisticated_viz_time` / `sophisticated_search_window` in the
-  JSON): the values 10 / 100 / 30 / 5 / 150 / 120 are hardcoded. The GUI exposes some of these.
+- **`sophisticated_viz_time` / `sophisticated_search_window`** (bundled JSON only, not in
+  `FrameAnalysisConfig`): the border visualization always uses 150 s / 120 s.
 - **`brng_duration_limit` / `--frame-brng-duration`**: passed into BRNG analysis as
   `duration_limit` but never read. Analysis length is set only by period count × duration.
 - **`skip_start_seconds`** in BRNG analysis: passed, never read.

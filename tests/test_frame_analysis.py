@@ -30,6 +30,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 
 from AV_Spex.checks import frame_analysis as fa
@@ -941,6 +942,97 @@ def test_sophisticated_fallback_uses_configured_border_pixels(monkeypatch):
         method='sophisticated', simple_border_pixels=40)
 
     assert result.active_area == (40, 40, 640, 406)
+
+
+def _bordered_frame(width=720, height=486, left=30, right=20, top=8, border_level=30):
+    """Striped picture (mean 120, high contrast) inside dim, flat borders.
+
+    border_level 30 sits between the default threshold (10) and the vertical
+    blanking test (mean < 20), so only sophisticated_threshold decides whether
+    the borders read as picture.
+    """
+    frame = np.zeros((height, width, 3), dtype=np.uint8)
+    stripes = np.where((np.arange(width) // 4) % 2 == 0, 60, 180).astype(np.uint8)
+    frame[:, :, :] = stripes[None, :, None]
+    frame[:, :left] = border_level
+    frame[:, width - right:] = border_level
+    frame[:top, :] = border_level
+    return frame
+
+
+class _FrameCapture:
+    """A capture that opens and returns the same frame for every position."""
+
+    def __init__(self, frame):
+        self.frame = frame
+
+    def isOpened(self):
+        return True
+
+    def set(self, prop, value):
+        return True
+
+    def read(self):
+        return True, self.frame.copy()
+
+    def get(self, prop):
+        return 0.0
+
+    def release(self):
+        pass
+
+
+def _sophisticated_area(monkeypatch, **params):
+    frame = _bordered_frame()
+    monkeypatch.setattr(fa.cv2, "VideoCapture", lambda *a, **kw: _FrameCapture(frame))
+    det = _bare_border_detector()
+    result = det.detect_borders_with_quality_assessment(method='sophisticated', **params)
+    return result.active_area, result.detection_method
+
+
+def test_sophisticated_threshold_decides_what_counts_as_border(monkeypatch):
+    # Borders at brightness 30: above threshold 10 they read as picture...
+    area, method = _sophisticated_area(monkeypatch, sophisticated_threshold=10)
+    assert method == 'sophisticated'
+    assert area == (5, 5, 710, 476)
+
+    # ...below threshold 40 they are measured as borders (L30 R20 T8, +5px padding)
+    area, _ = _sophisticated_area(monkeypatch, sophisticated_threshold=40)
+    assert area == (35, 13, 660, 468)
+
+
+def test_sophisticated_edge_sample_width_limits_left_right_search(monkeypatch):
+    # A 10px search never reaches the end of the 30px/20px side borders, so no
+    # left/right border is found; the top border (row scan) is unaffected.
+    area, _ = _sophisticated_area(
+        monkeypatch, sophisticated_threshold=40, sophisticated_edge_sample_width=10)
+    assert area == (5, 13, 710, 468)
+
+
+def test_sophisticated_padding_is_applied(monkeypatch):
+    area, _ = _sophisticated_area(
+        monkeypatch, sophisticated_threshold=40, sophisticated_padding=0)
+    assert area == (30, 8, 670, 478)
+
+
+def test_sophisticated_padding_that_consumes_the_frame_falls_back_to_simple(monkeypatch):
+    area, method = _sophisticated_area(
+        monkeypatch, sophisticated_threshold=40, sophisticated_padding=400,
+        simple_border_pixels=25)
+    assert method == 'simple'
+    assert area == (25, 25, 670, 436)
+
+
+@pytest.mark.parametrize("configured, expected", [(12, 12), (80, 80), (3, 5), (0, 5)])
+def test_sophisticated_sample_frames_sets_quality_frame_count(monkeypatch, configured, expected):
+    frame = _bordered_frame()
+    det = _bare_border_detector()
+    det.sophisticated_sample_frames = fa._config_int(
+        configured, 30, det.MIN_QUALITY_FRAMES, "sophisticated_sample_frames")
+
+    frames = det._select_quality_frames(_FrameCapture(frame), violations=None)
+
+    assert len(frames) == expected
 
 
 @pytest.mark.parametrize("pixels, expected", [

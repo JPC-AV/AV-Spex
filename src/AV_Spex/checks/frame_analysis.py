@@ -1101,9 +1101,39 @@ def _opencv_has_ffmpeg() -> bool:
         return False
 
 
+def _config_int(value, default: int, minimum: int, name: str) -> int:
+    """Coerce a numeric config value to an int no smaller than `minimum`.
+
+    The GUI saves an emptied field as 0 and neither the GUI nor the CLI range-
+    checks these, so the detector does: a non-number falls back to `default`,
+    anything below `minimum` is raised to it, each with a warning.
+    """
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        logger.warning(f"  Invalid {name} {value!r}, using {default}")
+        return default
+    if result < minimum:
+        logger.warning(f"  {name} {result} is below the minimum, using {minimum}")
+        return minimum
+    return result
+
+
 class SophisticatedBorderDetector:
     """Advanced border detection with quality assessment and refinement capabilities"""
-    
+
+    # Defaults match FrameAnalysisConfig; detect_borders_with_quality_assessment()
+    # overwrites them per call with the configured values.
+    simple_border_pixels = 25
+    sophisticated_threshold = 10
+    sophisticated_edge_sample_width = 100
+    sophisticated_sample_frames = 30
+    sophisticated_padding = 5
+
+    # Sophisticated detection needs this many usable frames before it trusts
+    # its measurement over the simple fallback.
+    MIN_QUALITY_FRAMES = 5
+
     def __init__(self, video_path: str, signals=None, check_cancelled_fn=None):
         self.video_path = str(video_path)
         self.signals = signals
@@ -1129,7 +1159,11 @@ class SophisticatedBorderDetector:
     def detect_borders_with_quality_assessment(self,
                                               violations: List[FrameViolation] = None,
                                               method: str = 'sophisticated',
-                                              simple_border_pixels: int = 25) -> BorderDetectionResult:
+                                              simple_border_pixels: int = 25,
+                                              sophisticated_threshold: int = 10,
+                                              sophisticated_edge_sample_width: int = 100,
+                                              sophisticated_sample_frames: int = 30,
+                                              sophisticated_padding: int = 5) -> BorderDetectionResult:
         """
         Detect borders using sophisticated quality assessment or simple method.
 
@@ -1138,8 +1172,25 @@ class SophisticatedBorderDetector:
             method: 'sophisticated' or 'simple'
             simple_border_pixels: Crop per edge for simple mode, and for the
                 simple fallback when sophisticated detection cannot run
+            sophisticated_threshold: Mean grayscale brightness (0-255) a column
+                or row must exceed to count as picture rather than border
+            sophisticated_edge_sample_width: How many columns in from the left
+                and right edges to search for the picture edge
+            sophisticated_sample_frames: How many quality frames to measure
+                borders on (at least MIN_QUALITY_FRAMES)
+            sophisticated_padding: Safety margin, in pixels, taken off every
+                side of the detected active area
         """
         self.simple_border_pixels = simple_border_pixels
+        self.sophisticated_threshold = _config_int(
+            sophisticated_threshold, 10, 0, "sophisticated_threshold")
+        self.sophisticated_edge_sample_width = _config_int(
+            sophisticated_edge_sample_width, 100, 1, "sophisticated_edge_sample_width")
+        self.sophisticated_sample_frames = _config_int(
+            sophisticated_sample_frames, 30, self.MIN_QUALITY_FRAMES,
+            "sophisticated_sample_frames")
+        self.sophisticated_padding = _config_int(
+            sophisticated_padding, 5, 0, "sophisticated_padding")
         if method == 'simple':
             return self._detect_simple_borders()
         else:
@@ -1153,15 +1204,8 @@ class SophisticatedBorderDetector:
         sophisticated-mode fallbacks honour the configured crop too.
         """
         if border_size is None:
-            border_size = getattr(self, 'simple_border_pixels', 25)
-        try:
-            border_size = int(border_size)
-        except (TypeError, ValueError):
-            logger.warning(f"  Invalid simple border size {border_size!r}, using 25px")
-            border_size = 25
-        if border_size < 0:
-            logger.warning(f"  Negative simple border size {border_size}px, using 0px")
-            border_size = 0
+            border_size = self.simple_border_pixels
+        border_size = _config_int(border_size, 25, 0, "simple_border_pixels")
 
         active_x = border_size
         active_y = border_size
@@ -1207,7 +1251,7 @@ class SophisticatedBorderDetector:
             cap.release()
             return self._detect_simple_borders()
 
-        if len(quality_frames) < 5:
+        if len(quality_frames) < self.MIN_QUALITY_FRAMES:
             logger.warning("Insufficient quality frames, falling back to simple detection")
             cap.release()
             self._emit_progress(100)
@@ -1263,12 +1307,19 @@ class SophisticatedBorderDetector:
         logger.debug(f"  Using {len(quality_frames)} quality frames for detection\n")
         
         # Add padding for safety
-        padding = 5
+        padding = self.sophisticated_padding
         active_x += padding
         active_y += padding
         active_width -= 2 * padding
         active_height -= 2 * padding
-        
+
+        if active_width <= 0 or active_height <= 0:
+            logger.warning(
+                f"  Detected borders plus {padding}px padding leave no active picture "
+                f"({active_width}x{active_height}), falling back to simple detection")
+            self._emit_progress(45)
+            return self._detect_simple_borders()
+
         border_regions = self._calculate_border_regions(
             active_x, active_y, active_width, active_height
         )
@@ -1290,10 +1341,11 @@ class SophisticatedBorderDetector:
     def _select_quality_frames(self, cap, violations: List[FrameViolation] = None) -> List[Dict]:
         """Select high-quality frames for border detection"""
         quality_frames = []
-        
+        target_frames = self.sophisticated_sample_frames
+
         # If we have violations, prioritize those frames
         if violations:
-            violation_batch = violations[:30]
+            violation_batch = violations[:target_frames]
             for i, v in enumerate(violation_batch):
                 if self.check_cancelled():
                     break
@@ -1313,8 +1365,11 @@ class SophisticatedBorderDetector:
                     self._emit_progress(1 + int((i + 1) / len(violation_batch) * 7))
         
         # If we need more frames, sample evenly
-        if len(quality_frames) < 30:
-            sample_indices = np.linspace(0, self.total_frames - 1, 50, dtype=int)
+        if len(quality_frames) < target_frames:
+            # Oversample: some evenly spaced frames will be rejected as too
+            # dark, too bright or flat (50 candidates for the default 30)
+            num_candidates = max(50, target_frames * 5 // 3)
+            sample_indices = np.linspace(0, self.total_frames - 1, num_candidates, dtype=int)
             for j, idx in enumerate(sample_indices):
                 if self.check_cancelled():
                     break
@@ -1335,7 +1390,7 @@ class SophisticatedBorderDetector:
         
         # Sort by quality
         quality_frames.sort(key=lambda x: x['quality'], reverse=True)
-        return quality_frames[:30]
+        return quality_frames[:target_frames]
     
     def _assess_frame_quality(self, frame) -> Dict:
         """Assess frame quality for suitability"""
@@ -1369,8 +1424,9 @@ class SophisticatedBorderDetector:
     def _analyze_borders_from_frames(self, cap, quality_frames: List[Dict]) -> Dict:
         """Analyze borders from quality frames"""
         borders = {'left': [], 'right': [], 'top': [], 'bottom': []}
-        threshold = 10
-        edge_sample_width = 100
+        threshold = self.sophisticated_threshold
+        # Left/right search depth only; top/bottom always search 20 rows
+        edge_sample_width = self.sophisticated_edge_sample_width
         
         for frame_data in quality_frames:
             frame = frame_data['frame']
@@ -4919,7 +4975,11 @@ class EnhancedFrameAnalysis:
             border_results = self.border_detector.detect_borders_with_quality_assessment(
                 violations=violations,
                 method=method,
-                simple_border_pixels=frame_config.simple_border_pixels
+                simple_border_pixels=frame_config.simple_border_pixels,
+                sophisticated_threshold=frame_config.sophisticated_threshold,
+                sophisticated_edge_sample_width=frame_config.sophisticated_edge_sample_width,
+                sophisticated_sample_frames=frame_config.sophisticated_sample_frames,
+                sophisticated_padding=frame_config.sophisticated_padding
             )
             results['initial_borders'] = asdict(border_results)
 
