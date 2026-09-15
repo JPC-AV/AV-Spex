@@ -409,24 +409,34 @@ Two modes are available:
 
 **Iterative refinement**: After initial border detection, BRNG analysis runs on the detected active area. If a high percentage of violations occur at the edges of the active area — suggesting the borders were not cropped aggressively enough — the borders are automatically expanded and the analysis is re-run, up to the configured maximum number of retries. The goal is to separate true content violations from border artifacts.
 
-Border Detection is required for Signalstats Analysis, and the detected active area can also be used to crop the access file (**Crop Borders** output option).
+Border Detection is required for Signalstats Analysis in the Checks tab (the signalstats comparison needs an active picture area), and the detected active area can also be used to crop the access file (**Crop Borders** output option).
 
 CLI: `av-spex --enable-border-detection {on,off}`, `--frame-borders {simple,sophisticated}`, `--frame-border-pixels 25`
 
 ### Signalstats Analysis
 
-Evaluates broadcast-range compliance across sampled time periods of the video using the FFmpeg `signalstats` BRNG metric — the fraction of pixels in each frame that fall outside the broadcast-legal range (for 8-bit video: luma below 16 or above 235, chroma below 16 or above 240).
+Evaluates broadcast-range compliance across sampled time periods of the video using the FFmpeg `signalstats` BRNG metric — the share of pixels in a frame that fall outside the broadcast-legal range. In 10-bit code values that is luma below 64 or above 940, or chroma below 64 or above 960 (16–235 luma and 16–240 chroma in 8-bit video); FFmpeg applies the limits for the file's own bit depth, so values are always measured on the native scale.
+
+**What counts as a violation**: a frame is *flagged* as soon as a single pixel anywhere in it is out of range, so the percentages below are shares of flagged **frames**, not shares of pixels. Because one pixel is enough to flag a frame, that share is not a severity measure on its own — severity is keyed mainly to the **average BRNG**: the average percentage of out-of-range pixels per analyzed frame, where 10% or more reads as "review recommended". All-black frames are skipped on the full-frame side, because the sub-black noise in analog tape black would otherwise dominate the results; a frame counts as black when, in 10-bit code values, its maximum luma (YMAX) is below 300, its 90th-percentile luma (YHIGH) below 115, and its 10th-percentile luma (YLOW) below 97.
 
 **Dual-source comparison**: When Border Detection has identified an active picture area, two parallel analyses run for each period to distinguish border artifacts from actual content violations:
 
 1. **QCTools (full frame)** — BRNG values parsed from the QCTools report, covering the entire frame including borders and blanking areas
 2. **FFprobe (active area only)** — BRNG values computed with a crop filter applied, so only the detected active picture area is analyzed
 
-Comparing the two reveals whether violations originate from border/blanking regions or from the picture content itself: if the full frame shows significantly more violations (>5%) than the active area, they are classified as *border violations*; if the active area itself shows >10% violations, they are classified as *content violations* that may require correction. The final diagnosis is based on the active-area results — the picture content that would actually be seen in playback or broadcast.
+Both sides use the same rule for flagging a frame, so their shares can be compared directly. Each period is then classified, in this order:
+
+- **Border violations** — the full frame has more than 5 percentage points more flagged frames than the active area, *and* fewer than 30% of active-area frames are flagged. That second condition matters: a period whose active picture is itself heavily flagged is never written off as a border artifact, however much worse the full frame looks.
+- **Content violations** — otherwise, more than 10% of active-area frames are flagged; these may require correction.
+- **Minimal violations** — neither of the above.
+
+The aggregate numbers reported for the file come from the active-area pass — the picture content that would actually be seen in playback or broadcast. The overall diagnosis is a vote across periods: when more periods were classified as border violations than as content violations, the picture content itself is reported as broadcast-safe.
 
 ![A signalstats period comparison from the HTML report](signalstats_period_example.png)
 
-*A one-minute analysis period as shown in the HTML report. The full frame flags BRNG violations on every frame, but the active picture area flags only 16.2% — so the period is classified as border violations rather than content violations.*
+*A one-minute analysis period as shown in the HTML report. Every non-black frame is flagged when the whole frame is measured, but only 2.0% of frames are flagged inside the active picture area — so the period is classified as border violations rather than content violations. Note the active area's max BRNG of 100%: one frame in the period was entirely out of range, a reminder that the flagged-frame share and the severity of the violations are two different things.*
+
+**Without Border Detection**: the Checks tab requires Border Detection before Signalstats Analysis can be enabled, since the comparison above needs an active picture area to compare against. From the command line the two flags are independent — with border detection off, signalstats still runs, measuring the full frame only, and says so in every diagnosis it produces ("borders were not excluded").
 
 **Period selection**: Analysis periods target, in priority order: timestamps where QCTools detected the highest concentrations of BRNG activity, timestamps flagged during border detection as having interesting signal characteristics, and finally evenly spaced periods across the content (after color bars).
 
@@ -639,7 +649,7 @@ av-spex [path/to/directory]
 - `--enable-bitplane-check {on,off}` — Toggle the 9th/10th bit verification
 - `--enable-border-detection {on,off}` — Toggle active picture area detection
 - `--enable-brng-analysis {on,off}` — Toggle differential BRNG analysis
-- `--enable-signalstats {on,off}` — Toggle signalstats analysis (requires border detection)
+- `--enable-signalstats {on,off}` — Toggle signalstats analysis (runs full-frame only if border detection is off)
 - `--enable-dropped-sample-detection {on,off}` — Toggle dropped audio sample detection
 - `--enable-duplicate-frame-detection {on,off}` — Toggle duplicate/frozen frame detection
 - `--frame-borders {simple,sophisticated}` — Border detection mode
