@@ -377,7 +377,8 @@ class QCTParseToolConfig:
     thumbExport: bool
     # What Evaluate Bars measures content against: "detected" uses this
     # file's own detected bars, falling back to standard SMPTE values if
-    # none are found; "smpte" always uses standard SMPTE values.
+    # none are found; "smpte" always uses standard SMPTE values; "both" runs
+    # the evaluation against each and the HTML report toggles between them.
     evaluateBarsReference: str = "detected"
     audio_analysis: bool = False
     detect_clamped_levels: bool = False

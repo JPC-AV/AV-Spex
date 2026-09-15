@@ -473,8 +473,10 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
         self.bars_ref_group = QButtonGroup(self)
         self.bars_ref_detected_radio = QRadioButton("Bars detected in this video")
         self.bars_ref_smpte_radio = QRadioButton("Standard SMPTE values")
+        self.bars_ref_both_radio = QRadioButton("Both")
         self.bars_ref_group.addButton(self.bars_ref_detected_radio)
         self.bars_ref_group.addButton(self.bars_ref_smpte_radio)
+        self.bars_ref_group.addButton(self.bars_ref_both_radio)
         self.bars_ref_detected_radio.setChecked(True)
         bars_ref_detected_row = QHBoxLayout()
         bars_ref_detected_row.addSpacing(40)
@@ -494,6 +496,15 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
             "in the video.")
         bars_ref_smpte_desc.setIndent(60)
         bars_ref_smpte_desc.setWordWrap(True)
+        bars_ref_both_row = QHBoxLayout()
+        bars_ref_both_row.addSpacing(40)
+        bars_ref_both_row.addWidget(self.bars_ref_both_radio)
+        bars_ref_both_row.addStretch()
+        bars_ref_both_desc = QLabel(
+            "Runs the evaluation against both references; the report lets "
+            "you toggle between the two sets of results.")
+        bars_ref_both_desc.setIndent(60)
+        bars_ref_both_desc.setWordWrap(True)
 
         # Thumb Export
         self.thumb_export_check = QCheckBox("Thumbnail Export")
@@ -519,6 +530,8 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
         qct_parse_layout.addWidget(bars_ref_detected_desc)
         qct_parse_layout.addLayout(bars_ref_smpte_row)
         qct_parse_layout.addWidget(bars_ref_smpte_desc)
+        qct_parse_layout.addLayout(bars_ref_both_row)
+        qct_parse_layout.addWidget(bars_ref_both_desc)
         qct_parse_layout.addWidget(self.thumb_export_check)
         qct_parse_layout.addWidget(thumb_export_desc)
         qct_parse_layout.addWidget(self.audio_analysis_check)
@@ -930,7 +943,8 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
         self.thumb_export_check.setChecked(bool(qct.thumbExport))
         bars_ref = getattr(qct, 'evaluateBarsReference', 'detected')
         self.bars_ref_smpte_radio.setChecked(bars_ref == 'smpte')
-        self.bars_ref_detected_radio.setChecked(bars_ref != 'smpte')
+        self.bars_ref_both_radio.setChecked(bars_ref == 'both')
+        self.bars_ref_detected_radio.setChecked(bars_ref not in ('smpte', 'both'))
         self.audio_analysis_check.setChecked(bool(getattr(qct, 'audio_analysis', False)))
         self.tone_leak_check.setChecked(bool(getattr(qct, 'detect_tone_leak', False)))
         self.clamped_levels_check.setChecked(bool(getattr(qct, 'detect_clamped_levels', False)))
@@ -1038,7 +1052,9 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
                 barsDetection=self.bars_detection_check.isChecked(),
                 evaluateBars=self.evaluate_bars_check.isChecked(),
                 thumbExport=self.thumb_export_check.isChecked(),
-                evaluateBarsReference=('smpte' if self.bars_ref_smpte_radio.isChecked() else 'detected'),
+                evaluateBarsReference=('smpte' if self.bars_ref_smpte_radio.isChecked()
+                                       else 'both' if self.bars_ref_both_radio.isChecked()
+                                       else 'detected'),
                 audio_analysis=self.audio_analysis_check.isChecked(),
                 detect_clamped_levels=self.clamped_levels_check.isChecked(),
                 detect_chroma_phase_errors=self.chroma_phase_check.isChecked(),

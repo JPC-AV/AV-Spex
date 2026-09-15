@@ -280,6 +280,7 @@ Use **Compare against** to choose the reference:
 
 - **Bars detected in this video** (default): grades against the signal values measured from this file's own color bars. If no bars are found in the video, the standard SMPTE values are used as a fallback.
 - **Standard SMPTE values**: always grades against the standard SMPTE color bar values from the config, ignoring any bars detected in the video. When bars are also detected, the report still charts the file's measured bars alongside the SMPTE reference for comparison.
+- **Both**: runs the evaluation twice — once against the detected bars and once against standard SMPTE values. In the report, the threshold evaluation and the failure timeline each carry a **Graded against** switch (*This tape's detected color bars* / *Standard SMPTE values*); clicking either switch flips both sections together. If no bars are detected, only the SMPTE evaluation runs and the report shows it without a switch. The SMPTE results are written to `qct-parse_colorbars_eval_smpte_summary.csv` and `qct-parse_colorbars_eval_smpte_failures.csv`.
 
 ### Timeline of Signal Distribution
 
@@ -644,7 +645,7 @@ av-spex [path/to/directory]
 - `--enable-chroma-phase-detection {on,off}` — Toggle chroma phase error detection. Auto-enables qct-parse if needed.
 - `--enable-tone-leak-detection {on,off}` — Toggle 1 kHz reference-tone leak detection. Auto-enables qct-parse if needed.
 - `--enable-clams-detection {on,off}` — Toggle CLAMS SSIM bars + cross-correlation tone detector
-- `--evaluate-bars-reference {detected,smpte}` — What Evaluate Color Bars grades against: this file's own detected bars (default) or standard SMPTE values. Only takes effect when Evaluate Color Bars is on.
+- `--evaluate-bars-reference {detected,smpte,both}` — What Evaluate Color Bars grades against: this file's own detected bars (default), standard SMPTE values, or both (the report toggles between the two result sets). Only takes effect when Evaluate Color Bars is on.
 
 **Frame analysis:**
 - `--enable-bitplane-check {on,off}` — Toggle the 9th/10th bit verification
@@ -719,7 +720,7 @@ Controls which tools run and what outputs are generated.
 - `exiftool`, `ffprobe`, `mediainfo`, `mediatrace`, `mkvalidator`: `run_tool` and `check_tool` (mkvalidator only applies to MKV inputs and is skipped for other containers)
 - `mediaconch`: `run_mediaconch` and `mediaconch_policy` (path to XML policy file)
 - `qctools`: `run_tool`
-- `qct_parse`: `run_tool`, `barsDetection`, `evaluateBars`, `evaluateBarsReference` (`detected` or `smpte`), `thumbExport`, `audio_analysis`, `detect_clamped_levels`, `detect_chroma_phase_errors`, `detect_tone_leak`
+- `qct_parse`: `run_tool`, `barsDetection`, `evaluateBars`, `evaluateBarsReference` (`detected`, `smpte` or `both`), `thumbExport`, `audio_analysis`, `detect_clamped_levels`, `detect_chroma_phase_errors`, `detect_tone_leak`
 - `clams_detection`: `run_tool` (numeric `bars` and `tone` sub-parameters are JSON-only)
 
 **Input settings**
