@@ -333,7 +333,13 @@ Detects out-of-range luma and chroma values (BRNG — **B**roadcast **Ra**n**g**
 
 ### Signalstats
 
-Runs FFmpeg's `signalstats` filter over sampled time periods (default: 3 periods of 60 seconds each) to assess signal quality across the tape.
+Measures broadcast-range compliance — the FFmpeg `signalstats` BRNG metric, the share of pixels in a frame outside the broadcast-legal range — across sampled time periods (default: 3 periods of 60 seconds each, the same periods BRNG analysis then uses).
+
+When border detection has identified an active picture area, each period is measured twice: the **full frame**, read from the QCTools report, and the **active picture area only**, computed by FFprobe with a crop filter applied. Comparing the two separates violations that come from borders and blanking from violations in the picture content itself, and each period is classified as *border violations*, *content violations*, or *minimal violations*. The figures reported for the file come from the active-area pass. With border detection off, signalstats still runs from the CLI, measuring the full frame only and labelling its diagnosis accordingly.
+
+A frame counts as flagged from a single out-of-range pixel, so the flagged-frame percentages are not a severity measure by themselves — severity is based mainly on the average share of out-of-range pixels per analyzed frame. All-black frames are excluded from the full-frame pass, since the sub-black noise in analog tape black would otherwise dominate the results.
+
+Signalstats also places and refines the analysis periods that BRNG analysis uses: a period whose active area turns out to hold essentially nothing out of range is swapped for the next-best candidate. The in-app Help window documents the full methodology, including the classification thresholds.
 
 ### Dropped Sample Detection
 

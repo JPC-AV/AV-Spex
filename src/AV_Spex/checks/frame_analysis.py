@@ -275,32 +275,40 @@ class QCToolsParser:
 
         return ymax < 300.0 * scale and yhigh < 115.0 * scale and ylow < 97.0 * scale
 
-    def parse_for_violations_streaming_period(self, start_time: float, end_time: float,
-                                        period_num: int, max_frames: int = 100, 
-                                        skip_color_bars: bool = True) -> List[FrameViolation]:
-        """Stream parse QCTools report for BRNG violations in specific time period"""
-        violations = []
-        
-        # Counters for this specific period
-        frames_in_period = 0
-        frames_with_violations = 0
-        max_brng_value = 0
-        frames_checked = 0
-        
+    def parse_brng_period(self, start_time: float, end_time: float,
+                          period_num: int) -> Optional[Dict]:
+        """Read the BRNG value of every frame in a time period of the QCTools report.
+
+        Returns the per-frame values for ALL non-black frames in the period, not
+        just the ones that violate, so that frames_with_violations /
+        frames_analyzed is a real share of the period. (It used to return only
+        frames above 1% BRNG and divide that list by its own length, which made
+        the full-frame share 100% whenever anything was flagged and pushed the
+        full-frame vs active-area comparison toward 'border_violations'.)
+
+        A frame counts as a violation from a single out-of-range pixel
+        (BRNG > 0) — the same rule the active-area ffprobe pass uses, so the two
+        shares are comparable. All-black frames are skipped, as elsewhere in
+        this parser: analog sub-black noise would otherwise flag them.
+
+        Returns None when no non-black frame falls in the period or the report
+        cannot be read.
+        """
+        brng_frames = []  # (timestamp_seconds, brng_fraction) per non-black frame
+        black_frames_skipped = 0
+
         try:
             if self.report_path.endswith('.gz'):
                 file_handle = gzip.open(self.report_path, 'rt')
             else:
                 file_handle = open(self.report_path, 'r')
-            
+
             parser = ET.iterparse(file_handle, events=['start', 'end'])
             parser = iter(parser)
             event, root = next(parser)
-            
+
             for event, elem in parser:
                 if event == 'end' and elem.tag == 'frame':
-                    frames_checked += 1
-                    
                     # Get timestamp from the frame element
                     timestamp_str = elem.get('pkt_pts_time')
                     if not timestamp_str:
@@ -320,42 +328,48 @@ class QCToolsParser:
                         elem.clear()
                         root.clear()
                         break  # We've passed our period, stop parsing
-                    
-                    frames_in_period += 1
-                    
-                    # Extract frame data
-                    frame_data = self._extract_frame_violations(elem, frame_num=None)
-                    if frame_data:
-                        frames_with_violations += 1
-                        max_brng_value = max(max_brng_value, frame_data.brng_value)
-                        violations.append(frame_data)
-                    
+
+                    if self._is_black_frame(elem):
+                        black_frames_skipped += 1
+                    else:
+                        brng_tag = elem.find('.//tag[@key="lavfi.signalstats.BRNG"]')
+                        brng_str = brng_tag.get('value') if brng_tag is not None else None
+                        if brng_str:
+                            try:
+                                brng_frames.append((timestamp, float(brng_str)))
+                            except ValueError:
+                                pass
+
                     elem.clear()
                     root.clear()
-                    
-                    # Stop if we have enough violations
-                    if len(violations) >= max_frames:
-                        break
-            
+
             file_handle.close()
-            
-            # Log period-specific summary
-            if frames_in_period > 0:
-                violation_pct = (frames_with_violations / frames_in_period * 100)
-                logger.debug(f"    Period {period_num}: {frames_in_period:,} frames analyzed, "
-                        f"{frames_with_violations:,} with violations ({violation_pct:.1f}%)")
-                if frames_with_violations > 0:
-                    logger.debug(f"    Period {period_num} max BRNG: {max_brng_value:.4f}%")
-            else:
-                logger.debug(f"    Period {period_num}: No frames found in time range {start_time:.1f}s - {end_time:.1f}s")
-            
+
         except Exception as e:
             logger.error(f"Error parsing QCTools report for period {period_num}: {e}")
             import traceback
             logger.error(traceback.format_exc())
-        
-        violations.sort(key=lambda x: x.violation_score, reverse=True)
-        return violations[:max_frames]
+            return None
+
+        if not brng_frames:
+            logger.debug(f"    Period {period_num}: No non-black frames with BRNG found in "
+                         f"time range {start_time:.1f}s - {end_time:.1f}s")
+            return None
+
+        brng_values = [b for _, b in brng_frames]
+        frames_with_violations = sum(1 for b in brng_values if b > 0)
+        logger.debug(f"    Period {period_num}: {len(brng_values):,} frames analyzed "
+                     f"({black_frames_skipped:,} black frames skipped), "
+                     f"{frames_with_violations:,} with violations "
+                     f"({frames_with_violations / len(brng_values) * 100:.1f}%)")
+
+        return {
+            'frames_analyzed': len(brng_values),
+            'frames_with_violations': frames_with_violations,
+            'brng_values': brng_values,
+            'brng_frames': brng_frames,
+            'black_frames_skipped': black_frames_skipped,
+        }
     
     def parse_for_violations_streaming(self, max_frames: int = 100,
                              skip_color_bars: bool = True,
@@ -4054,28 +4068,18 @@ class IntegratedSignalstatsAnalyzer:
         
         # Create a parser instance for this specific period
         parser = QCToolsParser(self.qctools_report, self.fps)
-        
-        # Parse violations for the specific time range
-        violations = parser.parse_for_violations_streaming_period(
-            start_time=start_time,
-            end_time=end_time,
-            period_num=period_num,
-            max_frames=1000
-        )
-        
-        if not violations:
-            logger.info(f"    No violations found in period {period_num}")
+
+        result = parser.parse_brng_period(start_time, end_time, period_num)
+        if not result:
+            logger.info(f"    No QCTools BRNG data found for period {period_num}")
             return None
-        
-        return {
-            'frames_analyzed': len(violations),
-            'frames_with_violations': len([v for v in violations if v.violation_score > 0]),
-            'brng_values': [v.violation_score for v in violations],
-            'brng_frames': [(v.timestamp, v.violation_score) for v in violations],
+
+        result.update({
             'source': 'qctools',
             'period_num': period_num,
             'time_range': (start_time, end_time)
-        }
+        })
+        return result
     
     def _should_use_qctools(self, qctools_result: Dict) -> bool:
         """Decide if QCTools data is sufficient"""
