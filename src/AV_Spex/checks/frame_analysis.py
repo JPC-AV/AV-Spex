@@ -3499,9 +3499,15 @@ class IntegratedSignalstatsAnalyzer:
             end_tc = self._seconds_to_timecode(end_time)
             logger.debug(f"    Period {i+1}: {start_tc} - {end_tc} ({duration}s)")
         
-        # Log active area vs full frame comparison
-        active_area = sanitize_active_area(
-            border_data.active_area if border_data else None, "signalstats analysis")
+        # Log active area vs full frame comparison. With border detection off,
+        # analyze() passes a full-frame placeholder (method 'disabled') so BRNG
+        # still has geometry; it is not a detected active area, so signalstats
+        # measures the full frame only instead of comparing the frame to itself.
+        if border_data is not None and border_data.detection_method == 'disabled':
+            active_area = None
+        else:
+            active_area = sanitize_active_area(
+                border_data.active_area if border_data else None, "signalstats analysis")
         if active_area:
             x, y, w, h = active_area
             full_w, full_h = self.width, self.height
@@ -5816,8 +5822,14 @@ class EnhancedFrameAnalysis:
         period_full_brng = {}
         
         for comp in (signalstats_results.comparison_results or []):
+            # Only periods that were measured both ways carry a diagnosis. An
+            # unmeasured period (full-frame-only signalstats, or a failed
+            # ffprobe pass) would otherwise read as 0% active-area BRNG and
+            # push BRNG into light sampling it has no evidence for.
+            if not comp.get('diagnosis'):
+                continue
             idx = comp.get('period', 1) - 1  # 0-indexed
-            period_diagnoses[idx] = comp.get('diagnosis', '')
+            period_diagnoses[idx] = comp['diagnosis']
             
             ff_data = comp.get('ffprobe_active_area', {})
             qc_data = comp.get('qctools_full_frame', {})
@@ -5884,6 +5896,9 @@ class EnhancedFrameAnalysis:
         for i, (start, dur) in enumerate(current_periods):
             comp = comparison_results[i] if i < len(comparison_results) else {}
             diagnosis = comp.get('diagnosis', '')
+            if not diagnosis:
+                # Not measured both ways: no evidence it is low-value, keep it
+                continue
             
             ff_data = comp.get('ffprobe_active_area', {})
             active_pct = ff_data.get('violations_pct', 0)

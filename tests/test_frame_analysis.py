@@ -30,6 +30,8 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -1939,3 +1941,108 @@ def test_head_switching_residual_band_is_classified_as_bottom_edge():
     hs = {'detected': True, 'percentage': 80.0, 'avg_height_px': 6, 'max_height_px': 41}
     with_hs = _brng_analyzer_with_head_switching(hs, 11)
     assert 'bottom' in with_hs._detect_edge_violations_enhanced(mask)['edges_affected']
+
+
+# ---------------------------------------------------------------------------
+# Border detection off: signalstats measures the full frame only
+#
+# analyze() hands a full-frame placeholder BorderDetectionResult (method
+# 'disabled') downstream. Signalstats used to treat it as a detected active
+# area and compare the full frame with a "crop" of the same full frame,
+# producing border/content diagnoses instead of the full-frame-only result.
+# ---------------------------------------------------------------------------
+
+def _full_frame_ss_analyzer(monkeypatch, periods):
+    analyzer = fa.IntegratedSignalstatsAnalyzer.__new__(fa.IntegratedSignalstatsAnalyzer)
+    analyzer.video_path = "/v/in.mkv"
+    analyzer.qctools_report = "/v/in.mkv.qctools.xml.gz"
+    analyzer.check_cancelled = lambda: False
+    analyzer.signals = None
+    analyzer.width, analyzer.height, analyzer.duration = 720, 486, 600.0
+    analyzer.last_resort_period_note = None
+    monkeypatch.setattr(analyzer, "_find_analysis_periods", lambda *a, **kw: periods)
+
+    def qctools_period(start, end, num):
+        # 40% of non-black frames flagged, max 2% of pixels
+        return {'frames_analyzed': 100, 'frames_with_violations': 40,
+                'brng_values': [0.02] * 40 + [0.0] * 60,
+                'brng_frames': [(start + i / 30, 0.02) for i in range(40)]}
+    monkeypatch.setattr(analyzer, "_parse_qctools_brng_period", qctools_period)
+
+    ffprobe_calls = []
+
+    def ffprobe_period(active_area, start, duration, num, progress_range=None):
+        ffprobe_calls.append(active_area)
+        return {'frames_analyzed': 100, 'frames_with_violations': 5,
+                'brng_values': [0.001] * 5 + [0.0] * 95,
+                'brng_frames': [(start + i / 30, 0.001) for i in range(5)]}
+    monkeypatch.setattr(analyzer, "_analyze_with_ffprobe_period", ffprobe_period)
+    return analyzer, ffprobe_calls
+
+
+def _placeholder_border(area, method):
+    return fa.BorderDetectionResult(active_area=area, border_regions={},
+                                    detection_method=method, quality_frame_hints=[])
+
+
+def test_signalstats_with_border_detection_disabled_is_full_frame_only(monkeypatch):
+    analyzer, ffprobe_calls = _full_frame_ss_analyzer(monkeypatch, [(10.0, 60), (200.0, 60)])
+
+    result = analyzer.analyze_with_signalstats(border_data=_placeholder_border((0, 0, 720, 486), 'disabled'))
+
+    assert ffprobe_calls == []                   # no self-comparison pass
+    assert result.analyzed_region == 'full_frame'
+    assert "borders were not excluded" in result.diagnosis
+    assert all('diagnosis' not in c for c in result.comparison_results)
+
+
+def test_signalstats_with_detected_borders_still_compares(monkeypatch):
+    analyzer, ffprobe_calls = _full_frame_ss_analyzer(monkeypatch, [(10.0, 60), (200.0, 60)])
+
+    result = analyzer.analyze_with_signalstats(border_data=_placeholder_border((25, 25, 670, 436), 'simple'))
+
+    assert ffprobe_calls == [(25, 25, 670, 436)] * 2
+    assert result.analyzed_region == 'active_area'
+    assert [c['diagnosis'] for c in result.comparison_results] == ['border_violations'] * 2
+
+
+def _context_builder():
+    obj = fa.EnhancedFrameAnalysis.__new__(fa.EnhancedFrameAnalysis)
+    obj.border_detector = SimpleNamespace(width=720, height=486)
+    obj.signalstats_analyzer = SimpleNamespace(_validate_periods_against_black_segments=lambda p, *a, **kw: p)
+    return obj
+
+
+def _ss_comparison_result(comparisons):
+    return fa.SignalstatsResult(violation_percentage=10.0, max_brng=2.0, avg_brng=1.0,
+                                analysis_periods=[], diagnosis="", used_qctools=True,
+                                comparison_results=comparisons)
+
+
+def test_upstream_context_skips_periods_without_a_comparison():
+    """An unmeasured period must not read as 0% active-area BRNG (light sampling)."""
+    comparisons = [
+        {'period': 1, 'qctools_full_frame': {'violations_pct': 40.0, 'max_brng': 2.0}},
+        {'period': 2, 'diagnosis': 'content_violations',
+         'qctools_full_frame': {'violations_pct': 40.0, 'max_brng': 2.0},
+         'ffprobe_active_area': {'violations_pct': 35.0, 'max_brng': 1.5}},
+    ]
+    ctx = _context_builder()._build_upstream_context(
+        _ss_comparison_result(comparisons), _placeholder_border((0, 0, 720, 486), 'disabled'))
+
+    assert ctx.period_diagnoses == {1: 'content_violations'}
+    assert 0 not in ctx.period_active_area_brng
+
+
+def test_period_refinement_keeps_periods_without_a_comparison():
+    comparisons = [
+        {'period': 1, 'qctools_full_frame': {'violations_pct': 40.0}},
+        {'period': 2, 'qctools_full_frame': {'violations_pct': 40.0}},
+    ]
+    current = [(10.0, 60), (200.0, 60)]
+    refined = _context_builder()._refine_periods_from_signalstats(
+        current_periods=current, signalstats_results=_ss_comparison_result(comparisons),
+        qctools_candidate_periods=[(400.0, 60), (500.0, 60)], black_segments=[],
+        period_duration=60, color_bars_end_time=0)
+
+    assert refined == current

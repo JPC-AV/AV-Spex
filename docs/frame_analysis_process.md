@@ -171,6 +171,8 @@ candidates.
    - border violations → 50 + active %
    - minimal → active %
 2. Periods scoring **< 5** are replaceable (essentially nothing out of range in the active area).
+   Periods without a diagnosis (not measured both ways, e.g. border detection off) are never
+   replaced.
 3. Replacement candidates = QCTools candidates that don't overlap any current period.
 4. Replace replaceable periods with candidates, in order.
 5. If anything was replaced, re-validate against the avoid list (section 2.3, effective start =
@@ -258,8 +260,9 @@ Produces the **active area** `(x, y, width, height)` used to crop signalstats an
    - Caption with L/R/T/B border sizes and head-switching summary.
 
 ### 3.4 With border detection disabled
-If signalstats or BRNG is enabled, the active area is set to the **full frame** (method
-`disabled`), so the downstream steps still run with a "crop" equal to the whole picture.
+If signalstats or BRNG is enabled, a full-frame placeholder (method `disabled`) is passed downstream
+so BRNG still has frame geometry. Signalstats does **not** treat it as a detected active area: it
+measures the full frame only (section 4.1).
 
 ### 3.5 Border refinement loop (after BRNG)
 Only when: border detection and BRNG enabled, mode is **sophisticated**, BRNG's aggregate result says
@@ -307,6 +310,10 @@ against the active area.
    the duration was unknown or everything overlapped black.
 3. Validate the active area (must be positive width/height, non-negative origin); an invalid one is
    ignored and the pass runs on the full frame.
+4. With border detection off (placeholder method `disabled`) there is no active area either: each
+   period is measured on the full frame only (QCTools if available, otherwise ffprobe without a
+   crop), periods get no border/content diagnosis, and the overall diagnosis uses the full-frame
+   wording ("borders were not excluded", section 4.6).
 
 ### 4.2 Per period — full frame (QCTools)
 1. Read every frame of the QCTools report within the period.
@@ -368,7 +375,8 @@ Only when both sides returned data. Checked in order:
    `{video_id}_signalstats_{representative|worst}.jpg`.
 
 ### 4.8 Hand-off to BRNG (upstream context)
-Built when both signalstats and border results exist:
+Built when both signalstats and border results exist. Only periods measured both ways (so they
+have a diagnosis) are included; BRNG uses its default sensitivity and sampling for the rest:
 - per-period diagnosis, active-area flagged % and max BRNG, full-frame flagged % and max BRNG;
 - head-switching result from border detection;
 - average active-area BRNG, overall diagnosis, border widths, and a border-violation fraction
@@ -533,9 +541,6 @@ All written to `{video_id}_qc_metadata/`:
   end time is passed in.
 
 ### Probable bugs
-- **Border detection off still runs as "active area" mode.** Section 3.4 substitutes a full-frame
-  active area, so signalstats uses the comparison path and diagnosis wording rather than the
-  "borders were not excluded" wording. That wording only appears when the active area is invalid.
 - **Effective start differs between passes**: bars end + 20 s on the first signalstats pass, bars
   end + 10 s on refinement re-runs and in BRNG fallback validation.
 - The active-area ffprobe pass uses `-of csv=p=0`, which the project otherwise avoids because
@@ -546,8 +551,6 @@ All written to `{video_id}_qc_metadata/`:
 - **Help window — BRNG**: says three voting methods; there are four (green-drop added).
 - **Help / README — Border detection**: "iterative refinement" is not mentioned as
   sophisticated-only; simple mode never refines.
-- **Help / README — Signalstats**: "with border detection off, signalstats measures the full frame
-  only and says so" — not what happens (above).
 - **Help / report — "Period selection priority"**: lists QCTools clusters → border hints → even
   spacing, which matches the code, but omits that border hints only exist in sophisticated mode and
   need at least `count` usable hints.
