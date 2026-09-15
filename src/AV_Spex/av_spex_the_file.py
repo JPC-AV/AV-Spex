@@ -245,7 +245,7 @@ The scripts will confirm that the digital files conform to predetermined specifi
     frame_group.add_argument('--frame-border-pixels', type=int,
                              help='Number of pixels to crop from each edge in simple border mode')
     frame_group.add_argument('--frame-no-colorbar-skip', action='store_true',
-                             help='Disable automatic skipping of color bars detected by qct-parse')
+                             help='Include detected color bars (qct-parse + CLAMS consensus) in BRNG, signalstats and analysis-period placement instead of skipping them; still excluded from duplicate frame detection')
 
     # Output settings (access file sub-options + qctools extension)
     input_group = parser.add_argument_group("Input settings")

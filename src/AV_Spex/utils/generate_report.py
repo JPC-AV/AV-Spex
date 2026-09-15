@@ -4293,7 +4293,7 @@ BORDER_DETECTION_METHODOLOGY_HTML = """
                     crop (default 25 pixels) on all sides. Used as a fallback when sophisticated detection 
                     is not possible.</li>
             </ul>
-            <p style="margin: 0 0 10px 0; font-weight: bold;">Iterative refinement:</p>
+            <p style="margin: 0 0 10px 0; font-weight: bold;">Iterative refinement (sophisticated mode only):</p>
             <p style="margin: 0 0 10px 0;">
                 After initial border detection, AV Spex runs BRNG (broadcast range) analysis on the detected 
                 active area. If a high percentage of violations occur at the edges of the active area 
@@ -4387,8 +4387,9 @@ SIGNALSTATS_METHODOLOGY_HTML = """
             <ol style="margin: 4px 0 10px 20px; padding: 0;">
                 <li style="margin-bottom: 4px;"><strong>QCTools violation clusters</strong> — periods targeting 
                     timestamps where QCTools detected the highest concentrations of BRNG activity</li>
-                <li style="margin-bottom: 4px;"><strong>Border detection quality hints</strong> — timestamps 
-                    flagged during border detection as having interesting signal characteristics</li>
+                <li style="margin-bottom: 4px;"><strong>Border detection quality hints</strong> — well-exposed 
+                    frames found by sophisticated border detection, used only when there are enough of them 
+                    for every period</li>
                 <li style="margin-bottom: 4px;"><strong>Even distribution</strong> — fallback to evenly 
                     spaced periods across the video content (after color bars)</li>
             </ol>
@@ -4426,7 +4427,7 @@ BRNG_METHODOLOGY_HTML = """
                     (cropped to active area only)</li>
             </ol>
             <p style="margin: 0 0 6px 0;">
-                Frames are then compared pixel-by-pixel using three independent detection methods that vote 
+                Frames are then compared pixel-by-pixel using four independent detection methods that vote 
                 on whether a pixel is a genuine violation:
             </p>
             <ol style="margin: 4px 0 10px 20px; padding: 0;">
@@ -4436,10 +4437,13 @@ BRNG_METHODOLOGY_HTML = """
                     channel increases are proportional (characteristic of magenta overlay)</li>
                 <li style="margin-bottom: 4px;"><strong>HSV analysis</strong> — confirms magenta hue range with 
                     saturation increase in HSV color space</li>
+                <li style="margin-bottom: 4px;"><strong>Green-channel drop</strong> — catches already-bright 
+                    pixels, where the overlay shows up as a sharp drop in green rather than a rise in red and blue</li>
             </ol>
             <p style="margin: 0 0 10px 0;">
-                A pixel is classified as a violation only when <strong>at least 2 of 3 methods agree</strong>. 
-                Small isolated pixel clusters (fewer than 10 connected pixels) are filtered out as noise.
+                A pixel is classified as a violation only when <strong>at least 2 of 4 methods agree</strong>. 
+                Small isolated pixel clusters (fewer than 10 connected pixels, or 15 at the stricter 
+                sensitivity) are filtered out as noise.
             </p>
             <p style="margin: 0 0 6px 0; font-weight: bold;">Violation classification:</p>
             <p style="margin: 0 0 4px 0;">Each frame with detected violations is then classified by spatial pattern:</p>

@@ -341,7 +341,8 @@ def test_refinement_stops_when_borders_stop_moving(monkeypatch, tmp_path):
 # analysis silently returned nothing.
 # ===========================================================================
 
-def _run_without_bars(monkeypatch, tmp_path, enable_signalstats):
+def _run_without_bars(monkeypatch, tmp_path, enable_signalstats, skip_color_bars=False,
+                      color_bars_end_time=None, bars_regions=None, duplicate_calls=None):
     from AV_Spex.checks import frame_analysis as fa
     from AV_Spex.checks.frame_analysis import BorderDetectionResult
 
@@ -359,16 +360,23 @@ def _run_without_bars(monkeypatch, tmp_path, enable_signalstats):
 
     config = _config(border_detection_mode='simple', enable_signalstats=enable_signalstats,
                      enable_bitplane_check=False, enable_dropped_sample_detection=False,
-                     enable_duplicate_frame_detection=False, brng_skip_color_bars=False)
+                     enable_duplicate_frame_detection=duplicate_calls is not None,
+                     brng_skip_color_bars=skip_color_bars)
     analyzer = _analyzer(config)
     analyzer.output_dir = tmp_path
-    analyzer._run_analysis_steps = lambda steps, results, signals: True
+    if duplicate_calls is None:
+        analyzer._run_analysis_steps = lambda steps, results, signals: True
+    else:
+        analyzer._detect_duplicate_frames = lambda **kw: duplicate_calls.append(kw)
+        analyzer._run_analysis_steps = lambda steps, results, signals: (
+            [step.run() for step in steps if step.enabled], True)[1]
     analyzer._get_video_duration = lambda: 600.0
     analyzer._log_brng_analysis_summary = lambda *a, **kw: None
     analyzer._generate_summary = lambda results: ""
     analyzer._save_results = lambda results: None
     analyzer._create_signalstats_frame_thumbnails = lambda *a, **kw: None
     analyzer.signalstats_analyzer.last_resort_period_note = None
+    analyzer.signalstats_analyzer._validate_periods_against_black_segments = lambda p, *a, **kw: p
     analyzer.signalstats_analyzer.analyze_with_signalstats.return_value = fa.SignalstatsResult(
         violation_percentage=0.0, max_brng=0.0, avg_brng=0.0,
         analysis_periods=[(10.0, 60), (200.0, 60), (400.0, 60)],
@@ -379,8 +387,9 @@ def _run_without_bars(monkeypatch, tmp_path, enable_signalstats):
     analyzer.border_detector.generate_border_visualization.return_value = True
     analyzer.border_detector.width, analyzer.border_detector.height = 720, 486
 
-    results = analyzer.analyze(method='simple', skip_color_bars=False,
-                               color_bars_end_time=None, frame_config=config, signals=None)
+    results = analyzer.analyze(method='simple', skip_color_bars=skip_color_bars,
+                               color_bars_end_time=color_bars_end_time, bars_regions=bars_regions,
+                               frame_config=config, signals=None)
     return results, brng_calls, analyzer
 
 
@@ -419,3 +428,53 @@ def test_first_signalstats_pass_does_not_pre_add_the_bars_margin(monkeypatch, tm
     results, brng_calls, analyzer = _run_without_bars(monkeypatch, tmp_path, enable_signalstats=True)
     call = analyzer.signalstats_analyzer.analyze_with_signalstats.call_args
     assert call.kwargs['content_start_time'] == 0
+
+
+# ===========================================================================
+# Skip Color Bars off: detected bars stay in the BRNG-side analysis
+#
+# The option used to have almost no effect: head and mid-file bars arrive in
+# bars_regions and were excluded from period placement, signalstats and BRNG
+# whatever it was set to. Off now means bars are analyzed there, as the docs
+# describe. Duplicate-frame detection still excludes them either way.
+# ===========================================================================
+
+BARS = dict(color_bars_end_time=52.0, bars_regions=[(30.0, 52.0), (900.0, 910.0)])
+
+
+def test_skip_color_bars_on_excludes_bars_everywhere(monkeypatch, tmp_path):
+    dup = []
+    _, brng_calls, analyzer = _run_without_bars(
+        monkeypatch, tmp_path, enable_signalstats=True, skip_color_bars=True,
+        duplicate_calls=dup, **BARS)
+
+    ss = analyzer.signalstats_analyzer.analyze_with_signalstats.call_args.kwargs
+    assert ss['color_bars_end_time'] == 52.0
+    assert (30.0, 52.0) in ss['black_segments'] and (900.0, 910.0) in ss['black_segments']
+    assert dup[0]['color_bars_end_time'] == 52.0
+    assert (900.0, 910.0) in dup[0]['black_segments']
+
+
+def test_skip_color_bars_off_keeps_bars_in_signalstats_and_brng(monkeypatch, tmp_path):
+    dup = []
+    _, brng_calls, analyzer = _run_without_bars(
+        monkeypatch, tmp_path, enable_signalstats=True, skip_color_bars=False,
+        duplicate_calls=dup, **BARS)
+
+    ss = analyzer.signalstats_analyzer.analyze_with_signalstats.call_args.kwargs
+    assert ss['color_bars_end_time'] == 0
+    assert ss['black_segments'] == []
+    assert brng_calls[0]['skip_start_seconds'] == 0
+    # duplicate-frame detection still excludes the bars
+    assert dup[0]['color_bars_end_time'] == 52.0
+    assert (30.0, 52.0) in dup[0]['black_segments'] and (900.0, 910.0) in dup[0]['black_segments']
+
+
+def test_skip_color_bars_off_brng_fallback_periods_may_start_in_bars(monkeypatch, tmp_path):
+    """Without signalstats, the BRNG fallback spreads periods from 10s in, not bars end + 10s."""
+    _, brng_calls, _ = _run_without_bars(
+        monkeypatch, tmp_path, enable_signalstats=False, skip_color_bars=False, **BARS)
+    on_calls = _run_without_bars(
+        monkeypatch, tmp_path, enable_signalstats=False, skip_color_bars=True, **BARS)[1]
+
+    assert brng_calls[0]['analysis_periods'][0][0] < on_calls[0]['analysis_periods'][0][0]

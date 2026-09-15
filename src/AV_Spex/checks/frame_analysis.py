@@ -4995,13 +4995,32 @@ class EnhancedFrameAnalysis:
         # parsing skips them, and duplicate-frame candidates inside them are
         # dropped. The scalar color_bars_end_time still handles the head
         # region; this list adds the additional bars.
+        #
+        # Skip Color Bars (brng_skip_color_bars) controls the BRNG side only:
+        # when it is off, bars stay in the QCTools violation scan, period
+        # placement, signalstats and BRNG. Duplicate-frame detection always
+        # excludes them — bars are a static test pattern and would otherwise
+        # be reported as one long freeze.
         bars_regions = [(s, e) for s, e in (bars_regions or []) if e > s]
-        if bars_regions:
-            logger.info(
-                f"Excluding {len(bars_regions)} detected color-bars region(s) "
-                f"from BRNG/signalstats/duplicate-frame analysis"
-            )
-        avoid_segments = black_segments + bars_regions
+        if skip_color_bars:
+            brng_bars_end = color_bars_end_time
+            brng_bars_regions = bars_regions
+            if bars_regions:
+                logger.info(
+                    f"Excluding {len(bars_regions)} detected color-bars region(s) "
+                    f"from BRNG/signalstats/duplicate-frame analysis"
+                )
+        else:
+            brng_bars_end = 0
+            brng_bars_regions = []
+            if bars_regions or color_bars_end_time:
+                logger.info(
+                    "Skip Color Bars is off: detected color bars are included in the "
+                    "QCTools violation scan, period placement, signalstats and BRNG "
+                    "analysis (still excluded from duplicate-frame detection)"
+                )
+        avoid_segments = black_segments + brng_bars_regions
+        duplicate_avoid_segments = black_segments + bars_regions
 
         if self.check_cancelled():
             return results
@@ -5012,8 +5031,8 @@ class EnhancedFrameAnalysis:
                 violations = parser.parse_for_violations_streaming(
                     max_frames=100,
                     skip_color_bars=skip_color_bars,
-                    color_bars_end_time=color_bars_end_time,
-                    exclude_regions=bars_regions
+                    color_bars_end_time=brng_bars_end,
+                    exclude_regions=brng_bars_regions
                 )
                 # Total frames with violations, not the severity-capped list length
                 frames_with_qctools_violations = getattr(parser, 'total_violation_frames', len(violations))
@@ -5109,7 +5128,7 @@ class EnhancedFrameAnalysis:
             signalstats_results = self.signalstats_analyzer.analyze_with_signalstats(
                 border_data=border_results,
                 content_start_time=0,
-                color_bars_end_time=color_bars_end_time,
+                color_bars_end_time=brng_bars_end,
                 analysis_duration=frame_config.analysis_period_duration,
                 num_periods=frame_config.analysis_period_count,
                 qctools_periods=qctools_suggested_periods,
@@ -5188,7 +5207,7 @@ class EnhancedFrameAnalysis:
                     qctools_candidate_periods=qctools_suggested_periods,
                     black_segments=avoid_segments,
                     period_duration=frame_config.analysis_period_duration,
-                    color_bars_end_time=color_bars_end_time
+                    color_bars_end_time=brng_bars_end
                 )
         
         # Step 5: BRNG analysis (conditional)
@@ -5206,7 +5225,7 @@ class EnhancedFrameAnalysis:
                     logger.info(f"Creating evenly distributed analysis periods (no QCTools violations found)\n")
                     video_duration = self._get_video_duration()
                     if video_duration:
-                        content_start = content_start_after_bars(color_bars_end_time)
+                        content_start = content_start_after_bars(brng_bars_end)
                         content_duration = video_duration - content_start - 10  # Leave 10s at end
                         if content_duration > 0:
                             period_duration = frame_config.analysis_period_duration
@@ -5235,7 +5254,7 @@ class EnhancedFrameAnalysis:
                 if avoid_segments and analysis_periods:
                     analysis_periods = self.signalstats_analyzer._validate_periods_against_black_segments(
                         analysis_periods, avoid_segments,
-                        effective_start=content_start_after_bars(color_bars_end_time),
+                        effective_start=content_start_after_bars(brng_bars_end),
                         period_duration=frame_config.analysis_period_duration
                     )
             
@@ -5246,7 +5265,7 @@ class EnhancedFrameAnalysis:
             
             brng_results = self.brng_analyzer.analyze_with_differential_detection(
                 output_dir=self.output_dir,
-                skip_start_seconds=color_bars_end_time,
+                skip_start_seconds=brng_bars_end,
                 qctools_violations=violations,
                 analysis_periods=analysis_periods,
                 upstream_context=upstream_context,
@@ -5372,7 +5391,7 @@ class EnhancedFrameAnalysis:
                         signalstats_results = self.signalstats_analyzer.analyze_with_signalstats(
                             border_data=border_results,
                             content_start_time=0,
-                            color_bars_end_time=color_bars_end_time,
+                            color_bars_end_time=brng_bars_end,
                             analysis_duration=frame_config.analysis_period_duration,
                             num_periods=frame_config.analysis_period_count,
                             qctools_periods=qctools_suggested_periods,
@@ -5403,7 +5422,7 @@ class EnhancedFrameAnalysis:
 
                     brng_results = self.brng_analyzer.analyze_with_differential_detection(
                         output_dir=self.output_dir,
-                        skip_start_seconds=color_bars_end_time,
+                        skip_start_seconds=brng_bars_end,
                         qctools_violations=violations,
                         analysis_periods=analysis_periods,
                         upstream_context=upstream_context,
@@ -5551,7 +5570,7 @@ class EnhancedFrameAnalysis:
         def _run_duplicate_frames():
             result = self._detect_duplicate_frames(
                 color_bars_end_time=color_bars_end_time,
-                black_segments=avoid_segments,
+                black_segments=duplicate_avoid_segments,
                 min_run_length=getattr(frame_config, 'duplicate_min_run_length', 2),
             )
             return asdict(result) if result else None

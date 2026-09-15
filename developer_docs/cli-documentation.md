@@ -172,7 +172,7 @@ Examples of supported CLI flags:
 * `--enable-bitplane-check` / `--enable-border-detection` / `--enable-brng-analysis` / `--enable-signalstats` / `--enable-dropped-sample-detection` / `--enable-duplicate-frame-detection`: toggle individual frame analysis sub-steps on or off
 * `--frame-borders`: set border detection mode (`simple` or `sophisticated`)
 * `--frame-border-pixels`: set pixel crop width for simple border mode
-* `--frame-no-colorbar-skip`: disable automatic color bar skipping in frame analysis
+* `--frame-no-colorbar-skip`: include detected color bars in BRNG, signalstats and period placement (duplicate-frame detection still excludes them)
 * `--enable-audio-analysis`: toggle qct-parse audio analysis (clipping / channel imbalance / audible-timecode / dropout). Auto-enables `qct_parse.run_tool` if currently off.
 * `--enable-clamped-levels`: toggle qct-parse's broadcast-range level-clamping detector. Auto-enables `qct_parse.run_tool` if currently off. Writes to `tools.qct_parse.detect_clamped_levels`, **not** `outputs.frame_analysis`.
 * `--enable-chroma-phase-detection`: toggle qct-parse's chroma phase error detector (tape tracking artifacts where chroma collapses toward cyan/magenta). Auto-enables `qct_parse.run_tool` if currently off.
@@ -417,13 +417,13 @@ The frame analysis sub-system is configured via `checks_config.outputs.frame_ana
 | `--enable-duplicate-frame-detection {on,off}` | `enable_duplicate_frame_detection` | Toggle duplicate-frame detection |
 | `--frame-borders {simple,sophisticated}` | `border_detection_mode` | Border detection algorithm |
 | `--frame-border-pixels N` | `simple_border_pixels` | Crop width (px) for simple mode |
-| `--frame-no-colorbar-skip` | `brng_skip_color_bars` → `False` | Disable automatic color bar skipping |
+| `--frame-no-colorbar-skip` | `brng_skip_color_bars` → `False` | Keep detected bars in BRNG/signalstats/period placement |
 
 All frame analysis updates are applied as a single deep-merge `update_config('checks', ...)` call at the end of `run_cli_mode`. If none of the frame analysis flags are supplied, the config is unchanged.
 
 Tuning parameters that the GUI exposes but the CLI does not (sophisticated border thresholds / sample frames / padding / max retries, analysis-period duration & count, duplicate-frame `min_run_length`, and the CLAMS bars/tone numerics) are JSON-only. Use `-pp checks,outputs` to inspect the live values, or edit `last_used_checks_config.json` directly.
 
-Color bar skipping relies on the `color_bars_end_time` value from qct-parse being passed through `process_video_outputs()` → `process_frame_analysis()` → `analyze_frame_quality()`. Passing `--frame-no-colorbar-skip` sets `brng_skip_color_bars = False` in the config so that color bars at the head of the tape are included in BRNG analysis.
+Color bar skipping relies on the `color_bars_end_time` value and the `all_bars_regions` span list (the qct-parse + CLAMS consensus) being passed through `process_video_outputs()` → `process_frame_analysis()` → `analyze_frame_quality()`. Passing `--frame-no-colorbar-skip` sets `brng_skip_color_bars = False`, so `analyze()` stops excluding both from the QCTools violation scan, analysis-period placement, signalstats and BRNG. Duplicate-frame detection keeps excluding them regardless.
 
 ---
 

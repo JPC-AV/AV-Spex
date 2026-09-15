@@ -229,7 +229,7 @@ class FrameAnalysisConfig:
     max_border_retries: int = 3
 
     # BRNG analysis parameters
-    brng_skip_color_bars: bool = True    # Use qct-parse color_bars_end_time to skip head
+    brng_skip_color_bars: bool = True    # Exclude detected bars from BRNG/signalstats/periods
 
     # Shared analysis-period settings (BRNG + signalstats)
     analysis_period_duration: int = 60   # Seconds per window

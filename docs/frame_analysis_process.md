@@ -57,6 +57,10 @@ These pieces are used by period selection, signalstats and BRNG.
    timestamp. If that file isn't there, bars end = 0 (no bars).
 2. If `brng_skip_color_bars` is off, the passed-in value is used as is.
 3. An empty value (no bars detected) is treated as 0 from here on.
+4. **Skip Color Bars decides who sees the bars.** On: the head end time and all `bars_regions` are
+   excluded from the violation scan, period placement, signalstats and BRNG. Off: those steps get
+   no bars (end time 0, no regions), so bars are analyzed like content. Duplicate-frame detection
+   always gets both.
 
 ### 1.2 Bit-depth detection
 1. Read the first frames of the QCTools report.
@@ -78,12 +82,14 @@ There is deliberately no `YMIN` condition — analog tape black carries sub-blac
 2. Consecutive black frames form a segment; a non-black frame only closes the segment if it arrives
    more than **0.5 s** after the last black frame (short interruptions are bridged).
 3. Keep segments at least **2.0 s** long.
-4. Black segments + all `bars_regions` together form the **avoid list** used everywhere below.
+4. Black segments + `bars_regions` together form the **avoid list** used by period placement,
+   signalstats and BRNG (bars only when Skip Color Bars is on). Duplicate-frame detection uses black
+   segments + `bars_regions` regardless.
 
 ### 1.5 Violation scan (`parse_for_violations_streaming`)
 1. Walk every frame in the report.
 2. Skip frames before the head bars end (only if `brng_skip_color_bars` is on).
-3. Skip frames inside any `bars_regions` span.
+3. Skip frames inside any `bars_regions` span (only if `brng_skip_color_bars` is on).
 4. Skip black frames.
 5. A frame is a **violation** when its QCTools `BRNG` value (share of out-of-range pixels, 0–1) is
    **> 0.01**.
@@ -536,19 +542,9 @@ All written to `{video_id}_qc_metadata/`:
 - **`sophisticated_viz_time` / `sophisticated_search_window`** (bundled JSON only, not in
   `FrameAnalysisConfig`): the border visualization always uses 150 s / 120 s.
 - **`skip_start_seconds`** in BRNG analysis: passed, never read.
-- **`brng_skip_color_bars` / `--frame-no-colorbar-skip`** affects only the QCTools violation scan
-  (1.5) and the CSV fallback (1.1). Periods, signalstats and BRNG still avoid the head bars when an
-  end time is passed in.
 
 ### Probable bugs
 None open.
 
 ### Existing docs that disagree with the code
-- **Help window — BRNG**: says three voting methods; there are four (green-drop added).
-- **Help / README — Border detection**: "iterative refinement" is not mentioned as
-  sophisticated-only; simple mode never refines.
-- **Help / report — "Period selection priority"**: lists QCTools clusters → border hints → even
-  spacing, which matches the code, but omits that border hints only exist in sophisticated mode and
-  need at least `count` usable hints.
-- **GUI docs — Skip Color Bars**: says bars "detected by qct-parse"; it's the qct-parse + CLAMS
-  consensus.
+None open.

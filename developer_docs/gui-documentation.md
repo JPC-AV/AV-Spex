@@ -315,7 +315,7 @@ Shared settings for signalstats and BRNG analysis:
 ##### 4e. BRNG Analysis
 
 - **Enable BRNG Analysis** (`enable_brng_analysis`)
-- **Skip Color Bars** (`brng_skip_color_bars`) — excludes color bar sections detected by qct-parse from BRNG analysis
+- **Skip Color Bars** (`brng_skip_color_bars`) — excludes the detected color bars (head end time and `all_bars_regions`, from the qct-parse + CLAMS consensus) from the QCTools violation scan, analysis-period placement, signalstats and BRNG. Off keeps them in; duplicate-frame detection excludes bars either way.
 
 ##### 4f. Dropped Sample Detection
 

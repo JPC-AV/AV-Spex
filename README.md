@@ -182,7 +182,7 @@ The Complex tab configures the advanced analysis steps — typically run during 
   - **Bitplane Check**: Verify that the 9th and 10th bits of 10-bit video contain data
   - **Border Detection**: Toggle on/off and select mode — simple (fixed pixel crop) or sophisticated (edge detection, with tunable parameters)
   - **Signalstats Analysis**: Enhanced FFprobe signalstats over the detected active area (requires Border Detection)
-  - **BRNG Analysis**: Toggle on/off, set maximum analysis duration, and enable or disable automatic color bar skipping
+  - **BRNG Analysis**: Toggle on/off, and enable or disable automatic color bar skipping (detected bars are excluded from BRNG, signalstats and analysis-period placement unless skipping is turned off)
   - **Analysis Periods**: The number and length of the time windows sampled across the video, shared by Signalstats and BRNG analysis
 - **Audio Checks**:
   - **Audio Analysis**: Clipping, channel imbalance, identical channel detection, audible timecode (LTC), and audio dropout (via qct-parse)

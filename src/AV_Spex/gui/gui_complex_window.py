@@ -370,7 +370,7 @@ class ComplexWindow(QWidget, ThemeableMixin):
         self.brng_skip_colorbars_cb = self._make_checkbox("Skip Color Bars")
         self._add_option(layout, self._indent_row(self.brng_skip_colorbars_cb),
             self._desc_label(
-                "Exclude color bar sections from BRNG analysis",
+                "Exclude detected color bars from BRNG, signalstats and analysis-period placement (bars are always excluded from duplicate frame detection)",
                 extra_indent=self.INDENT))
 
         # Shared analysis periods (signalstats + BRNG)

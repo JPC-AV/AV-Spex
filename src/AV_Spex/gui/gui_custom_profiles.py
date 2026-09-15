@@ -751,7 +751,8 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
         # Skip Color Bars
         self.brng_skip_colorbars_check = QCheckBox("Skip Color Bars")
         self.brng_skip_colorbars_check.setStyleSheet("font-weight: bold;")
-        skip_bars_desc = QLabel("Exclude color bar sections from BRNG analysis")
+        skip_bars_desc = QLabel("Exclude detected color bars from BRNG, signalstats and analysis-period placement (bars are always excluded from duplicate frame detection)")
+        skip_bars_desc.setWordWrap(True)
         skip_bars_desc.setIndent(20)
         brng_layout.addWidget(self.brng_skip_colorbars_check)
         brng_layout.addWidget(skip_bars_desc)
