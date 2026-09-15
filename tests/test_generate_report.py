@@ -913,7 +913,7 @@ def test_read_xml_file_missing_raises():
 # ===========================================================================
 
 def test_get_video_duration_returns_float(monkeypatch):
-    fake = MagicMock(returncode=0, stdout="3661.5\n", stderr="")
+    fake = MagicMock(returncode=0, stdout='{"format": {"duration": "3661.500000"}}', stderr="")
     monkeypatch.setattr(gr.subprocess, "run", lambda *a, **kw: fake)
     assert gr._get_video_duration("/v.mkv") == 3661.5
 

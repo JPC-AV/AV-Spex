@@ -858,6 +858,48 @@ DURATION_UNKNOWN_REASON = (
 # once (10s).
 BARS_SAFETY_MARGIN_SECONDS = 10
 
+SIGNALSTATS_BRNG_TAG = 'TAG:lavfi.signalstats.BRNG'
+
+
+def _float_or_none(value: str) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def iter_signalstats_brng_frames(lines):
+    """Yield (pts_time, brng) per frame from ffprobe's default output format.
+
+    Expects `-show_entries frame=pts_time:frame_tags=lavfi.signalstats.BRNG
+    -of default`: each frame is a [FRAME] ... [/FRAME] block of key=value lines.
+    pts_time is None when ffprobe reports N/A; frames without a BRNG tag are
+    skipped.
+
+    Not csv: when a frame carries side data (HDR mastering metadata, captions,
+    ...), csv output appends a trailing separator ("0.000000,0.209591,"), which
+    the old last-comma split turned into an empty BRNG value and silently
+    dropped the frame. Here side data is just a nested block whose keys are
+    ignored.
+    """
+    in_frame = False
+    ts = brng = None
+    for raw in lines:
+        line = raw.strip()
+        if line == '[FRAME]':
+            in_frame = True
+            ts = brng = None
+        elif line == '[/FRAME]':
+            if in_frame and brng is not None:
+                yield ts, brng
+            in_frame = False
+        elif in_frame and '=' in line:
+            key, _, value = line.partition('=')
+            if key == 'pts_time':
+                ts = _float_or_none(value)
+            elif key == SIGNALSTATS_BRNG_TAG:
+                brng = _float_or_none(value)
+
 
 def content_start_after_bars(color_bars_end_time) -> float:
     """Earliest time an analysis period may start, given the head bars end (or None)."""
@@ -4245,7 +4287,8 @@ class IntegratedSignalstatsAnalyzer:
             # is captured alongside BRNG so downstream code can locate the
             # representative/worst frames for thumbnails.
             '-show_entries', 'frame=pts_time:frame_tags=lavfi.signalstats.BRNG',
-            '-of', 'csv=p=0'
+            # Key=value blocks, not csv — see iter_signalstats_brng_frames
+            '-of', 'default'
         ]
 
         # Estimate frames for the period (~30fps; fine as a denominator for progress)
@@ -4260,12 +4303,7 @@ class IntegratedSignalstatsAnalyzer:
             brng_values = []
             brng_frames = []  # (timestamp_seconds, brng_fraction) per analyzed frame
             frame_count = 0
-            while True:
-                line = proc.stdout.readline()
-                if not line:
-                    if proc.poll() is not None:
-                        break
-                    continue
+            for ts_val, brng_val in iter_signalstats_brng_frames(proc.stdout):
                 if self.check_cancelled():
                     proc.terminate()
                     try:
@@ -4273,23 +4311,6 @@ class IntegratedSignalstatsAnalyzer:
                     except subprocess.TimeoutExpired:
                         proc.kill()
                     return None
-                line = line.strip()
-                if not line:
-                    continue
-                # Each CSV row is "pts_time,BRNG". Fall back to a single BRNG
-                # column if pts_time is unavailable in this ffmpeg build.
-                ts_val = None
-                brng_str = line
-                if ',' in line:
-                    ts_str, brng_str = line.rsplit(',', 1)
-                    try:
-                        ts_val = float(ts_str)
-                    except ValueError:
-                        ts_val = None
-                try:
-                    brng_val = float(brng_str)
-                except ValueError:
-                    continue
                 brng_values.append(brng_val)
                 if ts_val is not None:
                     brng_frames.append((ts_val, brng_val))
@@ -4302,6 +4323,7 @@ class IntegratedSignalstatsAnalyzer:
                         self._emit_progress(pct)
                         last_pct = pct
 
+            proc.communicate()  # stdout is exhausted; drain stderr and reap
             if proc.returncode != 0:
                 logger.warning(f"    FFprobe failed for period {period_num}")
                 return None

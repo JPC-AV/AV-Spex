@@ -2074,3 +2074,71 @@ def test_margin_helper_matches_constant():
     assert fa.BARS_SAFETY_MARGIN_SECONDS == 10
     assert fa.content_start_after_bars(52.0) == 62.0
     assert fa.content_start_after_bars(None) == 10.0
+
+
+# ---------------------------------------------------------------------------
+# Active-area signalstats probe output parsing
+#
+# The probe used `-of csv=p=0`. A frame carrying side data (e.g. HDR mastering
+# metadata) is written as "0.000000,0.209591," — the trailing separator left
+# an empty BRNG value after the last-comma split, so the frame was silently
+# dropped. Captured from a real HEVC clip with mastering-display side data.
+# ---------------------------------------------------------------------------
+
+SIDE_DATA_PROBE_OUTPUT = """\
+[FRAME]
+pts_time=0.000000
+TAG:lavfi.signalstats.BRNG=0.209591
+[SIDE_DATA]
+side_data_type=Mastering display metadata
+[/SIDE_DATA]
+[SIDE_DATA]
+[/SIDE_DATA]
+[/FRAME]
+[FRAME]
+pts_time=0.033000
+TAG:lavfi.signalstats.BRNG=0.21153
+[/FRAME]
+[FRAME]
+pts_time=N/A
+TAG:lavfi.signalstats.BRNG=0
+[/FRAME]
+[FRAME]
+pts_time=0.100000
+[/FRAME]
+"""
+
+
+def test_signalstats_frame_parser_keeps_frames_with_side_data():
+    frames = list(fa.iter_signalstats_brng_frames(SIDE_DATA_PROBE_OUTPUT.splitlines(keepends=True)))
+
+    assert frames == [(0.0, 0.209591), (0.033, 0.21153), (None, 0.0)]
+
+
+def test_active_area_probe_counts_every_frame(monkeypatch):
+    """End to end through _analyze_with_ffprobe_period with a fake ffprobe."""
+    import io
+
+    captured = {}
+
+    class FakeProc:
+        def __init__(self, cmd, **kw):
+            captured['cmd'] = cmd
+            self.stdout = io.StringIO(SIDE_DATA_PROBE_OUTPUT)
+            self.returncode = 0
+
+        def communicate(self):
+            return "", ""
+
+    monkeypatch.setattr(fa.subprocess, "Popen", FakeProc)
+    analyzer = fa.IntegratedSignalstatsAnalyzer.__new__(fa.IntegratedSignalstatsAnalyzer)
+    analyzer.video_path = "/v/in.mkv"
+    analyzer.check_cancelled = lambda: False
+    analyzer.signals = None
+
+    result = analyzer._analyze_with_ffprobe_period((10, 10, 300, 220), 0.0, 1, 1)
+
+    assert 'csv=p=0' not in captured['cmd']
+    assert result['frames_analyzed'] == 3
+    assert result['frames_with_violations'] == 2
+    assert result['brng_frames'] == [(0.0, 0.209591), (0.033, 0.21153)]   # N/A pts has no timestamp

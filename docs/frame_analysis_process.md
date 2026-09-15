@@ -324,7 +324,8 @@ against the active area.
 ### 4.3 Per period — active area (ffprobe)
 1. Run
    `ffprobe -f lavfi -i "movie=<file>:seek_point=<start>,crop=w:h:x:y,signalstats=stat=brng,trim=duration=<len>"`
-   reading `pts_time` and `lavfi.signalstats.BRNG` per frame.
+   reading `pts_time` and `lavfi.signalstats.BRNG` per frame (`-of default` key=value blocks, so
+   frames carrying side data are not dropped).
 2. ffmpeg applies broadcast-range limits for the file's own bit depth.
 3. **Black frames are not skipped** on this side.
 4. Flagged = BRNG > 0. Active-area flagged % and max BRNG computed as above.
@@ -540,9 +541,7 @@ All written to `{video_id}_qc_metadata/`:
   end time is passed in.
 
 ### Probable bugs
-- The active-area ffprobe pass uses `-of csv=p=0`, which the project otherwise avoids because
-  side data can add a trailing separator. Parsing splits on the last comma, so a trailing
-  separator would make every line unparseable. Unverified whether frame side data triggers it here.
+None open.
 
 ### Existing docs that disagree with the code
 - **Help window — BRNG**: says three voting methods; there are four (green-drop added).
