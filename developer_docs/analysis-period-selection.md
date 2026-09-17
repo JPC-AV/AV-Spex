@@ -47,6 +47,7 @@ Gathered in `EnhancedFrameAnalysis.analyze()` before any period is placed:
 | `parser.violation_histogram` | `parse_for_violations_streaming()` side effect | The distribution periods are placed against |
 | `parser.violation_severity` | same | Tie-break when counts saturate |
 | `violations` (top-100 list) | same | Fallback histogram only; also feeds border detection/thumbnails |
+| `parser.bin_profiles` | same | Per-bin summary of every QCTools measure; drives the suitability gate below |
 
 Period selection is only run when it is needed —
 `needs_period_selection = border_detection or signalstats or brng_analysis`. Dropped-sample
@@ -77,7 +78,7 @@ every frame in many bins violates, so bins tie at ~300 and ranking by count dege
 "whatever `sorted` happened to order first". Summed severity separates saturated bins by how bad
 they are.
 
-### Per-bin profiles (collected, not yet consumed)
+### Per-bin profiles
 
 The same streaming pass also builds `parser.bin_profiles` — a `BinProfile` per 10-second bin
 (`checks/qctools_bin_profile.py`) summarizing **every** QCTools measure the report carries, not just
@@ -87,9 +88,9 @@ edge IQR (geometry drift), and idet repeated-field counts. Counts (`frames`, `bl
 `excluded_frames`, `violation_frames`, `violation_score_sum`) cover every frame in the bin; the
 statistics describe only the **non-black** frames, for the same reason the violation list skips them.
 
-Nothing selects periods from this yet — `violation_histogram`/`violation_severity` remain the ranking
-inputs, and `violation_histogram_from_profiles()` reproduces both from the profiles exactly, which is
-the bridge for moving selection over.
+Ranking still runs off `violation_histogram`/`violation_severity`
+(`violation_histogram_from_profiles()` reproduces both from the profiles exactly, which is the bridge
+for moving that over too). What the profiles already drive is the suitability gate in Stage 0.
 
 Three things to know before building on it:
 
@@ -109,6 +110,77 @@ Three things to know before building on it:
 Collection costs roughly 15% of the XML walk (5.5s → 6.3s on a 31-minute 10-bit tape with every
 filter present) and no measurable memory. It happens in this pass because the alternative is a
 second full walk of the report.
+
+---
+
+## Stage 0 — Suitability gate
+
+`checks/bin_suitability.py`, called from `analyze()` right after the violation parse. It answers one
+question per bin: **is there picture here to analyze at all?** Bins that fail are merged into
+`unsuitable_regions` and joined to `avoid_segments`, so every later stage — candidate placement,
+period validation, the shift/refit repair, the count top-up and the even-distribution fallback —
+keeps away from them, exactly as they do from black and bars.
+
+The gate exists because the three things it catches all *look like severe damage* to a BRNG-ranked
+search and reliably outrank real problems:
+
+| What | How it measures | Why BRNG loves it |
+|---|---|---|
+| Signal loss / flat field | average luma below broadcast black | whole frame out of range → BRNG ≈ 1.0, the highest score a bin can have |
+| Lead-in / end-of-tape static | frames uncorrelated with their predecessors | BRNG 0.2–0.6 sustained over minutes |
+| Concealment repetition | long runs of repeated fields | high VREP and BRNG together |
+
+### The two kinds of reason
+
+**Hard reasons stand alone** — they are definitional, not tuned:
+
+- the bin has no picture frames (all black, or all excluded as bars);
+- `yavg_mean` is below broadcast black (64 at 10-bit scale, 16 at 8-bit). Legal picture cannot
+  average below black without most of it being out of range. The closest healthy measurement across
+  the sample set is 65 (`JPC_AV_01056`'s noisy analog black, which black-segment detection already
+  excludes), and the LC tape's loss regions average 53–54.
+
+**Soft reasons need corroboration** — two must agree before a bin is gated:
+
+| Reason | Threshold | Healthy range measured | Bad range measured |
+|---|---|---|---|
+| frames decorrelated from predecessor | `ssim_mean < 0.35` | 0.80–0.95 (p1 across 6 reports) | 0.18–0.33 |
+| repeated fields | `> 35%` of picture frames | up to 32% in low-motion passages | 35–94% |
+| flat field | `entropy_mean < 0.25` | down to 0.40 | 0.30 (and caught by the hard rule anyway) |
+| luma uncorrelated frame to frame | `ydif_mean > 0.20 × full scale` | peaks at 0.23 in end-of-tape bins the tail rule drops | 0.40+ |
+| line repetition | `vrep_mean > 0.25` | ~0 | ~0.99 on flat-field loss |
+
+Single-signal gating is exactly the failure mode being avoided, so one reason is never enough: a
+cut-heavy passage has low SSIM, a locked-off interview has repeated fields, a noisy transfer has low
+entropy. `JPC_AV_01663` @ 1860s (SSIM 0.753, YDIF 124) and `JPC_AV_01710` @ 1250s (28% repeated
+fields) are both healthy content that a single rule would have thrown away.
+
+### Guards
+
+- **Availability.** Soft rules are evaluated only over the measures the report carries. With fewer
+  than two available the soft gate is skipped entirely — there is nothing to corroborate with. A
+  signalstats-only report still gets both hard rules, and can still pair YDIF with VREP.
+- **Sample size.** A bin needs `MIN_PICTURE_FRAMES` (30) non-black frames before soft rules apply;
+  below that its statistics come from a handful of frames (`JPC_AV_01710` @ 220s is 299/300 black).
+- **Whole-tape guard.** If the soft rules would gate more than 60% of the content bins, the tape's
+  abnormal *is* its normal and the soft gate is dropped wholesale, with `note` recording why.
+  Hard reasons are never dropped. The guard needs `MIN_BINS_FOR_GUARD` (10) content bins before a
+  percentage means anything.
+
+### Measured effect
+
+Replaying stage 1 + stage 2 over ten sample reports: **placement is byte-identical on all nine
+healthy tapes** (including the 02041/02212 ground truth from the earlier redesign) and moves only on
+the LC tape with known damage:
+
+```
+21459403   before [95, 2065, 2865]   after [135, 2025, 2235]
+           unanalyzable share of each period:
+           before  75% /  33% / 0%      after  8% / 8% / 0%
+```
+
+The gated spans there are 0–40s (black), 80–140s (lead-in static), 2080–2100s (signal loss) and
+2940–3010s (end-of-tape). Note 2940–2960 is *not* covered by the last-30s rule on a 3000s file.
 
 ---
 
@@ -293,6 +365,12 @@ refine against.
 - **The two overlap thresholds are intentionally different**: 25% triggers a repair, but a repaired
   position must get under 10%. Loosening the second to 25% lets a shifted period settle right back
   against a black segment.
+- **Avoid segments must be merged before use.** The validators measure a period's overlap with the
+  avoid list by *summing* per-segment overlaps, so two spans describing the same seconds count them
+  twice and a period that is 10% black reads as 20% and gets shifted off a fine position. Sources
+  genuinely overlap — a bars flash inside a black tail, an unanalyzable bin inside a black segment —
+  so `merge_avoid_segments()` normalizes them where the list is built. It is also what keeps the
+  suitability gate from silently re-weighting the black segments it duplicates.
 - **Period placement is not free.** Every period costs two full decodes of its duration in the BRNG
   differential step, so `analysis_period_count × analysis_period_duration` is the real runtime knob.
 - **Bars are avoided in two different ways.** The scalar `color_bars_end_time` sets `effective_start`

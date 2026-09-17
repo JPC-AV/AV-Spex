@@ -2198,3 +2198,38 @@ def test_improvement_check_compares_overall_worst_frames():
 
     obj = fa.EnhancedFrameAnalysis.__new__(fa.EnhancedFrameAnalysis)
     assert obj._is_meaningful_improvement(result(3.0, 9.0), result(2.0, 1.9)) is True
+
+
+# ===========================================================================
+# Section 6 — merge_avoid_segments
+# ===========================================================================
+
+def test_merge_avoid_segments_combines_and_sorts():
+    merged = fa.merge_avoid_segments([(30.0, 40.0)], [(0.0, 10.0)])
+    assert merged == [(0.0, 10.0), (30.0, 40.0)]
+
+
+def test_merge_avoid_segments_merges_overlapping_spans():
+    """Double-counted overlap is what makes a 10%-black period read as 20%."""
+    merged = fa.merge_avoid_segments([(1409.6, 1531.9)], [(1410.0, 1530.0)])
+    assert merged == [(1409.6, 1531.9)]
+
+
+def test_merge_avoid_segments_merges_touching_spans():
+    assert fa.merge_avoid_segments([(0.0, 10.0), (10.0, 20.0)]) == [(0.0, 20.0)]
+
+
+def test_merge_avoid_segments_keeps_separated_spans():
+    merged = fa.merge_avoid_segments([(0.0, 10.0)], [(20.0, 30.0)])
+    assert merged == [(0.0, 10.0), (20.0, 30.0)]
+
+
+def test_merge_avoid_segments_drops_empty_and_inverted_spans():
+    assert fa.merge_avoid_segments([(5.0, 5.0), (10.0, 4.0)], None, []) == []
+
+
+def test_merge_avoid_segments_no_double_counted_overlap():
+    """The property the period validators depend on: summed overlap is real."""
+    merged = fa.merge_avoid_segments([(0.0, 30.0)], [(10.0, 20.0)], [(25.0, 35.0)])
+    total = sum(end - start for start, end in merged)
+    assert total == pytest.approx(35.0)

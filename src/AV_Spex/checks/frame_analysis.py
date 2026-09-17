@@ -36,6 +36,7 @@ from AV_Spex.checks import frame_analysis_report
 from AV_Spex.checks.qctools_bin_profile import (
     PROFILE_BIN_SIZE, BinProfile, BinProfiler,
 )
+from AV_Spex.checks import bin_suitability
 from AV_Spex.checks.frame_geometry import (
     is_valid_active_area, sanitize_active_area, build_crop_filter,
 )
@@ -1176,6 +1177,31 @@ def probe_video_properties(video_path) -> Dict[str, Any]:
 # be examined; 'last_resort' means the periods that *were* examined sit on black
 # content because no picture content could be sampled.
 PERIOD_CONFIDENCE_LEVELS = ('normal', 'partial_coverage', 'last_resort')
+
+
+def merge_avoid_segments(*span_lists) -> List[Tuple[float, float]]:
+    """Combine span lists into one sorted list of non-overlapping spans.
+
+    The avoid-segment list is assembled from sources that can describe the
+    same stretch of tape — a bars flash inside a black tail, an unanalyzable
+    bin inside a detected black segment. That matters because the period
+    validators measure a period's *total* overlap with the list by summing
+    per-segment overlaps: two spans covering the same seconds count them
+    twice, so a period can read as 20% black when only 10% of it is, and get
+    shifted away from a position that was fine. Merging first is what keeps
+    the percentage meaning what it says.
+    """
+    spans = sorted((float(start), float(end))
+                   for span_list in span_lists
+                   for start, end in (span_list or [])
+                   if end > start)
+    merged: List[Tuple[float, float]] = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
 
 
 def resolve_period_confidence(last_resort_note: str = None,
@@ -5081,8 +5107,8 @@ class EnhancedFrameAnalysis:
                     "QCTools violation scan, period placement, signalstats and BRNG "
                     "analysis (still excluded from duplicate-frame detection)"
                 )
-        avoid_segments = black_segments + brng_bars_regions
-        duplicate_avoid_segments = black_segments + bars_regions
+        avoid_segments = merge_avoid_segments(black_segments, brng_bars_regions)
+        duplicate_avoid_segments = merge_avoid_segments(black_segments, bars_regions)
 
         if self.check_cancelled():
             return results
@@ -5103,6 +5129,30 @@ class EnhancedFrameAnalysis:
                     results['qctools_violations_found'] = "No BRNG violations detected in content"
                 else:
                     results['qctools_violations_found'] = frames_with_qctools_violations
+
+                # Bins holding no analyzable picture — signal loss, static,
+                # concealment repetition — join the black and bars spans that
+                # periods are kept away from. Without this they compete for
+                # periods and usually win: flat-field signal loss sits below
+                # broadcast black, so its BRNG is ~1.0, the highest score a
+                # bin can have.
+                suitability = bin_suitability.assess_bins(
+                    getattr(parser, 'bin_profiles', {}),
+                    bit_depth_10=parser.bit_depth_10)
+                if suitability.note:
+                    logger.warning(f"  {suitability.note}")
+                if suitability.unsuitable_regions:
+                    logger.info(f"  Excluding {len(suitability.unsuitable_regions)} "
+                                f"region(s) with no analyzable picture:")
+                    for line in bin_suitability.describe_assessment(suitability):
+                        logger.debug(line)
+                    avoid_segments = merge_avoid_segments(
+                        avoid_segments, suitability.unsuitable_regions)
+                    results['unanalyzable_regions'] = [
+                        {'start': start, 'end': end, 'duration': end - start,
+                         'reasons': list(suitability.reasons_for(start))}
+                        for start, end in suitability.unsuitable_regions
+                    ]
             elif not self.qctools_parser:
                 logger.info("No QCTools report found")
 
