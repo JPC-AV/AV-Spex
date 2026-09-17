@@ -100,9 +100,16 @@ Three things to know before building on it:
   `BinProfile.metrics` / `parser.bin_profile_metrics` name the families that did. Consumers must
   renormalize over what is present rather than assume a fixed feature set.
 - **Audio frames are interleaved with video frames on the same timeline.** They carry no
-  signalstats, so they were always no-ops for the violation list, but they would inflate per-bin
-  frame counts and read as out-of-order video. The parse loop now skips any frame whose
-  `media_type` is present and not `video` (a missing attribute is still treated as video).
+  signalstats, so `_is_black_frame` and the violation extractor both read them as ordinary
+  not-black picture. Both report scans — `parse_for_violations_streaming()` and
+  `detect_black_segments()` — now skip any frame whose `media_type` is present and not `video`
+  (a missing attribute is still treated as video). In the violation scan they inflated per-bin
+  frame counts and read as out-of-order video; in the black scan an audio frame landing more than
+  `gap_tolerance` (0.5s) after the last black video frame closes a segment early, or splits one in
+  two that `min_duration` then discards. Neither shows on the sample reports, whose audio frames
+  arrive about every 0.1s, well inside the tolerance — the guard is for reports with sparser audio.
+  `_detect_bit_depth()` still scans all frames, but returns on the first frame carrying UAVG/VAVG,
+  which real video frames always do.
 - **One bin's samples are held at a time.** Bins are summarized and released as the timeline
   advances, so memory does not scale with tape length. A frame arriving for an already-closed bin is
   counted in `out_of_order_frames` and dropped rather than merged into a finished profile.

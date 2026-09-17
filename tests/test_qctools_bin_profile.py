@@ -448,3 +448,60 @@ def test_parser_treats_frames_without_media_type_as_video(tmp_path):
     parser = fa.QCToolsParser(str(untyped))
     parser.parse_for_violations_streaming()
     assert parser.bin_profiles[0.0].frames == 1
+
+
+# ===========================================================================
+# detect_black_segments — same audio-frame handling
+# ===========================================================================
+
+def _black(ts):
+    # UAVG pins the report to 10-bit scale, which is what _BLACK_TAGS is
+    # written for: without a chroma tag _detect_bit_depth falls back to YMAX,
+    # reads these frames as 8-bit, and the black thresholds scale down by 4.
+    return {"pkt_pts_time": str(ts), "tags": dict(_BLACK_TAGS, UAVG="512")}
+
+
+def _with_audio_frame(path, at, before_ts, tmp_path, name):
+    """Insert an audio frame at `at`, just before the video frame at `before_ts`."""
+    text = open(path).read().replace(
+        f'<frame media_type="video" pkt_pts_time="{before_ts}"',
+        f'<frame media_type="audio" pkt_pts_time="{at}"></frame>'
+        f'<frame media_type="video" pkt_pts_time="{before_ts}"')
+    out = tmp_path / name
+    out.write_text(text)
+    return str(out)
+
+
+def test_black_segments_ignore_interleaved_audio_frames(tmp_path):
+    """An audio frame is not a non-black video frame and must not end a segment.
+
+    The frames here are 1s apart, so a single audio frame landing between them
+    exceeds the 0.5s gap tolerance: counted as picture, it splits one 5s
+    segment into two that min_duration then discards.
+    """
+    frames = [_black(float(t)) for t in range(6)]
+    path = _write_qctools(tmp_path, frames)
+    mixed = _with_audio_frame(path, at=2.5, before_ts="3.0",
+                              tmp_path=tmp_path, name="mixed_black.xml")
+
+    parser = fa.QCToolsParser(mixed)
+    segments = parser.detect_black_segments(min_duration=2.0)
+    assert segments == [(0.0, 5.0)]
+
+
+def test_black_segments_still_end_at_real_picture(tmp_path):
+    frames = [_black(float(t)) for t in range(4)]
+    frames += [{"pkt_pts_time": str(float(t)), "tags": dict(_NORMAL_TAGS, UAVG="512")}
+               for t in range(4, 8)]
+    parser = fa.QCToolsParser(_write_qctools(tmp_path, frames))
+    assert parser.detect_black_segments(min_duration=2.0) == [(0.0, 3.0)]
+
+
+def test_black_segments_treat_untyped_frames_as_video(tmp_path):
+    frames = [_black(float(t)) for t in range(6)]
+    text = open(_write_qctools(tmp_path, frames)).read().replace('media_type="video" ', '')
+    untyped = tmp_path / "untyped_black.xml"
+    untyped.write_text(text)
+
+    parser = fa.QCToolsParser(str(untyped))
+    assert parser.detect_black_segments(min_duration=2.0) == [(0.0, 5.0)]

@@ -637,6 +637,7 @@ class QCToolsParser:
         black_segments = []
         current_black_start = None
         last_black_time = None
+        audio_frames_skipped = 0
         # Allow small gaps (e.g., a single non-black frame in the middle of a black segment)
         gap_tolerance = 0.5  # seconds
         
@@ -652,6 +653,20 @@ class QCToolsParser:
             
             for event, elem in parser:
                 if event == 'end' and elem.tag == 'frame':
+                    # Audio frames are interleaved with video on the same
+                    # timeline and carry no signalstats, so _is_black_frame
+                    # reads them as not-black. One landing more than
+                    # gap_tolerance after the last black video frame closes a
+                    # black segment early — or splits one in two, which
+                    # min_duration can then discard entirely. Reports that
+                    # omit media_type are treated as video.
+                    media_type = elem.get('media_type')
+                    if media_type is not None and media_type != 'video':
+                        audio_frames_skipped += 1
+                        elem.clear()
+                        root.clear()
+                        continue
+
                     timestamp_str = elem.get('pkt_pts_time')
                     if not timestamp_str:
                         elem.clear()
@@ -687,6 +702,10 @@ class QCToolsParser:
                     black_segments.append((current_black_start, last_black_time))
             
             file_handle.close()
+
+            if audio_frames_skipped > 0:
+                logger.debug(f"  Skipped {audio_frames_skipped:,} audio frames "
+                             f"while scanning for black segments")
             
         except Exception as e:
             logger.error(f"Error detecting black segments: {e}")
