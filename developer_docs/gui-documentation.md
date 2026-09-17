@@ -276,7 +276,7 @@ qct-parse-backed check enables it, turning all of them off disables it (mirrorin
 - **Detect Color Bars** (`qct_parse.barsDetection`) — Evaluate Color Bars and Export Thumbnails are
   disabled while it is off
 - **Evaluate Color Bars** (`qct_parse.evaluateBars`), with **Compare against** radios
-  (`qct_parse.evaluateBarsReference`: `detected` / `smpte`), enabled only while Evaluate is on
+  (`qct_parse.evaluateBarsReference`: `detected` / `smpte` / `both`), enabled only while Evaluate is on
 - **Export Thumbnails** (`qct_parse.thumbExport`)
 - **CLAMS Bars + Tone Detection** (`clams_detection.run_tool`) — runs the SSIM bars detector and the
   cross-correlation tone detector before qct-parse. Numeric tuning is **JSON-only**. The head-bars

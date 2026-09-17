@@ -280,6 +280,7 @@ Use **Compare against** to choose the reference:
 
 - **Bars detected in this video** (default): grades against the signal values measured from this file's own color bars. If no bars are found in the video, the standard SMPTE values are used as a fallback.
 - **Standard SMPTE values**: always grades against the standard SMPTE color bar values from the config, ignoring any bars detected in the video. When bars are also detected, the report still charts the file's measured bars alongside the SMPTE reference for comparison.
+- **Both**: runs the evaluation twice — once against the detected bars and once against standard SMPTE values. In the report, the threshold evaluation and the failure timeline each carry a **Graded against** switch (*This tape's detected color bars* / *Standard SMPTE values*); clicking either switch flips both sections together. If no bars are detected, only the SMPTE evaluation runs and the report shows it without a switch. The SMPTE results are written to `qct-parse_colorbars_eval_smpte_summary.csv` and `qct-parse_colorbars_eval_smpte_failures.csv`.
 
 ### Timeline of Signal Distribution
 
@@ -303,6 +304,8 @@ The **Timeline of Signal Distribution** section of the HTML report charts the re
 *The timeline for a half-hour tape. The plum band at the head marks the detected color bars, which the evaluation skips; the gray bands are detected black segments and the three tan bands are the periods sampled by frame analysis. YMAX (blue) accounts for most of the failures here, spiking to 100% of frames in brief bursts, while the dashed teal BRNG line rises alongside it around 17:00 and 21:30. Thumbnails above the plot show a representative frame from each of the five largest failure clusters, with out-of-range areas highlighted in cyan.*
 
 **Show all failures**: An expandable table below the thumbnails lists every failing frame with its timestamp, tag, value, and threshold — the full contents of `qct-parse_colorbars_eval_failures.csv`.
+
+**Show thresholds**: Beside it, a second expandable table lists the threshold each tag was graded against and whether a frame fails by going above or below it — the values from `qct-parse_colorbars_eval_thresholds.csv` (`..._smpte_thresholds.csv` for the SMPTE results). Every tag is listed, including tags that never failed, and the note above the table says whether the values came from this file's own detected bars or from the standard SMPTE set.
 
 Times along the timeline are elapsed time from the start of the file, not the file's own embedded timecode, so they may not line up exactly with an NLE's timecode display. The chart can be saved as a PNG using the camera icon in the Plotly toolbar at the top right of the plot.
 
@@ -644,7 +647,7 @@ av-spex [path/to/directory]
 - `--enable-chroma-phase-detection {on,off}` — Toggle chroma phase error detection. Auto-enables qct-parse if needed.
 - `--enable-tone-leak-detection {on,off}` — Toggle 1 kHz reference-tone leak detection. Auto-enables qct-parse if needed.
 - `--enable-clams-detection {on,off}` — Toggle CLAMS SSIM bars + cross-correlation tone detector
-- `--evaluate-bars-reference {detected,smpte}` — What Evaluate Color Bars grades against: this file's own detected bars (default) or standard SMPTE values. Only takes effect when Evaluate Color Bars is on.
+- `--evaluate-bars-reference {detected,smpte,both}` — What Evaluate Color Bars grades against: this file's own detected bars (default), standard SMPTE values, or both (the report toggles between the two result sets). Only takes effect when Evaluate Color Bars is on.
 
 **Frame analysis:**
 - `--enable-bitplane-check {on,off}` — Toggle the 9th/10th bit verification
@@ -719,7 +722,7 @@ Controls which tools run and what outputs are generated.
 - `exiftool`, `ffprobe`, `mediainfo`, `mediatrace`, `mkvalidator`: `run_tool` and `check_tool` (mkvalidator only applies to MKV inputs and is skipped for other containers)
 - `mediaconch`: `run_mediaconch` and `mediaconch_policy` (path to XML policy file)
 - `qctools`: `run_tool`
-- `qct_parse`: `run_tool`, `barsDetection`, `evaluateBars`, `evaluateBarsReference` (`detected` or `smpte`), `thumbExport`, `audio_analysis`, `detect_clamped_levels`, `detect_chroma_phase_errors`, `detect_tone_leak`
+- `qct_parse`: `run_tool`, `barsDetection`, `evaluateBars`, `evaluateBarsReference` (`detected`, `smpte` or `both`), `thumbExport`, `audio_analysis`, `detect_clamped_levels`, `detect_chroma_phase_errors`, `detect_tone_leak`
 - `clams_detection`: `run_tool` (numeric `bars` and `tone` sub-parameters are JSON-only)
 
 **Input settings**

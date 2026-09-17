@@ -207,8 +207,10 @@ class ComplexWindow(QWidget, ThemeableMixin):
         self.bars_ref_group = QButtonGroup(self)
         self.bars_ref_detected_radio = QRadioButton("Bars detected in this video")
         self.bars_ref_smpte_radio = QRadioButton("Standard SMPTE values")
+        self.bars_ref_both_radio = QRadioButton("Both")
         self.bars_ref_group.addButton(self.bars_ref_detected_radio)
         self.bars_ref_group.addButton(self.bars_ref_smpte_radio)
+        self.bars_ref_group.addButton(self.bars_ref_both_radio)
         self.bars_ref_detected_radio.setChecked(True)
 
         self._add_option(layout, self._indent_row(self.bars_ref_detected_radio, self.INDENT * 2),
@@ -220,6 +222,11 @@ class ComplexWindow(QWidget, ThemeableMixin):
             self._desc_label(
                 "Always uses standard SMPTE color bar values, ignoring any "
                 "bars in the video.",
+                extra_indent=self.INDENT * 2))
+        self._add_option(layout, self._indent_row(self.bars_ref_both_radio, self.INDENT * 2),
+            self._desc_label(
+                "Runs the evaluation against both references; the report lets "
+                "you toggle between the two sets of results.",
                 extra_indent=self.INDENT * 2))
 
         self.thumb_export_cb = self._make_checkbox("Export Thumbnails")
@@ -472,7 +479,7 @@ class ComplexWindow(QWidget, ThemeableMixin):
 
         evaluate_on = bars_on and self.evaluate_bars_cb.isChecked()
         for w in (self.bars_ref_label, self.bars_ref_detected_radio,
-                  self.bars_ref_smpte_radio):
+                  self.bars_ref_smpte_radio, self.bars_ref_both_radio):
             w.setEnabled(evaluate_on)
 
     def on_theme_changed(self, palette):
@@ -513,9 +520,11 @@ class ComplexWindow(QWidget, ThemeableMixin):
                    self.detect_tone_leak_cb):
             cb.stateChanged.connect(self.on_qct_parse_flag_changed)
 
-        # Bars-reference radios: the detected radio's toggled fires exactly
-        # once per user change (exclusive pair), so one connection is enough.
-        self.bars_ref_detected_radio.toggled.connect(self.on_qct_parse_flag_changed)
+        # Bars-reference radios: exclusive group, so connect to the group's
+        # buttonToggled filtered to the newly checked button — one save per
+        # user change regardless of which radio was picked.
+        self.bars_ref_group.buttonToggled.connect(
+            lambda _button, checked: checked and self.on_qct_parse_flag_changed())
 
         # CLAMS detection — single toggle runs both bars and tone detectors.
         # Numeric tuning is JSON-only.
@@ -614,7 +623,8 @@ class ComplexWindow(QWidget, ThemeableMixin):
         self.thumb_export_cb.setChecked(run_tool and qct.thumbExport)
         bars_ref = getattr(qct, 'evaluateBarsReference', 'detected')
         self.bars_ref_smpte_radio.setChecked(bars_ref == 'smpte')
-        self.bars_ref_detected_radio.setChecked(bars_ref != 'smpte')
+        self.bars_ref_both_radio.setChecked(bars_ref == 'both')
+        self.bars_ref_detected_radio.setChecked(bars_ref not in ('smpte', 'both'))
         self.audio_analysis_cb.setChecked(run_tool and getattr(qct, 'audio_analysis', False))
         self.detect_clamped_levels_cb.setChecked(run_tool and getattr(qct, 'detect_clamped_levels', False))
         self.detect_chroma_phase_errors_cb.setChecked(run_tool and getattr(qct, 'detect_chroma_phase_errors', False))
@@ -714,8 +724,12 @@ class ComplexWindow(QWidget, ThemeableMixin):
         config_mgr.update_config('checks', updates)
 
     def _bars_reference_value(self):
-        """Current Evaluate Color Bars reference: 'smpte' or 'detected'."""
-        return 'smpte' if self.bars_ref_smpte_radio.isChecked() else 'detected'
+        """Current Evaluate Color Bars reference: 'smpte', 'both' or 'detected'."""
+        if self.bars_ref_smpte_radio.isChecked():
+            return 'smpte'
+        if self.bars_ref_both_radio.isChecked():
+            return 'both'
+        return 'detected'
 
     def on_frame_analysis_mode_changed(self, index):
         """Handle border detection mode changes"""

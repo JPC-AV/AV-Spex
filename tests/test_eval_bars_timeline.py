@@ -8,6 +8,9 @@ from AV_Spex.utils.generate_report import (
     summarize_failures,
     get_frame_analysis_periods,
     get_frame_analysis_black_segments,
+    _bars_reference_switch_html,
+    _read_bars_thresholds_csv,
+    _render_bars_evaluation_html,
 )
 
 
@@ -236,3 +239,109 @@ Total,50,0.33"""
     assert 'id="link_tag_' not in html
     assert 'id="table_tag_' not in html
     assert "Peak Values outside of Threshold" not in html
+
+
+def test_make_eval_bars_timeline_html_table_id(two_cluster_csv):
+    # Two timelines on one page (the "both" bars reference) need distinct table ids
+    html = make_eval_bars_timeline_html(two_cluster_csv, "JPC_AV_TEST",
+                                        video_duration=200.0, table_id="evalbars_smpte_all")
+    assert "toggleTable('evalbars_smpte_all')" in html
+    assert 'id="table_evalbars_smpte_all"' in html
+    assert "evalbars_all'" not in html
+
+
+def test_bars_reference_switch_html():
+    html = _bars_reference_switch_html("<p>DETECTED</p>", "<p>SMPTE</p>")
+    assert "function showBarsReference" in html
+    # Detected panel visible first, SMPTE panel hidden
+    assert '<div class="bars-ref-panel" data-bars-ref="detected"><p>DETECTED</p></div>' in html
+    assert '<div class="bars-ref-panel" data-bars-ref="smpte" hidden><p>SMPTE</p></div>' in html
+    assert 'class="bars-ref-btn active" data-bars-ref="detected" aria-pressed="true"' in html
+    assert 'class="bars-ref-btn" data-bars-ref="smpte" aria-pressed="false"' in html
+
+
+def test_bars_reference_switch_html_missing_side():
+    html = _bars_reference_switch_html("<p>DETECTED</p>", None)
+    assert "No results for this reference." in html
+
+
+def _write_eval_summary(tmp_path, name, total_frames, failed):
+    lines = ["**************************", "qct-parse color bars evaluation summary",
+             f"TotalFrames,{total_frames}", "Tag,Number of failed frames,Percentage of failed frames"]
+    for tag, count in failed.items():
+        lines.append(f"{tag},{count},{count / total_frames * 100:.2f}")
+    path = tmp_path / name
+    path.write_text("\n".join(lines) + "\n")
+    return str(path)
+
+
+def test_render_bars_evaluation_html_with_failures(tmp_path, two_cluster_csv):
+    summary = _write_eval_summary(tmp_path, "summary.csv", 6000, {"YMAX": 30, "SATMAX": 20})
+    context = dict(video_duration=200.0, frame_rate=29.97, analysis_periods=[],
+                   black_segments=[], bars_regions=[])
+    eval_html, timeline_html = _render_bars_evaluation_html(
+        summary, two_cluster_csv, [], {}, "JPC_AV_TEST", context, table_id="evalbars_smpte_all")
+    assert "see timeline below" in eval_html
+    assert "toggleTable('evalbars_smpte_all')" in timeline_html
+
+
+def test_render_bars_evaluation_html_no_failures(tmp_path):
+    summary = _write_eval_summary(tmp_path, "summary.csv", 6000, {"YMAX": 0})
+    eval_html, timeline_html = _render_bars_evaluation_html(
+        summary, None, [], {}, "JPC_AV_TEST", {})
+    assert "within the median values of the color bars" in eval_html
+    assert timeline_html is None
+
+
+def test_render_bars_evaluation_html_no_summary():
+    assert _render_bars_evaluation_html(None, None, [], {}, "JPC_AV_TEST", {}) == (None, None)
+
+
+def _write_thresholds_csv(tmp_path, name="qct-parse_colorbars_eval_thresholds.csv"):
+    path = tmp_path / name
+    path.write_text("The thresholds defined by the median values of QCTools filters in the "
+                    "identified color bars are:\nYMAX,940\nYMIN,28\nSATMAX,358\nBRNG,0.0118\n")
+    return str(path)
+
+
+def test_read_bars_thresholds_csv(tmp_path):
+    description, thresholds = _read_bars_thresholds_csv(_write_thresholds_csv(tmp_path))
+    assert description.startswith("The thresholds defined")
+    assert thresholds == {"YMAX": "940", "YMIN": "28", "SATMAX": "358", "BRNG": "0.0118"}
+
+
+def test_read_bars_thresholds_csv_missing_file(tmp_path):
+    assert _read_bars_thresholds_csv(str(tmp_path / "nope.csv")) == (None, {})
+    assert _read_bars_thresholds_csv(None) == (None, {})
+
+
+def test_make_eval_bars_timeline_html_thresholds_from_sidecar(two_cluster_csv, tmp_path):
+    html = make_eval_bars_timeline_html(two_cluster_csv, "JPC_AV_TEST", video_duration=200.0,
+                                        thresholds_csv=_write_thresholds_csv(tmp_path))
+    assert 'id="table_evalbars_all_thresholds"' in html
+    assert "Show thresholds" in html
+    # Every tag from the sidecar is listed, including ones that never failed,
+    # each with the direction that counts as a failure
+    for tag in ("YMAX", "YMIN", "SATMAX", "BRNG"):
+        assert f"<td>{tag}</td>" in html
+    assert "<td>0.0118</td>" in html
+    assert "<td>Below</td>" in html and "<td>Above</td>" in html
+    # The intro paragraph points at the table
+    assert "listed under <b>Show thresholds</b>" in html
+
+
+def test_make_eval_bars_timeline_html_thresholds_fall_back_to_failures(two_cluster_csv):
+    """Report dirs written before the thresholds sidecar existed still list the
+    thresholds carried by the failure rows."""
+    html = make_eval_bars_timeline_html(two_cluster_csv, "JPC_AV_TEST", video_duration=200.0)
+    assert "Show thresholds" in html
+    assert "<td>YMAX</td>" in html and "<td>897</td>" in html
+    assert "<td>SATMAX</td>" in html and "<td>358</td>" in html
+
+
+def test_make_eval_bars_timeline_html_thresholds_table_id(two_cluster_csv, tmp_path):
+    html = make_eval_bars_timeline_html(two_cluster_csv, "JPC_AV_TEST", video_duration=200.0,
+                                        table_id="evalbars_smpte_all",
+                                        thresholds_csv=_write_thresholds_csv(tmp_path))
+    assert 'id="table_evalbars_smpte_all_thresholds"' in html
+    assert 'id="link_evalbars_smpte_all_thresholds"' in html

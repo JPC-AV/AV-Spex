@@ -223,8 +223,8 @@ The scripts will confirm that the digital files conform to predetermined specifi
                            help='Enable/disable chroma phase error detection in qct-parse (detects tape tracking artifacts where chroma collapses toward cyan/magenta). Auto-enables qct_parse.run_tool.')
     qct_group.add_argument('--enable-tone-leak-detection', choices=['on', 'off'],
                            help='Enable/disable reference-tone leak detection (1 kHz calibration tone crosstalk heard as a faint whine/squeak in quiet passages). Analyzes decoded audio directly. Auto-enables qct_parse.run_tool.')
-    qct_group.add_argument('--evaluate-bars-reference', choices=['detected', 'smpte'],
-                           help="What Evaluate Color Bars grades content against: 'detected' (default) uses this file's own detected bars, falling back to standard SMPTE values when none are found; 'smpte' always grades against standard SMPTE values. Only takes effect when evaluateBars is on.")
+    qct_group.add_argument('--evaluate-bars-reference', choices=['detected', 'smpte', 'both'],
+                           help="What Evaluate Color Bars grades content against: 'detected' (default) uses this file's own detected bars, falling back to standard SMPTE values when none are found; 'smpte' always grades against standard SMPTE values; 'both' runs both evaluations and the HTML report toggles between them. Only takes effect when evaluateBars is on.")
 
     # Frame analysis sub-steps + tuning
     frame_group = parser.add_argument_group("Frame analysis")
