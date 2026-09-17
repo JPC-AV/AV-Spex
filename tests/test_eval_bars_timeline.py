@@ -9,6 +9,7 @@ from AV_Spex.utils.generate_report import (
     get_frame_analysis_periods,
     get_frame_analysis_black_segments,
     _bars_reference_switch_html,
+    _read_bars_thresholds_csv,
     _render_bars_evaluation_html,
 )
 
@@ -294,3 +295,53 @@ def test_render_bars_evaluation_html_no_failures(tmp_path):
 
 def test_render_bars_evaluation_html_no_summary():
     assert _render_bars_evaluation_html(None, None, [], {}, "JPC_AV_TEST", {}) == (None, None)
+
+
+def _write_thresholds_csv(tmp_path, name="qct-parse_colorbars_eval_thresholds.csv"):
+    path = tmp_path / name
+    path.write_text("The thresholds defined by the median values of QCTools filters in the "
+                    "identified color bars are:\nYMAX,940\nYMIN,28\nSATMAX,358\nBRNG,0.0118\n")
+    return str(path)
+
+
+def test_read_bars_thresholds_csv(tmp_path):
+    description, thresholds = _read_bars_thresholds_csv(_write_thresholds_csv(tmp_path))
+    assert description.startswith("The thresholds defined")
+    assert thresholds == {"YMAX": "940", "YMIN": "28", "SATMAX": "358", "BRNG": "0.0118"}
+
+
+def test_read_bars_thresholds_csv_missing_file(tmp_path):
+    assert _read_bars_thresholds_csv(str(tmp_path / "nope.csv")) == (None, {})
+    assert _read_bars_thresholds_csv(None) == (None, {})
+
+
+def test_make_eval_bars_timeline_html_thresholds_from_sidecar(two_cluster_csv, tmp_path):
+    html = make_eval_bars_timeline_html(two_cluster_csv, "JPC_AV_TEST", video_duration=200.0,
+                                        thresholds_csv=_write_thresholds_csv(tmp_path))
+    assert 'id="table_evalbars_all_thresholds"' in html
+    assert "Show thresholds" in html
+    # Every tag from the sidecar is listed, including ones that never failed,
+    # each with the direction that counts as a failure
+    for tag in ("YMAX", "YMIN", "SATMAX", "BRNG"):
+        assert f"<td>{tag}</td>" in html
+    assert "<td>0.0118</td>" in html
+    assert "<td>Below</td>" in html and "<td>Above</td>" in html
+    # The intro paragraph points at the table
+    assert "listed under <b>Show thresholds</b>" in html
+
+
+def test_make_eval_bars_timeline_html_thresholds_fall_back_to_failures(two_cluster_csv):
+    """Report dirs written before the thresholds sidecar existed still list the
+    thresholds carried by the failure rows."""
+    html = make_eval_bars_timeline_html(two_cluster_csv, "JPC_AV_TEST", video_duration=200.0)
+    assert "Show thresholds" in html
+    assert "<td>YMAX</td>" in html and "<td>897</td>" in html
+    assert "<td>SATMAX</td>" in html and "<td>358</td>" in html
+
+
+def test_make_eval_bars_timeline_html_thresholds_table_id(two_cluster_csv, tmp_path):
+    html = make_eval_bars_timeline_html(two_cluster_csv, "JPC_AV_TEST", video_duration=200.0,
+                                        table_id="evalbars_smpte_all",
+                                        thresholds_csv=_write_thresholds_csv(tmp_path))
+    assert 'id="table_evalbars_smpte_all_thresholds"' in html
+    assert 'id="link_evalbars_smpte_all_thresholds"' in html

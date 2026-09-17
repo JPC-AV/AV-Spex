@@ -393,11 +393,13 @@ class ReportArtifacts:
     colorbars_values_output: Optional[str] = None
     windowed_colorbars_values: List[str] = field(default_factory=list)
     colorbars_eval_fails_csv: Optional[str] = None
+    colorbars_eval_thresholds_csv: Optional[str] = None
     # SMPTE pass of an evaluation run with the "both" reference. Present only
     # for such runs, and their presence is what switches the report to the
     # detected/SMPTE toggle.
     colorbars_eval_smpte_summary: Optional[str] = None
     colorbars_eval_smpte_fails_csv: Optional[str] = None
+    colorbars_eval_smpte_thresholds_csv: Optional[str] = None
 
     # qct-parse — threshold profile and tag checks
     qctools_content_check_outputs: List[str] = field(default_factory=list)
@@ -461,6 +463,8 @@ _QCT_PARSE_SIDECARS = (
     ("qct-parse_colorbars_eval_failures", "colorbars_eval_fails_csv"),
     ("qct-parse_colorbars_eval_smpte_summary",  "colorbars_eval_smpte_summary"),
     ("qct-parse_colorbars_eval_smpte_failures", "colorbars_eval_smpte_fails_csv"),
+    ("qct-parse_colorbars_eval_smpte_thresholds", "colorbars_eval_smpte_thresholds_csv"),
+    ("qct-parse_colorbars_eval_thresholds",      "colorbars_eval_thresholds_csv"),
     ("qct-parse_profile_summary",         "qctools_profile_check_output"),
     ("qct-parse_profile_failures",        "profile_fails_csv"),
     ("qct-parse_tags_summary.csv",        "tags_check_output"),
@@ -3385,15 +3389,17 @@ FAILURE_SECTION_JS = """
         newWindow.document.close();
     }
 
-    function toggleTable(tagId) {
+    function toggleTable(tagId, showText, hideText) {
+        showText = showText || 'Show all failures \u25BC';
+        hideText = hideText || 'Hide all failures \u25B2';
         var table = document.getElementById('table_' + tagId);
         var link = document.getElementById('link_' + tagId);
         if (table.style.display === 'none') {
             table.style.display = 'block';
-            link.textContent = 'Hide all failures ▲';
+            link.textContent = hideText;
         } else {
             table.style.display = 'none';
-            link.textContent = 'Show all failures ▼';
+            link.textContent = showText;
         }
     }
     </script>
@@ -3842,7 +3848,77 @@ def get_frame_analysis_black_segments(frame_outputs):
         return []
 
 
-def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_duration=None, frame_rate=None, analysis_periods=None, black_segments=None, bars_regions=None, table_id='evalbars_all'):
+# Tags whose threshold is a floor rather than a ceiling: a frame fails by
+# falling below it. Mirrors threshFinder()'s operator choice in qct_parse.
+EVAL_BARS_MINIMUM_TAGS = ('YMIN', 'UMIN', 'VMIN', 'SATMIN')
+
+
+def _format_threshold(threshold):
+    """Render a threshold the way qct-parse wrote it: BRNG keeps its decimals,
+    the 0-1023 level tags are whole numbers."""
+    return f"{threshold:g}" if threshold != int(threshold) else str(int(threshold))
+
+
+def _read_bars_thresholds_csv(thresholds_csv_path):
+    """Read a qct-parse bars-evaluation thresholds CSV.
+
+    Returns (description, {tag: threshold}); ({}, None) when the file is
+    absent or unreadable. The first row is prose describing where the
+    thresholds came from; the rest are tag,value pairs.
+    """
+    if not thresholds_csv_path or not os.path.isfile(thresholds_csv_path):
+        return None, {}
+    try:
+        with open(thresholds_csv_path, 'r', encoding='utf-8') as csvfile:
+            rows = [row for row in csv.reader(csvfile) if row]
+    except Exception as e:
+        logger.error(f"Error reading bars thresholds CSV {thresholds_csv_path}: {e}")
+        return None, {}
+    description = rows[0][0] if rows and len(rows[0]) == 1 else None
+    thresholds = {row[0]: row[1] for row in rows if len(row) == 2}
+    return description, thresholds
+
+
+def _make_bars_thresholds_table_html(thresholds, description, table_id):
+    """Expandable table of the thresholds the evaluation graded against."""
+    if not thresholds:
+        return "", ""
+    rows = []
+    for tag, value in thresholds.items():
+        direction = "Below" if tag in EVAL_BARS_MINIMUM_TAGS else "Above"
+        # Config-sourced SMPTE values arrive as floats ("940.0"); the level
+        # tags are whole numbers on the 0-1023 scale, BRNG keeps its decimals.
+        try:
+            value = _format_threshold(float(value))
+        except (TypeError, ValueError):
+            pass
+        rows.append(f"""
+        <tr>
+            <td>{tag}</td>
+            <td>{value}</td>
+            <td>{direction}</td>
+        </tr>
+        """)
+    link = (f'<a id="link_{table_id}" href="javascript:void(0);" '
+            f'onclick="toggleTable(&quot;{table_id}&quot;, &quot;Show thresholds &#9660;&quot;, &quot;Hide thresholds &#9650;&quot;)" '
+            f'style="color: var(--report-accent); text-decoration: underline;">Show thresholds &#9660;</a>')
+    table = f"""
+    <div id="table_{table_id}" style="display: none; margin-top: 10px; max-width: 520px;">
+        <p style="font-size: 13px; margin: 0 0 6px 0;">{description or 'Thresholds used by this evaluation:'}</p>
+        <table style="border-collapse: collapse; width: 100%; border: 1px solid var(--report-ink);">
+            <tr style="background-color: #fbe4eb;">
+                <th style="border: 1px solid var(--report-ink); padding: 8px;">Tag</th>
+                <th style="border: 1px solid var(--report-ink); padding: 8px;">Threshold</th>
+                <th style="border: 1px solid var(--report-ink); padding: 8px;">Fails when</th>
+            </tr>
+            {''.join(rows)}
+        </table>
+    </div>
+    """
+    return link, table
+
+
+def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_duration=None, frame_rate=None, analysis_periods=None, black_segments=None, bars_regions=None, table_id='evalbars_all', thresholds_csv=None):
     """
     Build the failure-distribution timeline for the color bars evaluation.
 
@@ -3877,6 +3953,11 @@ def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_d
         table_id (str, optional): Element id stem of the expandable failures
                                   table; must be unique when more than one
                                   timeline is on the page.
+        thresholds_csv (str, optional): Path to the evaluation's thresholds
+                                        CSV; listed in a second expandable
+                                        table beside the failures one. Falls
+                                        back to the thresholds carried by the
+                                        failures themselves.
 
     Returns:
         str or None: HTML string containing the timeline, None if there is no data.
@@ -4090,8 +4171,23 @@ def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_d
             <td>{threshold}</td>
         </tr>
         """)
+    # Thresholds every frame was graded against. Prefer the sidecar, which
+    # covers tags that never failed; older report dirs have no sidecar, so fall
+    # back to the thresholds carried by the failure rows themselves.
+    thresholds_description, thresholds = _read_bars_thresholds_csv(thresholds_csv)
+    if not thresholds:
+        thresholds = {tag: _format_threshold(threshold)
+                      for _, _, tag, _, threshold in rows}
+        thresholds = {tag: thresholds[tag] for tag in ordered_tags if tag in thresholds}
+    thresholds_link_html, thresholds_table_html = _make_bars_thresholds_table_html(
+        thresholds, thresholds_description, f"{table_id}_thresholds")
+
     full_table_html = f"""
-    <a id="link_{table_id}" href="javascript:void(0);" onclick="toggleTable('{table_id}')" style="color: var(--report-accent); text-decoration: underline; margin-top: 10px;">Show all failures ▼</a>
+    <div style="display: flex; flex-wrap: wrap; gap: 24px; margin-top: 10px;">
+        <a id="link_{table_id}" href="javascript:void(0);" onclick="toggleTable('{table_id}')" style="color: var(--report-accent); text-decoration: underline;">Show all failures ▼</a>
+        {thresholds_link_html}
+    </div>
+    {thresholds_table_html}
     <div id="table_{table_id}" style="display: none; margin-top: 10px; max-height: 400px; overflow-y: auto;">
         <table style="border-collapse: collapse; width: 100%; border: 1px solid var(--report-ink);">
             <tr style="background-color: #fbe4eb;">
@@ -4106,6 +4202,8 @@ def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_d
     """
 
     bin_label = f"{bin_width:.1f}".rstrip('0').rstrip('.')
+    thresholds_sentence = (" &mdash; the thresholds themselves are listed under <b>Show thresholds</b> below the chart."
+                           if thresholds else ".")
     periods_note = ""
     if analysis_periods:
         periods_note = " Shaded bands mark the periods sampled by frame analysis (signalstats/BRNG)."
@@ -4125,7 +4223,7 @@ def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_d
     <div style="background-color: var(--report-paper); padding: 10px; margin-top: 10px;">
         <p><b>Failure distribution over the video's duration</b></p>
         <p style="font-size: 13px;">Each line shows, per {bin_label}-second interval, the percentage of frames
-        whose value fell outside that tag's threshold.
+        whose value fell outside that tag's threshold{thresholds_sentence}
         Dotted lines mark the largest failure clusters; the thumbnail above each shows a representative frame
         (out-of-range areas highlighted in cyan).{brng_note}{periods_note}</p>
         {chart_html}
@@ -4137,7 +4235,8 @@ def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_d
 
 
 def _render_bars_evaluation_html(summary_csv, failures_csv, peaks, thumbs_dict, video_id,
-                                 timeline_context, check_cancelled=None, table_id='evalbars_all'):
+                                 timeline_context, check_cancelled=None, table_id='evalbars_all',
+                                 thresholds_csv=None):
     """Render one color bars evaluation result set.
 
     Returns (evaluation_html, timeline_html): the per-tag pies (or an
@@ -4152,7 +4251,9 @@ def _render_bars_evaluation_html(summary_csv, failures_csv, peaks, thumbs_dict, 
                                            failure_csv_path=failures_csv,
                                            check_cancelled=check_cancelled, failure_details=False)
         timeline_html = make_eval_bars_timeline_html(failures_csv, video_id, peaks=peaks,
-                                                     table_id=table_id, **timeline_context)
+                                                     table_id=table_id,
+                                                     thresholds_csv=thresholds_csv,
+                                                     **timeline_context)
         return eval_html, timeline_html
     eval_html = """
     <div style="display:inline-block; margin-right: 10px; padding-bottom: 20px;">
@@ -6827,15 +6928,17 @@ def _report_head_html(video_id, logo_image_path, color_strip_store, waveform_sto
             newWindow.document.close();
         }}
 
-        function toggleTable(tagId) {{
+        function toggleTable(tagId, showText, hideText) {{
+            showText = showText || 'Show all failures ▼';
+            hideText = hideText || 'Hide all failures ▲';
             var table = document.getElementById('table_' + tagId);
             var link = document.getElementById('link_' + tagId);
             if (table.style.display === 'none') {{
                 table.style.display = 'block';
-                link.textContent = 'Hide all failures ▲';
+                link.textContent = hideText;
             }} else {{
                 table.style.display = 'none';
-                link.textContent = 'Show all failures ▼';
+                link.textContent = showText;
             }}
         }}
 
@@ -7166,7 +7269,8 @@ def _build_section_html(inputs, video_id, video_path, report_directory,
     colorbars_eval_html, colorbars_timeline_html = _render_bars_evaluation_html(
         inputs.artifacts.qctools_bars_eval_check_output, inputs.artifacts.colorbars_eval_fails_csv,
         inputs.colorbars_peaks, thumbs_dict, video_id, timeline_context,
-        check_cancelled=check_cancelled)
+        check_cancelled=check_cancelled,
+        thresholds_csv=inputs.artifacts.colorbars_eval_thresholds_csv)
 
     # "both" reference: a second, SMPTE-graded result set. Both sets render
     # into panels behind one detected/SMPTE switch, shared by the evaluation
@@ -7176,7 +7280,8 @@ def _build_section_html(inputs, video_id, video_path, report_directory,
         smpte_eval_html, smpte_timeline_html = _render_bars_evaluation_html(
             inputs.artifacts.colorbars_eval_smpte_summary, inputs.artifacts.colorbars_eval_smpte_fails_csv,
             inputs.colorbars_smpte_peaks, thumbs_dict, video_id, timeline_context,
-            check_cancelled=check_cancelled, table_id='evalbars_smpte_all')
+            check_cancelled=check_cancelled, table_id='evalbars_smpte_all',
+            thresholds_csv=inputs.artifacts.colorbars_eval_smpte_thresholds_csv)
         if colorbars_eval_html or smpte_eval_html:
             colorbars_eval_html = _bars_reference_switch_html(colorbars_eval_html, smpte_eval_html)
         if colorbars_timeline_html or smpte_timeline_html:

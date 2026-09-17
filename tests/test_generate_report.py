@@ -550,6 +550,8 @@ def test_find_report_csvs_picks_up_known_filenames(tmp_path):
         "qct-parse_colorbars_eval_failures.csv": "colorbars_eval_fails_csv",
         "qct-parse_colorbars_eval_smpte_summary.csv":  "colorbars_eval_smpte_summary",
         "qct-parse_colorbars_eval_smpte_failures.csv": "colorbars_eval_smpte_fails_csv",
+        "qct-parse_colorbars_eval_thresholds.csv":       "colorbars_eval_thresholds_csv",
+        "qct-parse_colorbars_eval_smpte_thresholds.csv": "colorbars_eval_smpte_thresholds_csv",
         "qct-parse_colorbars_values.csv":        "colorbars_values_output",
         "qct-parse_profile_summary.csv":         "qctools_profile_check_output",
         "qct-parse_profile_failures.csv":        "profile_fails_csv",

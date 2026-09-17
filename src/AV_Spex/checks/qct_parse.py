@@ -574,6 +574,7 @@ SMPTE_BRNG_DEFAULT = 0.0118
 # eval_failures names, so single-reference runs and reports are unchanged.
 SMPTE_EVAL_SUMMARY_CSV = "qct-parse_colorbars_eval_smpte_summary.csv"
 SMPTE_EVAL_FAILURES_CSV = "qct-parse_colorbars_eval_smpte_failures.csv"
+SMPTE_EVAL_THRESHOLDS_CSV = "qct-parse_colorbars_eval_smpte_thresholds.csv"
 
 
 def _get_smpte_brng_floor():
@@ -923,7 +924,7 @@ def printresults(profile, kbeyond, frameCount, overallFrameFail, qctools_check_o
         writer.writerow(["Total", overallFrameFail, percentOverallString])
 
 
-def print_color_bar_keys(qctools_colorbars_values_output, profile, color_bar_keys):
+def print_color_bar_keys(qctools_colorbars_values_output, profile, color_bar_keys, header=None):
     """
     Writes color bar keys and their threshold values to a CSV file.
 
@@ -935,12 +936,14 @@ def print_color_bar_keys(qctools_colorbars_values_output, profile, color_bar_key
     qctools_colorbars_values_output (str): Path to the output CSV file.
     profile (dict): Dictionary containing color bar keys and their threshold values.
     color_bar_keys (list): List of expected color bar keys.
+    header (str, optional): First-row description of where the thresholds came
+        from. Defaults to the detected-bars wording.
     """
 
     with open(qctools_colorbars_values_output, 'w') as csvfile:
         writer = csv.writer(csvfile)
         if set(profile.keys()) == set(color_bar_keys):
-            writer.writerow(["The thresholds defined by the median values of QCTools filters in the identified color bars are:"])
+            writer.writerow([header or "The thresholds defined by the median values of QCTools filters in the identified color bars are:"])
             for key, value in profile.items():
                 writer.writerow([key, value])
 
@@ -4545,6 +4548,7 @@ def run_qctparse(video_path, qctools_output_path, report_directory, check_cancel
         smpte_pass_outputs = (
             os.path.join(report_directory, SMPTE_EVAL_SUMMARY_CSV),
             os.path.join(report_directory, SMPTE_EVAL_FAILURES_CSV),
+            os.path.join(report_directory, SMPTE_EVAL_THRESHOLDS_CSV),
         )
         if not run_smpte_pass:
             for stale_path in smpte_pass_outputs:
@@ -4582,7 +4586,12 @@ def run_qctparse(video_path, qctools_output_path, report_directory, check_cancel
                 if region_start is not None and region_end is not None
             ]
 
-            def run_bars_evaluation(profile, profile_name, summary_csv_path, failures_csv_path):
+            def run_bars_evaluation(profile, profile_name, summary_csv_path, failures_csv_path,
+                                    thresholds_csv_path, thresholds_header):
+                # The thresholds every frame was graded against, so the report
+                # can show them alongside the failure timeline.
+                print_color_bar_keys(thresholds_csv_path, profile, list(smpte_color_bars.keys()),
+                                     header=thresholds_header)
                 framesList.clear()
                 kbeyond, frameCount, overallFrameFail, failureInfo = analyzeIt(qct_parse, video_path, profile, profile_name, startObj, pkt, 0, 99999999, thumbPath, thumbDelay, 9000, framesList, frameCount=0, overallFrameFail=0, adhoc_tag=False, check_cancelled=check_cancelled, signals=signals, total_duration=total_duration, skip_regions=bars_skip_regions)
                 if failureInfo:
@@ -4597,6 +4606,10 @@ def run_qctparse(video_path, qctools_output_path, report_directory, check_cancel
                 maxBarsDict, 'color_bars_evaluation',
                 os.path.join(report_directory, "qct-parse_colorbars_eval_summary.csv"),
                 os.path.join(report_directory, "qct-parse_colorbars_eval_failures.csv"),
+                os.path.join(report_directory, "qct-parse_colorbars_eval_thresholds.csv"),
+                ("The thresholds defined by the median values of QCTools filters in the "
+                 "identified color bars are:") if not (bars_fallback or smpte_selected) else
+                "The standard SMPTE color bars threshold values are:",
             )
 
             if run_smpte_pass and not (check_cancelled and check_cancelled()):
@@ -4604,6 +4617,7 @@ def run_qctparse(video_path, qctools_output_path, report_directory, check_cancel
                 run_bars_evaluation(
                     asdict(spex_config.qct_parse_values.smpte_color_bars), 'color_bars_evaluation_smpte',
                     *smpte_pass_outputs,
+                    thresholds_header="The standard SMPTE color bars threshold values are:",
                 )
 
         # Evaluate windowed (non-head) bars regions: produce a SMPTE

@@ -305,6 +305,8 @@ The **Timeline of Signal Distribution** section of the HTML report charts the re
 
 **Show all failures**: An expandable table below the thumbnails lists every failing frame with its timestamp, tag, value, and threshold — the full contents of `qct-parse_colorbars_eval_failures.csv`.
 
+**Show thresholds**: Beside it, a second expandable table lists the threshold each tag was graded against and whether a frame fails by going above or below it — the values from `qct-parse_colorbars_eval_thresholds.csv` (`..._smpte_thresholds.csv` for the SMPTE results). Every tag is listed, including tags that never failed, and the note above the table says whether the values came from this file's own detected bars or from the standard SMPTE set.
+
 Times along the timeline are elapsed time from the start of the file, not the file's own embedded timecode, so they may not line up exactly with an NLE's timecode display. The chart can be saved as a PNG using the camera icon in the Plotly toolbar at the top right of the plot.
 
 ### Export Thumbnails
