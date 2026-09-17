@@ -77,6 +77,39 @@ every frame in many bins violates, so bins tie at ~300 and ranking by count dege
 "whatever `sorted` happened to order first". Summed severity separates saturated bins by how bad
 they are.
 
+### Per-bin profiles (collected, not yet consumed)
+
+The same streaming pass also builds `parser.bin_profiles` — a `BinProfile` per 10-second bin
+(`checks/qctools_bin_profile.py`) summarizing **every** QCTools measure the report carries, not just
+BRNG: TOUT/VREP (impulsive damage), SATMAX/SATAVG (chroma legality), YDIF/SSIM/PSNR/deflicker
+(temporal behaviour), entropy and YAVG (flatness/exposure), cropdetect edge medians plus the widest
+edge IQR (geometry drift), and idet repeated-field counts. Counts (`frames`, `black_frames`,
+`excluded_frames`, `violation_frames`, `violation_score_sum`) cover every frame in the bin; the
+statistics describe only the **non-black** frames, for the same reason the violation list skips them.
+
+Nothing selects periods from this yet — `violation_histogram`/`violation_severity` remain the ranking
+inputs, and `violation_histogram_from_profiles()` reproduces both from the profiles exactly, which is
+the bridge for moving selection over.
+
+Three things to know before building on it:
+
+- **Metric availability varies between reports.** Some sidecars carry only signalstats/psnr/astats
+  (no cropdetect, entropy, idet, ssim or deflicker) — `JPC_AV_01772` is one, `JPC_AV_01581` has the
+  full set. Every metric field is `Optional` and `None` when its tag never appeared;
+  `BinProfile.metrics` / `parser.bin_profile_metrics` name the families that did. Consumers must
+  renormalize over what is present rather than assume a fixed feature set.
+- **Audio frames are interleaved with video frames on the same timeline.** They carry no
+  signalstats, so they were always no-ops for the violation list, but they would inflate per-bin
+  frame counts and read as out-of-order video. The parse loop now skips any frame whose
+  `media_type` is present and not `video` (a missing attribute is still treated as video).
+- **One bin's samples are held at a time.** Bins are summarized and released as the timeline
+  advances, so memory does not scale with tape length. A frame arriving for an already-closed bin is
+  counted in `out_of_order_frames` and dropped rather than merged into a finished profile.
+
+Collection costs roughly 15% of the XML walk (5.5s → 6.3s on a 31-minute 10-bit tape with every
+filter present) and no measurable memory. It happens in this pass because the alternative is a
+second full walk of the report.
+
 ---
 
 ## Stage 1 — Candidate periods from the violation distribution

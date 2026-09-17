@@ -33,6 +33,9 @@ from AV_Spex.utils.log_setup import logger, report_ffmpeg_stderr
 from AV_Spex.utils import ffprobe_probe
 from AV_Spex.checks import dropped_sample_detection, duplicate_frame_detection
 from AV_Spex.checks import frame_analysis_report
+from AV_Spex.checks.qctools_bin_profile import (
+    PROFILE_BIN_SIZE, BinProfile, BinProfiler,
+)
 from AV_Spex.checks.frame_geometry import (
     is_valid_active_area, sanitize_active_area, build_crop_filter,
 )
@@ -199,6 +202,10 @@ class QCToolsParser:
         self.report_path = report_path
         self.fps = fps
         self.bit_depth_10 = self._detect_bit_depth()
+        # Populated by parse_for_violations_streaming(); empty until then so
+        # consumers can read them unconditionally.
+        self.bin_profiles: Dict[float, BinProfile] = {}
+        self.bin_profile_metrics: Tuple[str, ...] = ()
         
     def _detect_bit_depth(self) -> bool:
         """Detect whether the QCTools stats are in 10-bit scale.
@@ -374,17 +381,27 @@ class QCToolsParser:
     def parse_for_violations_streaming(self, max_frames: int = 100,
                              skip_color_bars: bool = True,
                              color_bars_end_time: float = 0,
-                             exclude_regions: Optional[List[Tuple[float, float]]] = None) -> List[FrameViolation]:
+                             exclude_regions: Optional[List[Tuple[float, float]]] = None,
+                             collect_bin_profiles: bool = True) -> List[FrameViolation]:
         """Stream parse QCTools report for BRNG violations.
 
         exclude_regions: additional (start, end) spans to skip — e.g. mid-file
         color bars regions, which are test patterns, not content.
+        collect_bin_profiles: also build self.bin_profiles (see below).
 
         Side effects: sets self.violation_histogram ({bin_start_seconds: count}
         over ALL violation frames, 10-second bins) and
         self.total_violation_frames. The returned list is capped at max_frames
         by severity, so the histogram — not the list — is the faithful picture
         of how violations are distributed over the tape.
+
+        Also sets self.bin_profiles ({bin_start_seconds: BinProfile}) and
+        self.bin_profile_metrics (the metric families this report carries).
+        The profiles cover every QCTools measure present, not just BRNG, so
+        period selection can weigh dropouts, chroma legality, freezes and
+        geometry drift alongside out-of-range pixels — the histogram above is
+        derivable from them (violation_histogram_from_profiles). Collected in
+        this same pass because the alternative is a second walk of the report.
         """
         violations = []
         chunk_size = 1000
@@ -394,6 +411,7 @@ class QCToolsParser:
         frames_after_color_bars = 0
         frames_with_violations = 0
         frames_skipped = 0
+        audio_frames_skipped = 0
         black_frames_skipped = 0  # NEW COUNTER
         max_brng_value = 0
 
@@ -401,10 +419,14 @@ class QCToolsParser:
         # cap. Counts saturate on noisy tapes (every frame in a bin can
         # violate), so per-bin summed violation scores are kept alongside to
         # rank saturated bins by how bad the violations are.
-        histogram_bin_size = 10.0
+        histogram_bin_size = PROFILE_BIN_SIZE
         self.violation_histogram = {}
         self.violation_severity = {}
         self.total_violation_frames = 0
+
+        profiler = BinProfiler(histogram_bin_size) if collect_bin_profiles else None
+        self.bin_profiles = {}
+        self.bin_profile_metrics = ()
         
         try:
             if self.report_path.endswith('.gz'):
@@ -420,6 +442,19 @@ class QCToolsParser:
             
             for event, elem in parser:
                 if event == 'end' and elem.tag == 'frame':
+                    # QCTools interleaves audio frames with video ones, on the
+                    # same timeline. They carry no signalstats, so they have
+                    # always been no-ops for the violation list — but they
+                    # would inflate the per-bin frame counts and, arriving
+                    # between video frames, read as out-of-order. Reports that
+                    # omit media_type are treated as video, as before.
+                    media_type = elem.get('media_type')
+                    if media_type is not None and media_type != 'video':
+                        audio_frames_skipped += 1
+                        elem.clear()
+                        root.clear()
+                        continue
+
                     total_frames_checked += 1
                     
                     # Get timestamp from the frame element
@@ -434,6 +469,8 @@ class QCToolsParser:
                     # Skip color bars based on timestamp
                     if skip_color_bars and color_bars_end_time > 0 and timestamp < color_bars_end_time:
                         frames_skipped += 1
+                        if profiler:
+                            profiler.note_excluded(timestamp)
                         elem.clear()
                         root.clear()
                         continue
@@ -441,6 +478,8 @@ class QCToolsParser:
                     # Skip additional (mid-file) bars regions
                     if exclude_regions and any(rs <= timestamp <= re for rs, re in exclude_regions):
                         frames_skipped += 1
+                        if profiler:
+                            profiler.note_excluded(timestamp)
                         elem.clear()
                         root.clear()
                         continue
@@ -448,15 +487,14 @@ class QCToolsParser:
                     frames_after_color_bars += 1
                     
                     # Extract frame data - this now includes black frame detection
-                    frame_data_before = frames_with_violations
                     frame_data = self._extract_frame_violations(elem, frame_num=None)
+                    is_black = self._is_black_frame(elem)
                     
                     # Check if this might have been a black frame
                     # (we can detect this by checking if no violation was returned despite BRNG being present)
                     brng_tag = elem.find('.//tag[@key="lavfi.signalstats.BRNG"]')
-                    if brng_tag is not None and frame_data is None:
-                        if self._is_black_frame(elem):
-                            black_frames_skipped += 1
+                    if brng_tag is not None and frame_data is None and is_black:
+                        black_frames_skipped += 1
                     
                     if frame_data:
                         frames_with_violations += 1
@@ -465,6 +503,11 @@ class QCToolsParser:
                         bin_start = int(timestamp // histogram_bin_size) * histogram_bin_size
                         self.violation_histogram[bin_start] = self.violation_histogram.get(bin_start, 0) + 1
                         self.violation_severity[bin_start] = self.violation_severity.get(bin_start, 0.0) + frame_data.violation_score
+
+                    if profiler:
+                        profiler.add_frame(
+                            timestamp, elem, is_black=is_black,
+                            violation_score=frame_data.violation_score if frame_data else None)
                     
                     elem.clear()
                     root.clear()
@@ -485,7 +528,9 @@ class QCToolsParser:
             file_handle.close()
             
             # Log summary
-            logger.debug(f"  Checked {total_frames_checked:,} frames from QCTools report")
+            logger.debug(f"  Checked {total_frames_checked:,} video frames from QCTools report")
+            if audio_frames_skipped > 0:
+                logger.debug(f"  Skipped {audio_frames_skipped:,} audio frames")
             if frames_skipped > 0:
                 logger.debug(f"  Skipped {frames_skipped:,} color bar frames (first {color_bars_end_time:.1f}s)")
             if black_frames_skipped > 0:
@@ -504,6 +549,19 @@ class QCToolsParser:
             logger.error(f"Error parsing QCTools report: {e}")
             import traceback
             logger.error(traceback.format_exc())
+
+        # Finalized outside the try so a report that fails part-way still
+        # yields profiles for the span that did parse — same as the histogram,
+        # which is also kept on partial failure.
+        if profiler:
+            self.bin_profiles = profiler.finalize()
+            self.bin_profile_metrics = tuple(sorted(profiler.metrics_present))
+            if self.bin_profiles:
+                logger.debug(f"  Profiled {len(self.bin_profiles)} {histogram_bin_size:.0f}s bins "
+                             f"(metrics: {', '.join(self.bin_profile_metrics) or 'none'})")
+            if profiler.out_of_order_frames:
+                logger.debug(f"  {profiler.out_of_order_frames:,} frames arrived out of "
+                             f"presentation order and were left out of the bin profiles")
 
         self.total_violation_frames = frames_with_violations
         violations.sort(key=lambda x: x.violation_score, reverse=True)

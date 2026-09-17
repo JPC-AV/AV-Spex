@@ -42,6 +42,13 @@ from AV_Spex.checks import frame_analysis as fa
 # Test fixtures: synthetic QCTools XML
 # ===========================================================================
 
+def _full_tag_key(key):
+    """Expand a fixture tag name to its full lavfi key."""
+    if "." in key:
+        return f"lavfi.{key}"
+    return f"lavfi.signalstats.{key}"
+
+
 def _qctools_xml(frames):
     """Build a minimal qctools-shaped XML document.
 
@@ -49,6 +56,9 @@ def _qctools_xml(frames):
       pkt_pts_time (str): timestamp; default str(idx)
       tags (dict[str, str]): {key_suffix → attribute value}, e.g.
                               {"YMAX": "940", "BRNG": "0.05"}
+        A bare name is a signalstats key; a name containing a dot is taken as
+        a full lavfi key suffix ("ssim.All", "cropdetect.x1"), for the filters
+        outside signalstats.
         Tag elements use BOTH attribute style (`value="..."`) and text content
         so they exercise both `.get('value')` and `findtext()` consumers.
     """
@@ -59,7 +69,7 @@ def _qctools_xml(frames):
         ts = f.get("pkt_pts_time", str(idx))
         out.append(f'    <frame media_type="video" pkt_pts_time="{ts}" n="{idx}">')
         for key, value in f.get("tags", {}).items():
-            full_key = f"lavfi.signalstats.{key}"
+            full_key = _full_tag_key(key)
             out.append(f'      <tag key="{full_key}" value="{value}">{value}</tag>')
         out.append('    </frame>')
     out.append('  </frames>')
@@ -232,8 +242,7 @@ def _frame_elem(frame_dict):
         ts=frame_dict.get("pkt_pts_time", "0.0"),
         n=frame_dict.get("n", "0"))]
     for key, value in frame_dict.get("tags", {}).items():
-        full_key = f"lavfi.signalstats.{key}"
-        xml.append(f'  <tag key="{full_key}" value="{value}"/>')
+        xml.append(f'  <tag key="{_full_tag_key(key)}" value="{value}"/>')
     xml.append('</frame>')
     return ET.fromstring("\n".join(xml))
 
