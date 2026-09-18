@@ -42,6 +42,13 @@ from AV_Spex.checks import frame_analysis as fa
 # Test fixtures: synthetic QCTools XML
 # ===========================================================================
 
+def _full_tag_key(key):
+    """Expand a fixture tag name to its full lavfi key."""
+    if "." in key:
+        return f"lavfi.{key}"
+    return f"lavfi.signalstats.{key}"
+
+
 def _qctools_xml(frames):
     """Build a minimal qctools-shaped XML document.
 
@@ -49,6 +56,9 @@ def _qctools_xml(frames):
       pkt_pts_time (str): timestamp; default str(idx)
       tags (dict[str, str]): {key_suffix → attribute value}, e.g.
                               {"YMAX": "940", "BRNG": "0.05"}
+        A bare name is a signalstats key; a name containing a dot is taken as
+        a full lavfi key suffix ("ssim.All", "cropdetect.x1"), for the filters
+        outside signalstats.
         Tag elements use BOTH attribute style (`value="..."`) and text content
         so they exercise both `.get('value')` and `findtext()` consumers.
     """
@@ -59,7 +69,7 @@ def _qctools_xml(frames):
         ts = f.get("pkt_pts_time", str(idx))
         out.append(f'    <frame media_type="video" pkt_pts_time="{ts}" n="{idx}">')
         for key, value in f.get("tags", {}).items():
-            full_key = f"lavfi.signalstats.{key}"
+            full_key = _full_tag_key(key)
             out.append(f'      <tag key="{full_key}" value="{value}">{value}</tag>')
         out.append('    </frame>')
     out.append('  </frames>')
@@ -232,8 +242,7 @@ def _frame_elem(frame_dict):
         ts=frame_dict.get("pkt_pts_time", "0.0"),
         n=frame_dict.get("n", "0"))]
     for key, value in frame_dict.get("tags", {}).items():
-        full_key = f"lavfi.signalstats.{key}"
-        xml.append(f'  <tag key="{full_key}" value="{value}"/>')
+        xml.append(f'  <tag key="{_full_tag_key(key)}" value="{value}"/>')
     xml.append('</frame>')
     return ET.fromstring("\n".join(xml))
 
@@ -2189,3 +2198,85 @@ def test_improvement_check_compares_overall_worst_frames():
 
     obj = fa.EnhancedFrameAnalysis.__new__(fa.EnhancedFrameAnalysis)
     assert obj._is_meaningful_improvement(result(3.0, 9.0), result(2.0, 1.9)) is True
+
+
+# ===========================================================================
+# Section 6 — merge_avoid_segments
+# ===========================================================================
+
+def test_merge_avoid_segments_combines_and_sorts():
+    merged = fa.merge_avoid_segments([(30.0, 40.0)], [(0.0, 10.0)])
+    assert merged == [(0.0, 10.0), (30.0, 40.0)]
+
+
+def test_merge_avoid_segments_merges_overlapping_spans():
+    """Double-counted overlap is what makes a 10%-black period read as 20%."""
+    merged = fa.merge_avoid_segments([(1409.6, 1531.9)], [(1410.0, 1530.0)])
+    assert merged == [(1409.6, 1531.9)]
+
+
+def test_merge_avoid_segments_merges_touching_spans():
+    assert fa.merge_avoid_segments([(0.0, 10.0), (10.0, 20.0)]) == [(0.0, 20.0)]
+
+
+def test_merge_avoid_segments_keeps_separated_spans():
+    merged = fa.merge_avoid_segments([(0.0, 10.0)], [(20.0, 30.0)])
+    assert merged == [(0.0, 10.0), (20.0, 30.0)]
+
+
+def test_merge_avoid_segments_drops_empty_and_inverted_spans():
+    assert fa.merge_avoid_segments([(5.0, 5.0), (10.0, 4.0)], None, []) == []
+
+
+def test_merge_avoid_segments_no_double_counted_overlap():
+    """The property the period validators depend on: summed overlap is real."""
+    merged = fa.merge_avoid_segments([(0.0, 30.0)], [(10.0, 20.0)], [(25.0, 35.0)])
+    total = sum(end - start for start, end in merged)
+    assert total == pytest.approx(35.0)
+
+
+# ===========================================================================
+# Section 7 — period repair keeps clear of pending periods
+# ===========================================================================
+
+def _analyzer(duration):
+    a = fa.IntegratedSignalstatsAnalyzer.__new__(fa.IntegratedSignalstatsAnalyzer)
+    a.duration = duration
+    a.last_resort_period_note = None
+    return a
+
+
+def test_shifted_period_stays_clear_of_a_pending_period():
+    """A repair must not walk the first period onto the second.
+
+    Period 1 (0-60s) is 32% black and has to move. Shifting forward lands it
+    on period 2, which has not been validated yet — checking only the
+    already-validated periods let the two overlap.
+    """
+    analyzer = _analyzer(320.0)
+    periods = [(0.0, 60), (65.0, 60), (205.0, 60)]
+    black = [(13.0, 22.0), (39.0, 49.0)]
+
+    result = analyzer._validate_periods_against_black_segments(periods, black, 10.0, 60)
+
+    starts = [start for start, _ in result]
+    assert len(result) == 3
+    for earlier, later in zip(starts, starts[1:]):
+        assert later - earlier >= 60
+
+
+def test_validated_periods_are_returned_in_start_order():
+    """A repair can move a period past its neighbour."""
+    analyzer = _analyzer(320.0)
+    periods = [(0.0, 60), (65.0, 60), (205.0, 60)]
+    black = [(13.0, 22.0), (39.0, 49.0)]
+
+    result = analyzer._validate_periods_against_black_segments(periods, black, 10.0, 60)
+    assert result == sorted(result)
+
+
+def test_clean_periods_are_untouched():
+    analyzer = _analyzer(600.0)
+    periods = [(100.0, 60), (300.0, 60)]
+    result = analyzer._validate_periods_against_black_segments(periods, [(0.0, 50.0)], 10.0, 60)
+    assert result == periods
