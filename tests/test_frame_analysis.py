@@ -2233,3 +2233,50 @@ def test_merge_avoid_segments_no_double_counted_overlap():
     merged = fa.merge_avoid_segments([(0.0, 30.0)], [(10.0, 20.0)], [(25.0, 35.0)])
     total = sum(end - start for start, end in merged)
     assert total == pytest.approx(35.0)
+
+
+# ===========================================================================
+# Section 7 — period repair keeps clear of pending periods
+# ===========================================================================
+
+def _analyzer(duration):
+    a = fa.IntegratedSignalstatsAnalyzer.__new__(fa.IntegratedSignalstatsAnalyzer)
+    a.duration = duration
+    a.last_resort_period_note = None
+    return a
+
+
+def test_shifted_period_stays_clear_of_a_pending_period():
+    """A repair must not walk the first period onto the second.
+
+    Period 1 (0-60s) is 32% black and has to move. Shifting forward lands it
+    on period 2, which has not been validated yet — checking only the
+    already-validated periods let the two overlap.
+    """
+    analyzer = _analyzer(320.0)
+    periods = [(0.0, 60), (65.0, 60), (205.0, 60)]
+    black = [(13.0, 22.0), (39.0, 49.0)]
+
+    result = analyzer._validate_periods_against_black_segments(periods, black, 10.0, 60)
+
+    starts = [start for start, _ in result]
+    assert len(result) == 3
+    for earlier, later in zip(starts, starts[1:]):
+        assert later - earlier >= 60
+
+
+def test_validated_periods_are_returned_in_start_order():
+    """A repair can move a period past its neighbour."""
+    analyzer = _analyzer(320.0)
+    periods = [(0.0, 60), (65.0, 60), (205.0, 60)]
+    black = [(13.0, 22.0), (39.0, 49.0)]
+
+    result = analyzer._validate_periods_against_black_segments(periods, black, 10.0, 60)
+    assert result == sorted(result)
+
+
+def test_clean_periods_are_untouched():
+    analyzer = _analyzer(600.0)
+    periods = [(100.0, 60), (300.0, 60)]
+    result = analyzer._validate_periods_against_black_segments(periods, [(0.0, 50.0)], 10.0, 60)
+    assert result == periods

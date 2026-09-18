@@ -36,7 +36,8 @@ from AV_Spex.checks import frame_analysis_report
 from AV_Spex.checks.qctools_bin_profile import (
     PROFILE_BIN_SIZE, BinProfile, BinProfiler,
 )
-from AV_Spex.checks import bin_suitability
+from AV_Spex.checks import bin_suitability, bin_scoring
+from AV_Spex.checks.bin_scoring import BinScore
 from AV_Spex.checks.frame_geometry import (
     is_valid_active_area, sanitize_active_area, build_crop_filter,
 )
@@ -4137,6 +4138,9 @@ class IntegratedSignalstatsAnalyzer:
             black_segments: Known (start_time, end_time) black segment tuples
             effective_start: Earliest valid start time for any period
             period_duration: Desired period duration in seconds
+
+        A repaired period is kept clear of every other period in the list,
+        pending ones included — see the comment in the loop.
             
         Returns:
             Validated list of periods with black-overlapping ones shifted or removed.
@@ -4147,7 +4151,14 @@ class IntegratedSignalstatsAnalyzer:
         validated = []
         dropped = []  # (overlap_pct, start, dur) for the last-resort fallback
 
-        for start, dur in periods:
+        for index, (start, dur) in enumerate(periods):
+            # A repaired period has to clear the periods that come *after* it
+            # in the list as well as the ones already validated. Only checking
+            # the validated ones lets the first period shift forward onto the
+            # second: candidate placement keeps starts a period apart, but a
+            # shift can walk one right up to the next, and the collision is
+            # invisible until both are analyzed.
+            occupied = validated + list(periods[index + 1:])
             end = start + dur
             
             # Calculate total overlap with all black segments
@@ -4170,7 +4181,7 @@ class IntegratedSignalstatsAnalyzer:
                 
                 shifted = self._shift_period_away_from_black(
                     start, dur, black_segments, effective_start,
-                    [s for s, d in validated]  # Already-used start times
+                    [s for s, d in occupied]  # Validated and still-pending starts
                 )
 
                 if shifted is not None:
@@ -4183,7 +4194,7 @@ class IntegratedSignalstatsAnalyzer:
                     # of dropping it (short tapes may have less non-black
                     # content than one full period)
                     fitted = self._fit_period_in_content_gap(
-                        start, dur, black_segments, effective_start, validated
+                        start, dur, black_segments, effective_start, occupied
                     )
                     if fitted is not None:
                         fit_start, fit_dur = fitted
@@ -4217,7 +4228,7 @@ class IntegratedSignalstatsAnalyzer:
                 f"content."
             )
 
-        return validated
+        return sorted(validated)
 
     def _fit_period_in_content_gap(
             self,
@@ -4225,7 +4236,7 @@ class IntegratedSignalstatsAnalyzer:
             duration: int,
             black_segments: List[Tuple[float, float]],
             effective_start: float,
-            validated: List[Tuple[float, int]],
+            occupied: List[Tuple[float, int]],
             min_period: float = 10.0) -> Optional[Tuple[float, int]]:
         """
         Fit a (possibly shortened) period into the largest non-black content gap.
@@ -4267,10 +4278,10 @@ class IntegratedSignalstatsAnalyzer:
                 fit_start = gap_start
             fit_dur = int(min(duration, gap_end - fit_start))
 
-            # Reject if it overlaps an already-validated period
+            # Reject if it overlaps another period, validated or still pending
             overlaps = any(
                 fit_start < v_start + v_dur and v_start < fit_start + fit_dur
-                for v_start, v_dur in validated
+                for v_start, v_dur in occupied
             )
             if not overlaps:
                 return (fit_start, fit_dur)
@@ -5080,6 +5091,7 @@ class EnhancedFrameAnalysis:
         violations = []
         qctools_suggested_periods = []
         black_segments = []
+        bin_scores = {}
         if self.check_cancelled():
             return results
 
@@ -5172,11 +5184,34 @@ class EnhancedFrameAnalysis:
                          'reasons': list(suitability.reasons_for(start))}
                         for start, end in suitability.unsuitable_regions
                     ]
+
+                # Score every analyzable bin over all the evidence the report
+                # carries. This replaces BRNG density as the ranking: BRNG is
+                # the flattest signal measured, and a bin whose problem is
+                # dropouts or geometry drift may carry no BRNG violation at
+                # all, so it could never win a period before.
+                bin_scores = bin_scoring.score_bins(
+                    getattr(parser, 'bin_profiles', {}),
+                    suitability.verdicts,
+                    bit_depth_10=parser.bit_depth_10)
+                if bin_scores:
+                    results['bin_scoring'] = {
+                        'metrics': list(getattr(parser, 'bin_profile_metrics', ())),
+                        'top_bins': [
+                            {'start': bin_start, 'score': score.score,
+                             'dominant_family': score.dominant_family,
+                             'family_scores': score.family_scores}
+                            for bin_start, score in bin_scoring.rank_order(bin_scores)[:10]
+                        ],
+                    }
             elif not self.qctools_parser:
                 logger.info("No QCTools report found")
 
-            # Analyze QCTools violation distribution to find optimal analysis periods
-            if violations:
+            # Place periods against the scored bins (or, with no scores, the
+            # violation distribution). Scores exist even on a tape with no
+            # BRNG violations at all, which is why this no longer waits for
+            # `violations` to be non-empty.
+            if violations or bin_scores:
                 qctools_suggested_periods = self._analyze_qctools_violation_distribution(
                     violations,
                     num_periods=frame_config.analysis_period_count,
@@ -5184,9 +5219,12 @@ class EnhancedFrameAnalysis:
                     video_duration=self.signalstats_analyzer.duration,
                     black_segments=avoid_segments,
                     histogram=getattr(parser, 'violation_histogram', None),
-                    severity=getattr(parser, 'violation_severity', None)
+                    severity=getattr(parser, 'violation_severity', None),
+                    bin_scores=bin_scores
                 )
-                logger.info(f"Identified {len(qctools_suggested_periods)} periods with highest violation density\n")
+                basis = "composite score" if bin_scores else "violation density"
+                logger.info(f"Identified {len(qctools_suggested_periods)} periods "
+                            f"with highest {basis}\n")
 
 
         # Step 3: Border detection (conditional)
@@ -6186,7 +6224,8 @@ class EnhancedFrameAnalysis:
                                                 video_duration: float = None,
                                                 black_segments: List[Tuple[float, float]] = None,
                                                 histogram: Dict[float, int] = None,
-                                                severity: Dict[float, float] = None) -> List[Tuple[float, int]]:
+                                                severity: Dict[float, float] = None,
+                                                bin_scores: Dict[float, 'BinScore'] = None) -> List[Tuple[float, int]]:
         """
         Analyze the temporal distribution of QCTools violations and suggest analysis periods.
 
@@ -6209,15 +6248,25 @@ class EnhancedFrameAnalysis:
                 violations list, whose "distribution" collapses to the few
                 worst bursts on noisy tapes.
             severity: {bin_start_seconds: summed violation score}
-                (parser.violation_severity). When given, bins are ranked by
-                severity — on noisy tapes counts saturate (every frame in a
+                (parser.violation_severity). Ranks bins when no bin_scores are
+                available — on noisy tapes counts saturate (every frame in a
                 bin violates), and severity distinguishes the saturated bins.
+            bin_scores: {bin_start_seconds: BinScore} from
+                `bin_scoring.score_bins()`. When given these *replace* the
+                violation histogram as both the candidate population and the
+                ranking: every analyzable bin is a candidate, scored over
+                legality, impulsive damage and instability rather than BRNG
+                alone. BRNG is the flattest of those signals (p90/median
+                1.16-1.95 across the sample reports, against 1.4-2.8 for TOUT
+                and more for the rest), so ranking on it alone separates
+                saturated bins by differences that carry little meaning — and
+                misses a dropout burst that produces no BRNG violation at all.
 
         Returns:
             List of (start_time, duration) tuples for suggested periods,
             sorted by start time
         """
-        bin_size = 10.0
+        bin_size = PROFILE_BIN_SIZE
 
         # Prefer the full histogram; fall back to binning the capped list
         if histogram:
@@ -6227,6 +6276,15 @@ class EnhancedFrameAnalysis:
             for v in violations or []:
                 bin_start = int(v.timestamp // bin_size) * bin_size
                 bin_counts[bin_start] = bin_counts.get(bin_start, 0) + 1
+
+        # With composite scores every analyzable bin is a candidate, not just
+        # the ones carrying BRNG violations: a bin whose problem is dropouts
+        # or drifting geometry has a score without ever tripping the BRNG
+        # threshold, and used to be invisible to selection.
+        if bin_scores:
+            candidates = {bin_start: score.score for bin_start, score in bin_scores.items()}
+        else:
+            candidates = dict(bin_counts)
 
         # Drop bins that mostly overlap black segments / bars regions (noise
         # spikes that escape the per-frame black classifier), and bins in the
@@ -6243,11 +6301,13 @@ class EnhancedFrameAnalysis:
 
         excluded_count = sum(count for start, count in bin_counts.items() if _bin_excluded(start))
         bin_counts = {start: count for start, count in bin_counts.items() if not _bin_excluded(start)}
+        candidates = {start: value for start, value in candidates.items()
+                      if not _bin_excluded(start)}
         if excluded_count:
             logger.debug(f"  Excluded {excluded_count} violations inside black/bars segments or the file tail")
 
-        if not bin_counts:
-            logger.info("  No QCTools violations to analyze distribution")
+        if not candidates:
+            logger.info("  No analyzable bins to place periods against")
             return []
 
         # Never suggest a period longer than the video itself
@@ -6256,24 +6316,32 @@ class EnhancedFrameAnalysis:
 
         # Log the overall distribution
         logger.info(f"\n  === QCTools Violation Distribution ===")
-        logger.debug(f"  Total violations found: {sum(bin_counts.values())}")
-        logger.debug(f"  Time range: {min(bin_counts):.1f}s - {max(bin_counts) + bin_size:.1f}s")
+        if bin_counts:
+            logger.debug(f"  Total violations found: {sum(bin_counts.values())}")
+            logger.debug(f"  Time range: {min(bin_counts):.1f}s - {max(bin_counts) + bin_size:.1f}s")
 
-        # Rank by summed severity when available (counts saturate on noisy
-        # tapes — every frame in a bin can violate), else by count
+        # Composite score first; else summed severity (counts saturate on
+        # noisy tapes — every frame in a bin can violate); else raw count.
         def _bin_rank(item):
-            bin_start, count = item
+            bin_start, value = item
+            if bin_scores:
+                return value
             if severity:
                 return severity.get(bin_start, 0.0)
-            return count
+            return value
 
-        bin_scores = sorted(bin_counts.items(), key=_bin_rank, reverse=True)
+        ranked_bins = sorted(candidates.items(), key=_bin_rank, reverse=True)
 
         # Log the top bins
-        logger.debug(f"  Top 10-second bins with violations:")
-        for i, (start_time, count) in enumerate(bin_scores[:10]):
-            sev_note = f", severity {severity.get(start_time, 0.0):.0f}" if severity else ""
-            logger.debug(f"    {i+1}. {start_time:.1f}s - {start_time+bin_size:.1f}s: {count} violations{sev_note}")
+        if bin_scores:
+            logger.debug(f"  Top 10-second bins by composite score:")
+            for line in bin_scoring.describe_scores(bin_scores, limit=10):
+                logger.debug(line)
+        else:
+            logger.debug(f"  Top 10-second bins with violations:")
+            for i, (start_time, count) in enumerate(ranked_bins[:10]):
+                sev_note = f", severity {severity.get(start_time, 0.0):.0f}" if severity else ""
+                logger.debug(f"    {i+1}. {start_time:.1f}s - {start_time+bin_size:.1f}s: {count} violations{sev_note}")
 
         def _candidate_start(bin_start):
             # Center the period on the dense bin, clamped inside the file
@@ -6288,7 +6356,7 @@ class EnhancedFrameAnalysis:
         suggested_periods = []
         min_separation = period_duration * 2
         for required_gap in (min_separation, period_duration):
-            for bin_start, count in bin_scores:
+            for bin_start, _value in ranked_bins:
                 if len(suggested_periods) >= num_periods:
                     break
                 start_time = _candidate_start(bin_start)

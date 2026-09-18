@@ -191,17 +191,97 @@ The gated spans there are 0–40s (black), 80–140s (lead-in static), 2080–21
 
 ---
 
+## Stage 0b — Composite scoring
+
+`checks/bin_scoring.py`, called right after the suitability gate. It scores every
+*analyzable* bin, and that score — not BRNG density — is what Stage 1 ranks on.
+
+### Why BRNG alone stopped being enough
+
+Measured per-bin p90/median across the sample reports:
+
+| Metric | p90 / median |
+|---|---|
+| **BRNG** (what ranking used) | **1.16 – 1.95** |
+| TOUT | 1.41 – 2.80 |
+| SATAVG | 1.29 – 3.08 |
+| YDIF | 1.80 – 9.49 |
+| deflicker | 4.11 – 131.1 |
+| cropdetect edge IQR | median 0, p90 0–5 (rare spikes) |
+
+BRNG is the flattest signal available, and on a noisy tape it is flat *and*
+saturated: all 187 content bins of `JPC_AV_01772` have >95% of frames violating, so
+ranking separated them by ~25% differences in mean out-of-range share. Worse, a bin
+whose problem is a dropout burst can carry no BRNG violation at all, and was
+therefore invisible — the histogram only ever contained bins that tripped
+`BRNG > 0.01`. With scores, **every analyzable bin is a candidate**.
+
+### Families
+
+| Family | Weight | Metrics | Why |
+|---|---|---|---|
+| `legality` | 0.4 | `brng_mean` (floor 0.01), `satmax_max` (floor = illegal chroma) | what BRNG/signalstats analysis exists to characterize |
+| `impulsive` | 0.4 | `tout_p95`, `vrep_mean` | dropouts and the deck's concealment of them — the gap this closes |
+| `instability` | 0.2 | `deflicker_absmax`, `crop_edge_iqr_max` | flicker and geometry drift; lower because border detection reports geometry separately |
+
+Within a family the **strongest** metric speaks for it (two weak signals must not add
+up to one strong one); across families the weighted sum, with weights renormalized
+over the families the report can actually measure, so a signalstats-only sidecar
+scores on the same 0–1 scale as a rich one.
+
+**YDIF is deliberately not scored.** It measures motion, which is content rather than
+damage — the busiest bin of a healthy tape is a fast cut. Stage 0 uses it only as an
+extreme-value rule, where it means something different.
+
+### Normalization: within-file rank of the excess over a floor
+
+Not a z-score. Two properties of the data rule that out:
+
+- VREP is exactly 0 in 89–100% of content bins and cropdetect IQR in 52–84%, so their
+  median *and* MAD are both 0 — every z-score divides by zero.
+- Rank handles the zero-heavy case natively. Ties resolve **downward** (rank = share
+  of bins strictly below), so the quiet bins all score 0 and a lone spike lands near 1.
+  An average-rank convention would instead hand every quiet bin half a point for being
+  quiet.
+
+A metric with no spread contributes nothing, with no special case: every bin ties, so
+every bin ranks 0. Unmeasured (`None`) ranks 0 too — never evidence of a problem.
+Where a metric has a meaningful absolute floor (BRNG's existing violation threshold,
+the illegal-chroma level for SATMAX) the **excess over it** is what gets ranked, so
+entirely legal bins are not ranked against one another.
+
+Unsuitable bins are excluded from the ranking population as well as from the result:
+they are not places a period can go, and including them would shift every other bin's
+rank.
+
+**The score is a targeting score, not a severity measure.** It says where the worst of
+*this* tape is; the top bin of a pristine transfer scores the same 1.0 as the top bin
+of a ruined one. Period selection always takes the top N, so that is what it needs —
+but the number must never be shown to a user as a quality figure.
+
+### Measured effect
+
+Replaying stage 1 + stage 2 over ten sample reports, placement changes on nine of ten
+(`JPC_AV_01581` is unchanged). Notably `JPC_AV_02041` moves off `[465, 995, 1475]` to
+`[225, 465, 985]`, giving up the 24:35 period cited as ground truth in the earlier
+redesign — an accepted trade, decided deliberately: its new top bins score impulsive
+1.00 / legality 0.97, evidence the old ranking could not see. Chosen bins' dominant
+families across the set run roughly two-thirds `impulsive`, one-third `legality`.
+
+---
+
 ## Stage 1 — Candidate periods from the violation distribution
 
 `EnhancedFrameAnalysis._analyze_qctools_violation_distribution()`.
 
-1. **Bin the violations** — prefer `histogram`; else bin the capped `violations` list at 10s.
+1. **Choose the candidate bins** — every scored bin when Stage 0b ran; else the `histogram`;
+   else the capped `violations` list binned at 10s.
 2. **Exclude bins** (`_bin_excluded`): a bin whose overlap with any black segment or bars region
    exceeds half the bin (5s), or that ends within the **last 30 seconds** of the file
    (end-of-tape static). Noise spikes that escape the per-frame black classifier get caught here.
 3. **Clamp the period duration** to the video duration if the configured duration is longer.
-4. **Rank bins** by summed severity when available, else by count (`_bin_rank`). The top 10 are
-   logged.
+4. **Rank bins** by composite score when available (Stage 0b), else by summed severity, else by
+   count (`_bin_rank`). The top 10 are logged with the families that drove them.
 5. **Place periods**, densest bin first, centering the period on the bin and clamping it inside the
    file (`_candidate_start`). Placement runs in **two passes**:
    - Pass 1 requires each new period to start at least `2 × period_duration` from every period
@@ -372,6 +452,13 @@ refine against.
 - **The two overlap thresholds are intentionally different**: 25% triggers a repair, but a repaired
   position must get under 10%. Loosening the second to 25% lets a shifted period settle right back
   against a black segment.
+- **A repaired period must clear the periods that come after it, not just the validated ones.**
+  `_validate_periods_against_black_segments` walks the list in order; a shift searching outward can
+  walk the first period right up to the second, which has not been validated yet. Composite ranking
+  packs candidates more tightly (the relaxed separation pass fires more often), which made the
+  collision reachable — `JPC_AV_03796` produced two periods 20 seconds apart. The repair now checks
+  `validated + periods[index+1:]`, and the function sorts its result, because a repair can move a
+  period past its neighbour and two of the three call sites used the order as returned.
 - **Avoid segments must be merged before use.** The validators measure a period's overlap with the
   avoid list by *summing* per-segment overlaps, so two spans describing the same seconds count them
   twice and a period that is 10% black reads as 20% and gets shifted off a fine position. Sources
