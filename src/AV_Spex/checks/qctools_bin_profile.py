@@ -213,6 +213,7 @@ class BinProfiler:
             acc.black_frames += 1
             return
 
+        crop = {}
         for tag in elem.iter('tag'):
             key = tag.get('key')
             if key is None:
@@ -243,8 +244,24 @@ class BinProfiler:
                 value = PSNR_CLIP
             elif name == 'psnr':
                 value = min(value, PSNR_CLIP)
+            if family == 'cropdetect':
+                # The four edges only mean anything together, so they are held
+                # back and validated as a box below.
+                crop[name] = value
+                continue
             acc.add_sample(name, value)
             self.metrics_present.add(family)
+
+        # cropdetect reports the bounding box of non-black content, and when
+        # there is none to find it emits a degenerate box — x1 beyond x2, or y1
+        # beyond y2 (seen on 1.2% to 32.6% of frames across the sample
+        # reports). A box with negative width is not a measurement, so it is
+        # dropped rather than averaged into an edge position.
+        if len(crop) == 4 and crop['crop_x2'] > crop['crop_x1'] \
+                and crop['crop_y2'] > crop['crop_y1']:
+            for name, value in crop.items():
+                acc.add_sample(name, value)
+            self.metrics_present.add('cropdetect')
 
     # -- finalization -------------------------------------------------------
 

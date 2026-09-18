@@ -10,7 +10,6 @@ Period selection has always ranked bins by BRNG: the count of frames over
     SATAVG       1.29 - 3.08
     YDIF         1.80 - 9.49
     deflicker    4.11 - 131.1
-    cropdetect   median 0, p90 0-5 (rare spikes)
 
 On a noisy tape every bin saturates — all 187 content bins of JPC_AV_01772
 have >95% of frames violating — so ranking comes down to separating bins whose
@@ -19,7 +18,8 @@ vary by multiples over the same tape and are not consulted at all.
 
 This module scores each bin over three families of evidence, so a dropout
 burst or a stretch of illegal chroma can win a period on a tape where BRNG
-cannot discriminate.
+cannot discriminate. (cropdetect was measured too and deliberately left out —
+see the note under METRICS.)
 
 **The score is a targeting score, not a severity measure.** It says where the
 worst of *this* tape is, not how bad the tape is: the top bin of a pristine
@@ -31,10 +31,9 @@ Normalization is **within-file rank of the excess over a floor**, not a
 z-score. Two properties of the data force that:
 
 * Several metrics are zero across most of a tape (VREP is exactly 0 in 89-100%
-  of content bins; cropdetect IQR in 52-84%), so their median *and* MAD are
-  both 0 and any z-score divides by zero. Rank handles a zero-heavy
-  distribution natively: ties at the bottom all score 0, and a rare spike
-  lands near 1.
+  of content bins), so their median *and* MAD are both 0 and any z-score
+  divides by zero. Rank handles a zero-heavy distribution natively: ties at
+  the bottom all score 0, and a rare spike lands near 1.
 * A metric with no spread at all contributes nothing, with no special case —
   every bin ties, so every bin ranks 0.
 
@@ -57,9 +56,9 @@ from AV_Spex.checks.bin_suitability import BinVerdict
 # 'impulsive'   — dropouts and the deck's concealment of them. The gap this
 #                 module exists to close: nothing in selection sees TOUT/VREP
 #                 today.
-# 'instability' — the picture moving when it should not: flicker, and frame
-#                 geometry drifting (tracking error). Weighted lower because
-#                 border detection reports geometry separately.
+# 'instability' — the picture changing brightness when it should not. Weighted
+#                 lower than the other two: its one metric is a per-bin maximum,
+#                 so a single hard cut can set it.
 FAMILY_WEIGHTS = {
     'legality': 0.4,
     'impulsive': 0.4,
@@ -97,8 +96,20 @@ METRICS: Tuple[MetricSpec, ...] = (
     MetricSpec('tout_p95', 'impulsive'),
     MetricSpec('vrep_mean', 'impulsive'),
     MetricSpec('deflicker_absmax', 'instability'),
-    MetricSpec('crop_edge_iqr_max', 'instability'),
 )
+
+# crop_edge_iqr_max is deliberately absent, after being measured against the
+# sample set. cropdetect reports the bounding box of non-black content, so the
+# box moves whenever the *content* changes shape or brightness — the bins it
+# pushed to the top were a dark scene on one tape (YAVG 218 against a file
+# median of 355) and a bright one on another, i.e. not a consistent artifact,
+# just "the box moved". Three of the nine JPC sample reports carry no
+# cropdetect at all, and on those that do, boxes with x2 <= x1 or y2 <= y1 run
+# from 1.2% to 32.6% of frames. Rejecting those degenerate boxes (which
+# BinProfiler now does) did not change any selection on the JPC files, which
+# is what settled it: the influence was never detector failure, it was content.
+# The medians are still collected — they are a plausible input for border
+# detection — but nothing scores on them.
 
 # YDIF is deliberately absent. It measures motion, which is content rather
 # than damage — the busiest bin of a healthy tape is a fast cut, not a defect.

@@ -222,12 +222,23 @@ therefore invisible — the histogram only ever contained bins that tripped
 |---|---|---|---|
 | `legality` | 0.4 | `brng_mean` (floor 0.01), `satmax_max` (floor = illegal chroma) | what BRNG/signalstats analysis exists to characterize |
 | `impulsive` | 0.4 | `tout_p95`, `vrep_mean` | dropouts and the deck's concealment of them — the gap this closes |
-| `instability` | 0.2 | `deflicker_absmax`, `crop_edge_iqr_max` | flicker and geometry drift; lower because border detection reports geometry separately |
+| `instability` | 0.2 | `deflicker_absmax` | brightness deviating from the frame's temporal neighbours; weighted lower because its one metric is a per-bin maximum, so a single hard cut can set it |
 
 Within a family the **strongest** metric speaks for it (two weak signals must not add
 up to one strong one); across families the weighted sum, with weights renormalized
 over the families the report can actually measure, so a signalstats-only sidecar
 scores on the same 0–1 scale as a rich one.
+
+**cropdetect is deliberately not scored**, though the profiles still collect its edge medians.
+It reports the bounding box of non-black content, so the box moves whenever the content changes
+shape or brightness rather than when the picture is unstable. Measured across the sample set: absent
+from 3 of the 9 JPC reports (including both ground-truth files); where present, degenerate boxes
+(`x2 <= x1` or `y2 <= y1`, emitted when there is no non-black content to bound) run from 1.2% to
+32.6% of frames; and rejecting those degenerate boxes reproduced the *same* selection on every JPC
+file, which is what ruled the metric out — its influence was never detector failure, it was content.
+The bins it promoted were a dark scene on one tape (YAVG 218 against a file median of 355) and a
+bright one on another. `BinProfiler` now drops degenerate boxes at collection time regardless, so
+the edge medians are trustworthy for any future use.
 
 **YDIF is deliberately not scored.** It measures motion, which is content rather than
 damage — the busiest bin of a healthy tape is a fast cut. Stage 0 uses it only as an
@@ -237,8 +248,8 @@ extreme-value rule, where it means something different.
 
 Not a z-score. Two properties of the data rule that out:
 
-- VREP is exactly 0 in 89–100% of content bins and cropdetect IQR in 52–84%, so their
-  median *and* MAD are both 0 — every z-score divides by zero.
+- VREP is exactly 0 in 89–100% of content bins, so its median *and* MAD are both 0 — every
+  z-score divides by zero.
 - Rank handles the zero-heavy case natively. Ties resolve **downward** (rank = share
   of bins strictly below), so the quiet bins all score 0 and a lone spike lands near 1.
   An average-rank convention would instead hand every quiet bin half a point for being

@@ -505,3 +505,59 @@ def test_black_segments_treat_untyped_frames_as_video(tmp_path):
 
     parser = fa.QCToolsParser(str(untyped))
     assert parser.detect_black_segments(min_duration=2.0) == [(0.0, 5.0)]
+
+
+# ===========================================================================
+# cropdetect degenerate boxes
+# ===========================================================================
+
+def _crop(x1, x2, y1, y2):
+    return {'cropdetect.x1': x1, 'cropdetect.x2': x2,
+            'cropdetect.y1': y1, 'cropdetect.y2': y2}
+
+
+def test_degenerate_crop_box_is_dropped():
+    """cropdetect emits x1 beyond x2 when it finds no non-black content.
+
+    A box with negative width is not a measurement; averaging it into an edge
+    position invents geometry that was never detected.
+    """
+    prof = qbp.BinProfiler()
+    prof.add_frame(1.0, _elem(_crop('5', '704', '1', '486')))
+    prof.add_frame(2.0, _elem(_crop('566', '278', '407', '728')))   # degenerate
+    p = prof.finalize()[0.0]
+    assert p.crop_x1_median == pytest.approx(5.0)
+    assert p.crop_x2_median == pytest.approx(704.0)
+    assert p.crop_edge_iqr_max == pytest.approx(0.0)
+
+
+def test_degenerate_crop_box_alone_reports_no_cropdetect():
+    prof = qbp.BinProfiler()
+    prof.add_frame(1.0, _elem(_crop('719', '0', '485', '243')))
+    p = prof.finalize()[0.0]
+    assert p.crop_x1_median is None
+    assert 'cropdetect' not in p.metrics
+
+
+def test_inverted_vertical_crop_box_is_dropped():
+    prof = qbp.BinProfiler()
+    prof.add_frame(1.0, _elem(_crop('5', '704', '400', '100')))
+    assert prof.finalize()[0.0].crop_y1_median is None
+
+
+def test_partial_crop_tags_are_dropped():
+    """All four edges are needed to validate the box."""
+    prof = qbp.BinProfiler()
+    prof.add_frame(1.0, _elem({'cropdetect.x1': '5', 'cropdetect.x2': '704'}))
+    p = prof.finalize()[0.0]
+    assert p.crop_x1_median is None
+    assert 'cropdetect' not in p.metrics
+
+
+def test_valid_crop_boxes_still_measure_edge_movement():
+    prof = qbp.BinProfiler()
+    for x1 in ('5', '5', '40', '5'):
+        prof.add_frame(1.0, _elem(_crop(x1, '704', '1', '486')))
+    p = prof.finalize()[0.0]
+    assert p.crop_edge_iqr_max > 0
+    assert 'cropdetect' in p.metrics

@@ -159,12 +159,25 @@ def test_weights_renormalize_over_available_families():
 
 
 def test_missing_families_are_not_penalized():
-    """Same legality evidence scores the same with or without a geometry tag."""
+    """Same legality evidence scores the same with or without a flicker tag."""
     without = sc.score_bins(_profiles(brng_mean=[0.02, 0.09]))
-    with_geo = sc.score_bins(_profiles(brng_mean=[0.02, 0.09],
-                                       crop_edge_iqr_max=[0.0, 0.0]))
+    with_flicker = sc.score_bins(_profiles(brng_mean=[0.02, 0.09],
+                                           deflicker_absmax=[0.0, 0.0]))
     assert without[10.0].family_scores['legality'] == \
-        with_geo[10.0].family_scores['legality']
+        with_flicker[10.0].family_scores['legality']
+
+
+def test_crop_edge_iqr_is_not_scored():
+    """cropdetect tracks content shape and brightness, not tracking error.
+
+    Measured on the sample set: it was absent from 3 of 9 JPC reports, and
+    where present the bins it promoted were a dark scene on one tape and a
+    bright one on another. Rejecting degenerate boxes did not change any
+    selection, which is what ruled it out — the influence was content.
+    """
+    assert 'crop_edge_iqr_max' not in {spec.field for spec in sc.METRICS}
+    profiles = _profiles(crop_edge_iqr_max=[0.0, 700.0])
+    assert sc.score_bins(profiles)[10.0].score == 0.0
 
 
 def test_ydif_is_not_scored():
