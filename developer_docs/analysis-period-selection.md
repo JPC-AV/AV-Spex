@@ -221,7 +221,7 @@ therefore invisible — the histogram only ever contained bins that tripped
 | Family | Weight | Metrics | Why |
 |---|---|---|---|
 | `legality` | 0.4 | `brng_mean` (floor 0.01), `satmax_max` (floor = illegal chroma) | what BRNG/signalstats analysis exists to characterize |
-| `impulsive` | 0.4 | `tout_p95`, `vrep_mean` | dropouts and the deck's concealment of them — the gap this closes |
+| `impulsive` | 0.4 | `tout_mean` (floor 0.012), `vrep_mean` | dropouts and the deck's concealment of them — the gap this closes |
 | `instability` | 0.2 | `deflicker_absmax` | brightness deviating from the frame's temporal neighbours; weighted lower because its one metric is a per-bin maximum, so a single hard cut can set it |
 
 Within a family the **strongest** metric speaks for it (two weak signals must not add
@@ -239,6 +239,29 @@ file, which is what ruled the metric out — its influence was never detector fa
 The bins it promoted were a dark scene on one tape (YAVG 218 against a file median of 355) and a
 bright one on another. `BinProfiler` now drops degenerate boxes at collection time regardless, so
 the edge medians are trustworthy for any future use.
+
+### TOUT: the mean, over a floor
+
+Two calibration decisions here came from operator spot-checks of four verified bins — three
+regions with confirmed dropout/head-switching damage, and one confirmed to have illegal pixels
+from graphics but *no* dropout or instability.
+
+**The mean, not the 95th percentile.** A bin full of cuts and fades has a high TOUT p95 (a handful
+of outlier frames) and a low mean; sustained dropout raises both. On the verified bins p95 gave
+0.0219–0.0407 for the true positives against 0.0190 for the false positive — overlapping — while
+the mean gave 0.0168–0.0214 against 0.0086, a clean 2× gap.
+
+**An absolute floor of 0.012.** Rank normalization guarantees that *some* bin tops the impulsive
+family on every tape, including tapes with no dropouts at all. The floor is what lets the family
+score zero across a clean transfer and leave selection to legality — `JPC_AV_01056` has no bin
+above it; `JPC_AV_02212` has 20 of 141.
+
+**A motion residual was tried and rejected.** TOUT rank correlates with YDIF rank (+0.44 to +0.88
+across the sample reports), so subtracting motion looked like the fix. It is not: on the verified
+bins no subtraction coefficient separated true from false positives, and at full strength the false
+positive *beat* a true positive (0.76 against 0.00). Damaged passages are often the high-motion ones
+— dubbed material is both a generation down and cut quickly — so removing motion removes real
+damage with it. The statistic, not the confound, was the problem.
 
 **YDIF is deliberately not scored.** It measures motion, which is content rather than
 damage — the busiest bin of a healthy tape is a fast cut. Stage 0 uses it only as an

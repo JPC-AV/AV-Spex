@@ -72,6 +72,17 @@ SATURATION_LEGAL_LIMIT_8BIT = 88.7
 # The BRNG level the violation scan has always counted as a violation.
 BRNG_VIOLATION_FLOOR = 0.01
 
+# Mean share of temporal-outlier pixels over a bin, below which the bin has no
+# sustained impulsive damage worth targeting. Calibrated against operator-
+# verified bins: three confirmed dropout/head-switching regions measure
+# 0.0168, 0.0192 and 0.0214, while a confirmed clean-but-graphics-heavy bin
+# measures 0.0086. Without a floor, rank normalization guarantees that *some*
+# bin tops the impulsive family on every tape, including tapes with no
+# dropouts at all — the floor is what lets the family score zero across a
+# clean transfer and leave selection to legality. JPC_AV_01056 has no bin
+# above it; JPC_AV_02212 has 20 of 141.
+TOUT_SUSTAINED_FLOOR = 0.012
+
 
 @dataclass(frozen=True)
 class MetricSpec:
@@ -93,7 +104,7 @@ METRICS: Tuple[MetricSpec, ...] = (
     MetricSpec('brng_mean', 'legality', floor=BRNG_VIOLATION_FLOOR),
     MetricSpec('satmax_max', 'legality', floor=SATURATION_LEGAL_LIMIT_8BIT,
                luma_scaled=True),
-    MetricSpec('tout_p95', 'impulsive'),
+    MetricSpec('tout_mean', 'impulsive', floor=TOUT_SUSTAINED_FLOOR),
     MetricSpec('vrep_mean', 'impulsive'),
     MetricSpec('deflicker_absmax', 'instability'),
 )
@@ -111,10 +122,27 @@ METRICS: Tuple[MetricSpec, ...] = (
 # The medians are still collected — they are a plausible input for border
 # detection — but nothing scores on them.
 
-# YDIF is deliberately absent. It measures motion, which is content rather
-# than damage — the busiest bin of a healthy tape is a fast cut, not a defect.
-# The Stage-0 gate uses it only as an extreme-value rule (frames uncorrelated
-# with their predecessors), where it means something different.
+# YDIF is deliberately not a metric of its own. It measures motion, which is
+# content rather than damage — the busiest bin of a healthy tape is a fast cut,
+# not a defect. The Stage-0 gate uses it only as an extreme-value rule (frames
+# uncorrelated with their predecessors), where it means something different.
+#
+# Subtracting YDIF's rank from TOUT's was tried and rejected. TOUT rank does
+# correlate with YDIF rank (+0.44 to +0.88 across the sample reports), so the
+# motion-contamination theory looked right, but on operator-verified bins no
+# subtraction coefficient separated true from false positives: at every
+# strength from 0.25 to 1.0 the confirmed false positive stayed level with or
+# above a confirmed true positive, and at full strength it *beat* one (0.76 vs
+# 0.00). The reason is that damaged passages are often the high-motion ones —
+# dubbed material is both a generation down and cut quickly — so removing
+# motion removes real damage with it.
+#
+# What actually separated the cases was the statistic, not the confound:
+# tout_mean over tout_p95. A bin of transitions has a high p95 (a handful of
+# outlier frames) but a low mean; sustained dropout raises both. On the four
+# verified bins, p95 gave 0.0219-0.0407 for true positives against 0.0190 for
+# the false positive — overlapping — while the mean gave 0.0168-0.0214 against
+# 0.0086, a clean 2x gap.
 
 
 @dataclass

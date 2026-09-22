@@ -93,7 +93,7 @@ def test_saturation_floor_scales_with_bit_depth():
 
 def test_family_takes_its_strongest_metric():
     """Two weak signals should not add up to one strong one."""
-    profiles = _profiles(tout_p95=[0.0, 0.0, 0.0, 1.0],
+    profiles = _profiles(tout_mean=[0.0, 0.0, 0.0, 1.0],
                          vrep_mean=[0.0, 0.0, 0.0, 0.0])
     scores = sc.score_bins(profiles)
     assert scores[30.0].family_scores['impulsive'] == 1.0
@@ -101,7 +101,7 @@ def test_family_takes_its_strongest_metric():
 
 def test_dominant_family_names_the_biggest_contributor():
     profiles = _profiles(brng_mean=[0.02, 0.02, 0.02, 0.02],
-                         tout_p95=[0.0, 0.0, 0.0, 1.0])
+                         tout_mean=[0.0, 0.0, 0.0, 1.0])
     scores = sc.score_bins(profiles)
     assert scores[30.0].dominant_family == 'impulsive'
 
@@ -122,7 +122,7 @@ def test_dropout_evidence_can_outrank_the_worst_brng_bin():
     impulsive 1.00 alongside legality 0.97.
     """
     profiles = _profiles(brng_mean=[0.05, 0.03, 0.03, 0.045],
-                         tout_p95=[0.001, 0.001, 0.001, 0.4])
+                         tout_mean=[0.001, 0.001, 0.001, 0.4])
     ranked = sc.rank_order(sc.score_bins(profiles))
     assert ranked[0][0] == 30.0
 
@@ -134,7 +134,7 @@ def test_equal_family_weights_give_families_equal_say():
     that is worst on one and clean on the other cannot beat its opposite.
     """
     profiles = _profiles(brng_mean=[0.05, 0.04, 0.03, 0.02],
-                         tout_p95=[0.001, 0.001, 0.001, 0.4])
+                         tout_mean=[0.001, 0.001, 0.001, 0.4])
     scores = sc.score_bins(profiles)
     assert scores[0.0].score == pytest.approx(scores[30.0].score)
     assert scores[0.0].dominant_family == 'legality'
@@ -153,7 +153,7 @@ def test_weights_renormalize_over_available_families():
     assert scores[30.0].score == pytest.approx(1.0)
 
     both = sc.score_bins(_profiles(brng_mean=[0.02, 0.03, 0.04, 0.09],
-                                   tout_p95=[0.0, 0.0, 0.0, 0.0]))
+                                   tout_mean=[0.0, 0.0, 0.0, 0.0]))
     assert set(both[30.0].family_scores) == {'legality', 'impulsive'}
     assert both[30.0].score == pytest.approx(0.5)     # legality 1.0, impulsive 0.0
 
@@ -246,3 +246,45 @@ def test_describe_scores_names_the_families():
 def test_describe_scores_respects_limit():
     profiles = _profiles(brng_mean=[0.02, 0.03, 0.04, 0.05, 0.06])
     assert len(sc.describe_scores(sc.score_bins(profiles), limit=2)) == 2
+
+
+# ===========================================================================
+# TOUT: sustained damage, not transitions
+# ===========================================================================
+
+def test_tout_is_scored_as_a_mean_not_a_percentile():
+    """A bin of cuts has a high TOUT p95 and a low mean; dropout raises both.
+
+    On operator-verified bins, p95 gave 0.0219-0.0407 for confirmed dropout
+    regions against 0.0190 for a confirmed clean one — overlapping. The mean
+    gave 0.0168-0.0214 against 0.0086.
+    """
+    fields = {spec.field for spec in sc.METRICS}
+    assert 'tout_mean' in fields
+    assert 'tout_p95' not in fields
+
+
+def test_tout_below_the_floor_contributes_nothing():
+    """Rank alone would promote some bin on every tape, dropouts or not."""
+    profiles = _profiles(tout_mean=[0.002, 0.004, 0.006, 0.0086])
+    scores = sc.score_bins(profiles)
+    assert all(s.metric_ranks['tout_mean'] == 0.0 for s in scores.values())
+    assert all(s.family_scores['impulsive'] == 0.0 for s in scores.values())
+
+
+def test_verified_dropout_levels_clear_the_floor():
+    """The three confirmed true positives, against the confirmed false one."""
+    profiles = _profiles(tout_mean=[0.0086, 0.0168, 0.0192, 0.0214])
+    scores = sc.score_bins(profiles)
+    assert scores[0.0].family_scores['impulsive'] == 0.0        # false positive
+    assert scores[10.0].family_scores['impulsive'] > 0.0
+    assert scores[30.0].family_scores['impulsive'] == 1.0
+
+
+def test_a_tape_with_no_dropouts_lets_legality_decide():
+    """Impulsive scoring zero across the file is the correct outcome."""
+    profiles = _profiles(tout_mean=[0.003, 0.005, 0.007, 0.004],
+                         brng_mean=[0.02, 0.03, 0.04, 0.09])
+    ranked = sc.rank_order(sc.score_bins(profiles))
+    assert ranked[0][0] == 30.0                                  # worst BRNG bin
+    assert ranked[0][1].dominant_family == 'legality'
