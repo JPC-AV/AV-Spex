@@ -4159,6 +4159,17 @@ class IntegratedSignalstatsAnalyzer:
             # shift can walk one right up to the next, and the collision is
             # invisible until both are analyzed.
             occupied = validated + list(periods[index + 1:])
+
+            # The content start (head bars plus the safety margin) bounds every
+            # period, not only the ones this function repairs. Candidate
+            # placement upstream knows about bars *bins* but not about the
+            # margin, so a period could open inside it — JPC_AV_01823 started
+            # at 01:05 against a 01:11 content start — because a period under
+            # the overlap threshold was passed through untouched.
+            if start < effective_start:
+                start = effective_start
+                if self.duration:
+                    start = min(start, max(0.0, self.duration - dur))
             end = start + dur
             
             # Calculate total overlap with all black segments
@@ -5225,6 +5236,30 @@ class EnhancedFrameAnalysis:
                 basis = "composite score" if bin_scores else "violation density"
                 logger.info(f"Identified {len(qctools_suggested_periods)} periods "
                             f"with highest {basis}\n")
+
+                # Name the bins that earned each period. A period is six bins
+                # wide and the evidence is often one of them, so without this
+                # the reader is left scrubbing a minute of tape to find the
+                # seconds that mattered.
+                if bin_scores and qctools_suggested_periods:
+                    period_evidence = []
+                    for start, duration in qctools_suggested_periods:
+                        evidence = bin_scoring.evidence_within(
+                            start, duration, bin_scores)
+                        period_evidence.append({
+                            'start': start, 'duration': duration,
+                            'evidence': [
+                                {'start': score.bin_start, 'score': score.score,
+                                 'dominant_family': score.dominant_family}
+                                for score in evidence
+                            ],
+                        })
+                        if evidence:
+                            spans = ", ".join(
+                                f"{score.bin_start:.0f}s ({score.dominant_family or '-'} "
+                                f"{score.score:.2f})" for score in evidence[:3])
+                            logger.debug(f"    Period at {start:.0f}s earned by: {spans}")
+                    results['period_evidence'] = period_evidence
 
 
         # Step 3: Border detection (conditional)
@@ -6346,6 +6381,42 @@ class EnhancedFrameAnalysis:
         def _candidate_start(bin_start):
             # Center the period on the dense bin, clamped inside the file
             start = bin_start + bin_size / 2 - period_duration / 2
+            if bin_scores:
+                # A period is six bins wide, and the evidence that won it is
+                # often one bin — but not always. When the high-scoring bins
+                # run longer than one, centering on the single winner can cut
+                # the run in half (JPC_AV_03796 covered 45s of a 70s run).
+                # Slide the window over the positions that still contain the
+                # winning bin and keep the one covering the most score; ties
+                # fall back to centering, so the common single-bin case is
+                # unchanged.
+                # Only bins that could host a period of their own vote:
+                # `candidates` has already dropped the ones inside black, bars
+                # and the file tail, and anything under the evidence threshold
+                # is not what the period is here to sample. Summing raw scores
+                # over every bin instead pulled JPC_AV_01056's window onto its
+                # black tail, whose bins still score.
+                voters = {b: bin_scores[b].score for b in candidates
+                          if b in bin_scores
+                          and bin_scores[b].score >= bin_scoring.EVIDENCE_MIN_SCORE}
+                def _covered(from_time):
+                    return sum(score for b, score in voters.items()
+                               if from_time <= b
+                               and b + bin_size <= from_time + period_duration)
+
+                # Seeded with the centred position and only displaced by a
+                # position that covers strictly more evidence. Candidate
+                # offsets are bin-aligned and the centred start usually is
+                # not, so without the seed every single-bin period would drift
+                # half a bin for nothing.
+                best_start, best_covered = start, _covered(start)
+                offset = bin_start + bin_size - period_duration
+                while offset <= bin_start + 1e-9:
+                    covered = _covered(offset)
+                    if covered > best_covered:
+                        best_covered, best_start = covered, offset
+                    offset += bin_size
+                start = best_start
             if video_duration:
                 start = min(start, video_duration - period_duration)
             return max(0.0, start)

@@ -288,3 +288,37 @@ def test_a_tape_with_no_dropouts_lets_legality_decide():
     ranked = sc.rank_order(sc.score_bins(profiles))
     assert ranked[0][0] == 30.0                                  # worst BRNG bin
     assert ranked[0][1].dominant_family == 'legality'
+
+
+# ===========================================================================
+# evidence_within
+# ===========================================================================
+
+def _scores(**by_bin):
+    return {float(b): sc.BinScore(bin_start=float(b), score=v,
+                                  dominant_family='legality')
+            for b, v in by_bin.items()}
+
+
+def test_evidence_within_returns_scoring_bins_worst_first():
+    scores = _scores(**{'0': 0.9, '10': 0.6, '20': 0.2})
+    found = sc.evidence_within(0.0, 30.0, scores)
+    assert [e.bin_start for e in found] == [0.0, 10.0]
+
+
+def test_evidence_within_excludes_bins_outside_the_period():
+    scores = _scores(**{'0': 0.9, '60': 0.9})
+    found = sc.evidence_within(0.0, 60.0, scores)
+    assert [e.bin_start for e in found] == [0.0]
+
+
+def test_evidence_within_requires_the_whole_bin_inside():
+    """A bin straddling the period edge describes time the period misses."""
+    scores = _scores(**{'55': 0.9})
+    assert sc.evidence_within(0.0, 60.0, scores) == []
+
+
+def test_evidence_within_can_be_empty():
+    """A period placed where nothing scored says so, rather than inventing."""
+    scores = _scores(**{'0': 0.2, '10': 0.3})
+    assert sc.evidence_within(0.0, 60.0, scores) == []

@@ -2280,3 +2280,81 @@ def test_clean_periods_are_untouched():
     periods = [(100.0, 60), (300.0, 60)]
     result = analyzer._validate_periods_against_black_segments(periods, [(0.0, 50.0)], 10.0, 60)
     assert result == periods
+
+
+# ===========================================================================
+# Section 8 — period placement over scored bins
+# ===========================================================================
+
+def _bin_scores(**by_bin):
+    from AV_Spex.checks.bin_scoring import BinScore
+    return {float(b): BinScore(bin_start=float(b), score=v,
+                               dominant_family='legality')
+            for b, v in by_bin.items()}
+
+
+def _place(bin_scores, duration=600.0, black=None, num=1):
+    analysis = fa.EnhancedFrameAnalysis.__new__(fa.EnhancedFrameAnalysis)
+    return analysis._analyze_qctools_violation_distribution(
+        violations=[], num_periods=num, period_duration=60,
+        video_duration=duration, black_segments=black or [],
+        histogram=None, severity=None, bin_scores=bin_scores)
+
+
+def test_placement_centres_on_a_lone_scoring_bin():
+    """The common case: one bin earned the period, so centre on it."""
+    scores = _bin_scores(**{'300': 0.9, '100': 0.1, '200': 0.1})
+    assert _place(scores)[0][0] == pytest.approx(275.0)
+
+
+def test_placement_slides_to_cover_a_run_of_evidence():
+    """Centring on the winner alone would cut a longer run in half."""
+    scores = _bin_scores(**{'300': 0.9, '310': 0.85, '320': 0.85, '330': 0.8})
+    start = _place(scores)[0][0]
+    covered = [b for b in (300.0, 310.0, 320.0, 330.0) if start <= b and b + 10 <= start + 60]
+    assert covered == [300.0, 310.0, 320.0, 330.0]
+
+
+def test_placement_ignores_bins_below_the_evidence_threshold():
+    """Mediocre neighbours must not steer the window off the real evidence."""
+    scores = _bin_scores(**{'300': 0.9, '340': 0.2, '350': 0.2, '360': 0.2})
+    assert _place(scores)[0][0] == pytest.approx(275.0)
+
+
+def test_placement_ignores_bins_excluded_as_black():
+    """Bins inside black still carry a score; they must not attract a period.
+
+    JPC_AV_01056's black tail scores well, and summing raw score over every
+    bin pulled the window onto it.
+    """
+    scores = _bin_scores(**{'300': 0.9, '400': 0.9, '410': 0.9, '420': 0.9})
+    start = _place(scores, black=[(395.0, 440.0)])[0][0]
+    assert start == pytest.approx(275.0)
+
+
+def test_placement_still_contains_the_winning_bin():
+    scores = _bin_scores(**{'300': 0.9, '330': 0.8, '340': 0.8, '350': 0.8})
+    start = _place(scores)[0][0]
+    assert start <= 300.0 and 310.0 <= start + 60
+
+
+def test_period_is_clamped_to_the_content_start():
+    """The bars safety margin bounds every period, not just repaired ones."""
+    analyzer = _analyzer(600.0)
+    result = analyzer._validate_periods_against_black_segments(
+        [(20.0, 60)], [], effective_start=71.0, period_duration=60)
+    assert result[0][0] == pytest.approx(71.0)
+
+
+def test_clamped_period_is_still_checked_against_black():
+    analyzer = _analyzer(600.0)
+    result = analyzer._validate_periods_against_black_segments(
+        [(20.0, 60)], [(71.0, 120.0)], effective_start=71.0, period_duration=60)
+    assert result[0][0] != pytest.approx(71.0)
+
+
+def test_period_after_the_content_start_is_untouched():
+    analyzer = _analyzer(600.0)
+    result = analyzer._validate_periods_against_black_segments(
+        [(200.0, 60)], [], effective_start=71.0, period_duration=60)
+    assert result == [(200.0, 60)]

@@ -46,7 +46,7 @@ being ranked against each other.
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from AV_Spex.checks.qctools_bin_profile import BinProfile
+from AV_Spex.checks.qctools_bin_profile import PROFILE_BIN_SIZE, BinProfile
 from AV_Spex.checks.bin_suitability import BinVerdict
 
 # --- Families -------------------------------------------------------------
@@ -71,6 +71,11 @@ SATURATION_LEGAL_LIMIT_8BIT = 88.7
 
 # The BRNG level the violation scan has always counted as a violation.
 BRNG_VIOLATION_FLOOR = 0.01
+
+# A bin has to score at least this well to be worth naming as the evidence
+# behind a period. Low enough that a period always has something to point at
+# on a tape with real problems, high enough not to list every bin it covers.
+EVIDENCE_MIN_SCORE = 0.5
 
 # Mean share of temporal-outlier pixels over a bin, below which the bin has no
 # sustained impulsive damage worth targeting. Calibrated against operator-
@@ -277,6 +282,29 @@ def score_bins(profiles: Dict[float, BinProfile],
 def rank_order(scores: Dict[float, BinScore]) -> List[Tuple[float, BinScore]]:
     """Bins worst-first, with a stable tie-break on bin start."""
     return sorted(scores.items(), key=lambda item: (-item[1].score, item[0]))
+
+
+def evidence_within(period_start: float, period_duration: float,
+                    scores: Dict[float, BinScore],
+                    bin_size: float = PROFILE_BIN_SIZE,
+                    min_score: float = EVIDENCE_MIN_SCORE) -> List[BinScore]:
+    """The scored bins inside a period that are worth pointing a reader at.
+
+    A period is six bins wide and the evidence that won it is often a single
+    bin: on JPC_AV_01772 the damage an operator confirmed ran 18:54-19:02
+    inside an 18:25-19:25 period, so 52 of its 60 seconds are clean. The
+    period is still the right unit to *measure* — it gives signalstats a
+    stable sample — but nothing should make someone scrub a minute of tape to
+    find the eight seconds that earned it.
+
+    Returned worst-first.
+    """
+    period_end = period_start + period_duration
+    inside = [score for bin_start, score in scores.items()
+              if bin_start >= period_start - 1e-9
+              and bin_start + bin_size <= period_end + 1e-9
+              and score.score >= min_score]
+    return sorted(inside, key=lambda score: (-score.score, score.bin_start))
 
 
 def describe_scores(scores: Dict[float, BinScore], limit: int = 10) -> List[str]:

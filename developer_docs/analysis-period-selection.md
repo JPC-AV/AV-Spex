@@ -317,7 +317,14 @@ families across the set run roughly two-thirds `impulsive`, one-third `legality`
 4. **Rank bins** by composite score when available (Stage 0b), else by summed severity, else by
    count (`_bin_rank`). The top 10 are logged with the families that drove them.
 5. **Place periods**, densest bin first, centering the period on the bin and clamping it inside the
-   file (`_candidate_start`). Placement runs in **two passes**:
+   file (`_candidate_start`). With composite scores the window may slide off centre: candidate
+   starts one bin apart are tried, and a position replaces the centred one only when it covers
+   **strictly more** evidence. Only bins that survived the exclusions *and* score at least
+   `EVIDENCE_MIN_SCORE` vote — summing raw score over every bin pulled `JPC_AV_01056`'s window onto
+   its black tail, whose bins still score, and letting mediocre neighbours vote drifts the window
+   off the evidence. Seeding with the centred position matters because candidate offsets are
+   bin-aligned and the centred start usually is not; without it every single-bin period would drift
+   half a bin for nothing. Placement then runs in **two passes**:
    - Pass 1 requires each new period to start at least `2 × period_duration` from every period
      already chosen — so periods cover *distinct* problem regions instead of stacking on one burst.
    - Pass 2 (only if pass 1 came up short) relaxes the separation to `1 × period_duration`, i.e.
@@ -363,6 +370,15 @@ Then two correction passes:
   requested number of places.
 
 The final list is returned sorted by start time.
+
+### The content start bounds every period
+
+`effective_start` used to apply only to periods this stage *repaired* — a candidate under the 25%
+overlap bar passed through untouched, so a period could open inside the head-bars safety margin
+(`JPC_AV_01823` started at 01:05 against a 01:11 content start). Candidate placement upstream knows
+about bars *bins* but not about the margin, so nothing else was enforcing it. Every period is now
+clamped to `effective_start` first, and then goes through the usual overlap check — so a clamp that
+lands on black is still repaired.
 
 ### Black-segment validation and repair
 
@@ -460,6 +476,20 @@ This path skips the count guarantee and the refinement pass — it has no signal
 refine against.
 
 ---
+
+## What earned each period
+
+A period is six bins wide and the evidence that won it is often one of them. On `JPC_AV_01772` the
+damage an operator confirmed ran 18:54–19:02 inside an 18:25–19:25 period — 52 of its 60 seconds are
+clean. The period is still the right unit to *measure* (it gives signalstats a stable sample), but
+nothing should make someone scrub a minute of tape to find the eight seconds that earned it.
+
+`bin_scoring.evidence_within()` returns the bins inside a period scoring at least
+`EVIDENCE_MIN_SCORE` (0.5), worst first, and `analyze()` writes them to
+`results['period_evidence']` as `{start, duration, evidence: [{start, score, dominant_family}]}`.
+An empty list is meaningful: the period was placed where nothing scored, which happens on a short
+tape whose content is mostly excluded (`JPC_AV_01056` gets two such periods). Report rendering of
+this is Phase 4.
 
 ## Where the periods surface
 
