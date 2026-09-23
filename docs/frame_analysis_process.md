@@ -37,7 +37,7 @@ Values are the code defaults. "Config" means `FrameAnalysisConfig` in `utils/con
 | 0 | Bitplane check | enabled (not covered here) |
 | 1 | Resolve head color-bars end time (CSV fallback only when `brng_skip_color_bars` is on) | always |
 | 2a | Detect black segments from QCTools | any of border / signalstats / BRNG / duplicate-frame is on, and a QCTools report exists |
-| 2b | Scan QCTools for BRNG violations + build candidate periods | any of border / signalstats / BRNG is on, and a QCTools report exists |
+| 2b | Scan QCTools: BRNG violations, per-bin profiles, suitability gate, composite scores, then candidate periods | any of border / signalstats / BRNG is on, and a QCTools report exists |
 | 3 | Border detection (+ visualization) | enabled |
 | 4 | Signalstats (final period selection happens here) | enabled |
 | 4b | Refine periods from signalstats findings | signalstats and border results exist, and there are QCTools candidates |
@@ -81,26 +81,144 @@ There is deliberately no `YMIN` condition — analog tape black carries sub-blac
 `YMIN` above zero.
 
 ### 1.4 Black-segment detection
-1. Walk every frame in the report, applying the black-frame rule.
-2. Consecutive black frames form a segment; a non-black frame only closes the segment if it arrives
+1. Walk every frame in the report, skipping any whose `media_type` is present and not `video`
+   (same reason as 1.5 step 2 — an audio frame carries no signalstats, so the black-frame rule
+   reads it as picture, and one landing more than the gap tolerance after the last black frame
+   would close a segment early or split it in two).
+2. Apply the black-frame rule to the rest.
+3. Consecutive black frames form a segment; a non-black frame only closes the segment if it arrives
    more than **0.5 s** after the last black frame (short interruptions are bridged).
-3. Keep segments at least **2.0 s** long.
-4. Black segments + `bars_regions` together form the **avoid list** used by period placement,
-   signalstats and BRNG (bars only when Skip Color Bars is on). Duplicate-frame detection uses black
-   segments + `bars_regions` regardless.
+4. Keep segments at least **2.0 s** long.
+5. Black segments, `bars_regions` and the unsuitable regions from 1.7 are merged into the **avoid
+   list** used by period placement, signalstats and BRNG (bars only when Skip Color Bars is on) —
+   see 1.9. Duplicate-frame detection uses its own merge of black segments + `bars_regions`
+   regardless.
 
 ### 1.5 Violation scan (`parse_for_violations_streaming`)
 1. Walk every frame in the report.
-2. Skip frames before the head bars end (only if `brng_skip_color_bars` is on).
-3. Skip frames inside any `bars_regions` span (only if `brng_skip_color_bars` is on).
-4. Skip black frames.
-5. A frame is a **violation** when its QCTools `BRNG` value (share of out-of-range pixels, 0–1) is
+2. Skip any frame whose `media_type` is present and not `video`. QCTools interleaves audio frames
+   on the same timeline; they carry no signalstats, so they were always no-ops for the violation
+   list, but they inflate per-bin frame counts and read as out-of-order video. A frame with no
+   `media_type` attribute is treated as video.
+3. Skip frames before the head bars end (only if `brng_skip_color_bars` is on).
+4. Skip frames inside any `bars_regions` span (only if `brng_skip_color_bars` is on).
+5. Skip black frames.
+6. A frame is a **violation** when its QCTools `BRNG` value (share of out-of-range pixels, 0–1) is
    **> 0.01**.
-6. For every violation, add to 10-second bins:
+7. For every violation, add to 10-second bins:
    - `violation_histogram[bin]` += 1
    - `violation_severity[bin]` += the BRNG value
-7. Return only the **top 100** violations by BRNG value (this capped list feeds border detection
+8. Build a per-bin profile of every measure the report carries (section 1.6) in the same pass.
+9. Return only the **top 100** violations by BRNG value (this capped list feeds border detection
    frame choice and BRNG frame targeting). The histogram and severity maps cover **all** violations.
+
+---
+
+### 1.6 Per-bin profiles (`checks/qctools_bin_profile.py`)
+Built during the same walk, one `BinProfile` per 10-second bin. Collected here because the only
+alternative is a second full pass over the report; it costs about 15 % of the walk.
+
+1. Counts over every frame in the bin: `frames`, `black_frames`, `excluded_frames` (skipped as
+   bars), `violation_frames`, `violation_score_sum`.
+2. Statistics over the **non-black** frames only — analog tape black would dominate any average it
+   entered:
+   - signalstats: `brng_mean/max`, `tout_mean/p95`, `vrep_mean/max`, `ydif_mean/p95`,
+     `satmax_max`, `satavg_mean`, `yavg_mean`
+   - `entropy.normalized_entropy.normal.Y` mean
+   - `ssim.All` mean/min, `psnr.psnr_avg` mean (per-frame PSNR clipped at 100, since identical
+     frames give infinity)
+   - `deflicker.relative_change` — largest absolute value
+   - `cropdetect` edge medians and the widest edge IQR. A box with `x2 <= x1` or `y2 <= y1` is
+     discarded: cropdetect emits those when it finds no non-black content, on 1.2 %–32.6 % of
+     frames across the sample reports.
+   - `idet.repeated.current_frame` — count of frames that are not `neither`
+3. A metric absent from the report stays `None` — never 0. `BinProfile.metrics` names the families
+   measured in that bin; `parser.bin_profile_metrics` names them for the whole report. **Sidecars
+   differ**: some carry only signalstats/psnr/astats, with no cropdetect, entropy, idet, ssim or
+   deflicker.
+4. Bins are summarized and released as the timeline advances, so memory does not scale with tape
+   length. A frame arriving for an already-closed bin is counted in `out_of_order_frames` and
+   dropped rather than merged into a finished profile.
+5. `violation_histogram_from_profiles()` reproduces the two maps from step 7 exactly, so the
+   profiles are a superset of the older inputs.
+
+---
+
+### 1.7 Suitability gate (`checks/bin_suitability.py`)
+Decides, per bin, whether there is picture there to analyze at all. Bins that fail are merged into
+`unsuitable_regions` and joined to the avoid list (section 1.9). Without this they compete for
+periods and usually win: flat-field signal loss sits below broadcast black, so its BRNG reads ~1.0,
+the highest score a bin can have.
+
+**Hard reasons** — definitional, no corroboration needed:
+1. The bin has no picture frames (all black, or all excluded as bars).
+2. `yavg_mean` is below broadcast black (64 at 10-bit scale, 16 at 8-bit). Legal picture cannot
+   average below black without most of it being out of range.
+
+**Soft reasons** — **two must agree** before a bin is gated:
+
+| Reason | Threshold | Healthy range measured | Bad range measured |
+|---|---|---|---|
+| frames decorrelated from predecessor | `ssim_mean < 0.35` | 0.80–0.95 (p1 over 6 reports) | 0.18–0.33 |
+| repeated fields | `> 35 %` of picture frames | up to 32 % in low-motion passages | 35–94 % |
+| flat field | `entropy_mean < 0.25` | down to 0.40 | 0.30 |
+| luma uncorrelated frame to frame | `ydif_mean > 0.20 × full scale` | peaks at 0.23 | 0.40+ |
+| line repetition | `vrep_mean > 0.25` | ~0 | ~0.99 on flat-field loss |
+
+**Guards:**
+- Soft rules are evaluated only over the measures the report carries. With fewer than two
+  available the soft gate is skipped entirely — one measure cannot corroborate itself.
+- A bin needs **30** non-black frames (`MIN_PICTURE_FRAMES`) before soft rules apply.
+- If the soft rules would gate more than **60 %** of the content bins, the tape's abnormal is its
+  normal: the soft gate is dropped wholesale and the reason recorded. Hard reasons are never
+  dropped. Needs at least **10** content bins (`MIN_BINS_FOR_GUARD`) before the percentage means
+  anything.
+
+---
+
+### 1.8 Composite scoring (`checks/bin_scoring.py`)
+Scores every **suitable** bin against the rest of the same file. This score — not BRNG density — is
+what section 2.1 ranks on. Unsuitable bins are left out of both the ranking population and the
+result: they are not places a period can go, and including them would shift every other bin's rank.
+
+Three families, weighted and renormalized over the families the report can actually measure:
+
+| Family | Weight | Metrics |
+|---|---|---|
+| `legality` | 0.4 | `brng_mean` (floor 0.01), `satmax_max` (floor 88.7, ×4 at 10-bit) |
+| `impulsive` | 0.4 | `tout_mean` (floor 0.012), `vrep_mean` |
+| `instability` | 0.2 | `deflicker_absmax` |
+
+1. Within a family the **strongest** metric speaks for it — two weak signals must not add up to one
+   strong one.
+2. Across families, the weighted sum. `dominant_family` is the family contributing most.
+3. Normalization is the **within-file rank of the excess over a floor**, not a z-score: VREP is
+   exactly 0 in 89–100 % of content bins, so its median *and* MAD are 0 and any z-score divides by
+   zero. Ties resolve **downward**, so bins at the bottom score 0 and a lone spike lands near 1. A
+   metric with no spread contributes nothing, with no special case. Unmeasured (`None`) ranks 0.
+4. **The score is a targeting score, not a severity measure.** It says where the worst of *this*
+   tape is; the top bin of a pristine transfer scores the same 1.0 as the top bin of a ruined one.
+
+**Deliberately not scored:**
+- `YDIF` — measures motion, which is content rather than damage. The gate uses it only as an
+  extreme-value rule, where it means something different.
+- `cropdetect` edge IQR — the box moves with content shape and brightness rather than picture
+  stability. Absent from 3 of 9 sample reports; rejecting degenerate boxes changed no selection.
+- A YDIF motion-residual for TOUT was tested against operator-verified bins and rejected: no
+  subtraction coefficient separated true from false positives, because damaged passages are often
+  the high-motion ones. `tout_mean` over `tout_p95` is what separated them (verified true positives
+  0.0168–0.0214, verified false positive 0.0086), and the 0.012 floor is what stops rank
+  normalization promoting some bin on every tape, dropouts or not.
+
+---
+
+### 1.9 The avoid list
+`merge_avoid_segments()` combines black segments, bars regions (when `brng_skip_color_bars` is on)
+and the unsuitable regions from 1.7 into one **sorted, non-overlapping** list. Merging matters
+because the period validators measure overlap by *summing* per-segment overlaps: two spans
+describing the same seconds count them twice, so a period that is 10 % black reads as 20 % and gets
+shifted off a fine position. Duplicate-frame detection gets its own merged list (black + all bars,
+ungated).
 
 ---
 
@@ -109,16 +227,27 @@ There is deliberately no `YMIN` condition — analog tape black carries sub-blac
 Signalstats and BRNG both sample a few fixed-length windows rather than the whole file.
 Config: `analysis_period_count` (3), `analysis_period_duration` (60 s).
 
-### 2.1 Stage 1 — Candidate periods from QCTools (`_analyze_qctools_violation_distribution`)
-Runs right after the violation scan, only if violations were found.
-1. Start from the full 10 s histogram (falls back to binning the top-100 list if no histogram).
+### 2.1 Stage 1 — Candidate periods (`_analyze_qctools_violation_distribution`)
+Runs right after scoring, if there were violations **or** any scored bins. (It no longer waits for
+violations: a bin whose problem is dropouts or geometry drift can score without ever tripping the
+BRNG threshold, and used to be invisible to selection.)
+1. Candidate population: **every scored bin** when section 1.8 ran; otherwise the full 10 s
+   histogram, falling back to binning the top-100 list.
 2. Drop a bin if:
    - it ends within the **last 30 s** of the file, or
    - more than half of it (> 5 s) overlaps a single avoid-list segment.
 3. If the period length is longer than the video, shorten it to the video length.
-4. Rank bins by summed severity (by count if no severity map).
-5. For each bin in rank order, the candidate period is **centered on the bin**
+4. Rank bins by **composite score** (section 1.8); with no scores, by summed severity; with
+   neither, by count.
+5. For each bin in rank order, the candidate period starts **centered on the bin**
    (`bin_start + 5 − duration/2`), clamped to start ≥ 0 and to end at or before the end of the file.
+   With scores, the window may then slide off centre: candidate starts one bin apart are tried and
+   a position replaces the centred one only when it covers **strictly more** evidence. Only bins
+   that survived step 2 *and* score at least `EVIDENCE_MIN_SCORE` (0.5) vote — summing raw score
+   over every bin pulled one sample's window onto its black tail, whose bins still score, and
+   letting mediocre neighbours vote drifts the window off the evidence. The centred position is the
+   seed, because candidate offsets are bin-aligned and the centred start usually is not; without it
+   every single-bin period would drift half a bin for nothing.
 6. **Pass 1**: accept a candidate only if its start is at least **2 × period length** from every
    accepted start. Stop at the requested count.
 7. **Pass 2** (only if pass 1 came up short): same, but the required gap relaxes to **1 × period
@@ -147,14 +276,21 @@ Runs right after the violation scan, only if violations were found.
 6. Sort by start time.
 
 ### 2.3 Validation and repair against black/bars (`_validate_periods_against_black_segments`)
-For each period:
-1. Sum its overlap with all avoid-list segments.
+For each period, in list order:
+0. **Clamp to the effective start.** The content start bounds every period, not only the ones this
+   stage repairs — candidate placement upstream knows about bars *bins* but not about the 10 s
+   safety margin, so a period under the overlap threshold used to pass through and could open
+   inside it. A clamp that lands on black is still repaired by the steps below.
+1. Sum its overlap with all avoid-list segments (the list is merged, so nothing is counted twice —
+   section 1.9).
 2. Overlap **≤ 25 %** of its length → keep it unchanged.
 3. Overlap > 25 % → **shift**:
    - try positions 5 s, 10 s, 15 s … away, forward first then backward, up to half the video duration;
    - a position is acceptable if it starts at/after effective start, ends ≥ 10 s before file end,
-     overlaps the avoid list by **≤ 10 %**, and is at least one period length from every
-     already-kept period's start.
+     overlaps the avoid list by **≤ 10 %**, and is at least one period length from every other
+     period's start — **both already-kept ones and those still pending**. Checking only the kept
+     ones let a shift walk the first period onto the second, which candidate placement had kept a
+     period apart.
 4. No shift works → **shrink to fit**:
    - build the non-black gaps between effective start and 10 s before file end;
    - try the largest gap first; skip gaps shorter than **10 s**;
@@ -164,6 +300,8 @@ For each period:
 5. Neither works → drop the period.
 6. If **every** period was dropped, keep the one with the least avoid-list overlap anyway and set a
    **last-resort note** (sticky for the rest of the file) — this becomes BRNG's "low confidence".
+7. Return the result **sorted by start time**: a repair can move a period past its neighbour, and
+   two of this function's three call sites use the order as returned.
 
 ### 2.4 Top-up (`_fill_periods_to_count`)
 1. Only runs if fewer periods than requested, and the window (effective start → file end − 30 s)
@@ -536,7 +674,7 @@ All written to `{video_id}_qc_metadata/`:
 
 | File | From |
 |---|---|
-| `{video_id}_enhanced_frame_analysis.json` | everything: steps enabled, bars end, black segments, initial/final borders, signalstats (initial/final), BRNG (initial/final), refinement history |
+| `{video_id}_enhanced_frame_analysis.json` | everything: steps enabled, bars end, black segments, `unanalyzable_regions` (1.7, with reasons), `bin_scoring` (1.8: the measures the report carried, and the top-scoring bins), `period_evidence` (the bins that earned each **final** period, in time order), initial/final borders, signalstats (initial/final), BRNG (initial/final), refinement history |
 | `{video_id}_border_detection.jpg` | 3.3 |
 | `{video_id}_border_detection_refined_iter{N}.jpg` | 3.5 |
 | `{video_id}_border_refinement_comparison.jpg` | 3.5 |
