@@ -47,6 +47,7 @@ Gathered in `EnhancedFrameAnalysis.analyze()` before any period is placed:
 | `parser.violation_histogram` | `parse_for_violations_streaming()` side effect | The distribution periods are placed against |
 | `parser.violation_severity` | same | Tie-break when counts saturate |
 | `violations` (top-100 list) | same | Fallback histogram only; also feeds border detection/thumbnails |
+| `parser.bin_profiles` | same | Per-bin summary of every QCTools measure; drives the suitability gate below |
 
 Period selection is only run when it is needed —
 `needs_period_selection = border_detection or signalstats or brng_analysis`. Dropped-sample
@@ -77,21 +78,253 @@ every frame in many bins violates, so bins tie at ~300 and ranking by count dege
 "whatever `sorted` happened to order first". Summed severity separates saturated bins by how bad
 they are.
 
+### Per-bin profiles
+
+The same streaming pass also builds `parser.bin_profiles` — a `BinProfile` per 10-second bin
+(`checks/qctools_bin_profile.py`) summarizing **every** QCTools measure the report carries, not just
+BRNG: TOUT/VREP (impulsive damage), SATMAX/SATAVG (chroma legality), YDIF/SSIM/PSNR/deflicker
+(temporal behaviour), entropy and YAVG (flatness/exposure), cropdetect edge medians plus the widest
+edge IQR (geometry drift), and idet repeated-field counts. Counts (`frames`, `black_frames`,
+`excluded_frames`, `violation_frames`, `violation_score_sum`) cover every frame in the bin; the
+statistics describe only the **non-black** frames, for the same reason the violation list skips them.
+
+Ranking still runs off `violation_histogram`/`violation_severity`
+(`violation_histogram_from_profiles()` reproduces both from the profiles exactly, which is the bridge
+for moving that over too). What the profiles already drive is the suitability gate in Stage 0.
+
+Three things to know before building on it:
+
+- **Metric availability varies between reports.** Some sidecars carry only signalstats/psnr/astats
+  (no cropdetect, entropy, idet, ssim or deflicker) — `JPC_AV_01772` is one, `JPC_AV_01581` has the
+  full set. Every metric field is `Optional` and `None` when its tag never appeared;
+  `BinProfile.metrics` / `parser.bin_profile_metrics` name the families that did. Consumers must
+  renormalize over what is present rather than assume a fixed feature set.
+- **Audio frames are interleaved with video frames on the same timeline.** They carry no
+  signalstats, so `_is_black_frame` and the violation extractor both read them as ordinary
+  not-black picture. Both report scans — `parse_for_violations_streaming()` and
+  `detect_black_segments()` — now skip any frame whose `media_type` is present and not `video`
+  (a missing attribute is still treated as video). In the violation scan they inflated per-bin
+  frame counts and read as out-of-order video; in the black scan an audio frame landing more than
+  `gap_tolerance` (0.5s) after the last black video frame closes a segment early, or splits one in
+  two that `min_duration` then discards. Neither shows on the sample reports, whose audio frames
+  arrive about every 0.1s, well inside the tolerance — the guard is for reports with sparser audio.
+  `_detect_bit_depth()` still scans all frames, but returns on the first frame carrying UAVG/VAVG,
+  which real video frames always do.
+- **One bin's samples are held at a time.** Bins are summarized and released as the timeline
+  advances, so memory does not scale with tape length. A frame arriving for an already-closed bin is
+  counted in `out_of_order_frames` and dropped rather than merged into a finished profile.
+
+Collection costs roughly 15% of the XML walk (5.5s → 6.3s on a 31-minute 10-bit tape with every
+filter present) and no measurable memory. It happens in this pass because the alternative is a
+second full walk of the report.
+
+---
+
+## Stage 0 — Suitability gate
+
+`checks/bin_suitability.py`, called from `analyze()` right after the violation parse. It answers one
+question per bin: **is there picture here to analyze at all?** Bins that fail are merged into
+`unsuitable_regions` and joined to `avoid_segments`, so every later stage — candidate placement,
+period validation, the shift/refit repair, the count top-up and the even-distribution fallback —
+keeps away from them, exactly as they do from black and bars.
+
+The gate exists because the three things it catches all *look like severe damage* to a BRNG-ranked
+search and reliably outrank real problems:
+
+| What | How it measures | Why BRNG loves it |
+|---|---|---|
+| Signal loss / flat field | average luma below broadcast black | whole frame out of range → BRNG ≈ 1.0, the highest score a bin can have |
+| Lead-in / end-of-tape static | frames uncorrelated with their predecessors | BRNG 0.2–0.6 sustained over minutes |
+| Concealment repetition | long runs of repeated fields | high VREP and BRNG together |
+
+### The two kinds of reason
+
+**Hard reasons stand alone** — they are definitional, not tuned:
+
+- the bin has no picture frames (all black, or all excluded as bars);
+- `yavg_mean` is below broadcast black (64 at 10-bit scale, 16 at 8-bit). Legal picture cannot
+  average below black without most of it being out of range. The closest healthy measurement across
+  the sample set is 65 (`JPC_AV_01056`'s noisy analog black, which black-segment detection already
+  excludes), and the LC tape's loss regions average 53–54.
+
+**Soft reasons need corroboration** — two must agree before a bin is gated:
+
+| Reason | Threshold | Healthy range measured | Bad range measured |
+|---|---|---|---|
+| frames decorrelated from predecessor | `ssim_mean < 0.35` | 0.80–0.95 (p1 across 6 reports) | 0.18–0.33 |
+| repeated fields | `> 35%` of picture frames | up to 32% in low-motion passages | 35–94% |
+| flat field | `entropy_mean < 0.25` | down to 0.40 | 0.30 (and caught by the hard rule anyway) |
+| luma uncorrelated frame to frame | `ydif_mean > 0.20 × full scale` | peaks at 0.23 in end-of-tape bins the tail rule drops | 0.40+ |
+| line repetition | `vrep_mean > 0.25` | ~0 | ~0.99 on flat-field loss |
+
+Single-signal gating is exactly the failure mode being avoided, so one reason is never enough: a
+cut-heavy passage has low SSIM, a locked-off interview has repeated fields, a noisy transfer has low
+entropy. `JPC_AV_01663` @ 1860s (SSIM 0.753, YDIF 124) and `JPC_AV_01710` @ 1250s (28% repeated
+fields) are both healthy content that a single rule would have thrown away.
+
+### Guards
+
+- **Availability.** Soft rules are evaluated only over the measures the report carries. With fewer
+  than two available the soft gate is skipped entirely — there is nothing to corroborate with. A
+  signalstats-only report still gets both hard rules, and can still pair YDIF with VREP.
+- **Sample size.** A bin needs `MIN_PICTURE_FRAMES` (30) non-black frames before soft rules apply;
+  below that its statistics come from a handful of frames (`JPC_AV_01710` @ 220s is 299/300 black).
+- **Whole-tape guard.** If the soft rules would gate more than 60% of the content bins, the tape's
+  abnormal *is* its normal and the soft gate is dropped wholesale, with `note` recording why.
+  Hard reasons are never dropped. The guard needs `MIN_BINS_FOR_GUARD` (10) content bins before a
+  percentage means anything.
+
+### Measured effect
+
+Replaying stage 1 + stage 2 over ten sample reports: **placement is byte-identical on all nine
+healthy tapes** (including the 02041/02212 ground truth from the earlier redesign) and moves only on
+the LC tape with known damage:
+
+```
+21459403   before [95, 2065, 2865]   after [135, 2025, 2235]
+           unanalyzable share of each period:
+           before  75% /  33% / 0%      after  8% / 8% / 0%
+```
+
+The gated spans there are 0–40s (black), 80–140s (lead-in static), 2080–2100s (signal loss) and
+2940–3010s (end-of-tape). Note 2940–2960 is *not* covered by the last-30s rule on a 3000s file.
+
+---
+
+## Stage 0b — Composite scoring
+
+`checks/bin_scoring.py`, called right after the suitability gate. It scores every
+*analyzable* bin, and that score — not BRNG density — is what Stage 1 ranks on.
+
+### Why BRNG alone stopped being enough
+
+Measured per-bin p90/median across the sample reports:
+
+| Metric | p90 / median |
+|---|---|
+| **BRNG** (what ranking used) | **1.16 – 1.95** |
+| TOUT | 1.41 – 2.80 |
+| SATAVG | 1.29 – 3.08 |
+| YDIF | 1.80 – 9.49 |
+| deflicker | 4.11 – 131.1 |
+| cropdetect edge IQR | median 0, p90 0–5 (rare spikes) |
+
+BRNG is the flattest signal available, and on a noisy tape it is flat *and*
+saturated: all 187 content bins of `JPC_AV_01772` have >95% of frames violating, so
+ranking separated them by ~25% differences in mean out-of-range share. Worse, a bin
+whose problem is a dropout burst can carry no BRNG violation at all, and was
+therefore invisible — the histogram only ever contained bins that tripped
+`BRNG > 0.01`. With scores, **every analyzable bin is a candidate**.
+
+### Families
+
+| Family | Weight | Metrics | Why |
+|---|---|---|---|
+| `legality` | 0.4 | `brng_mean` (floor 0.01), `satmax_max` (floor = illegal chroma) | what BRNG/signalstats analysis exists to characterize |
+| `impulsive` | 0.4 | `tout_mean` (floor 0.012), `vrep_mean` | dropouts and the deck's concealment of them — the gap this closes |
+| `instability` | 0.2 | `deflicker_absmax` | brightness deviating from the frame's temporal neighbours; weighted lower because its one metric is a per-bin maximum, so a single hard cut can set it |
+
+Within a family the **strongest** metric speaks for it (two weak signals must not add
+up to one strong one); across families the weighted sum, with weights renormalized
+over the families the report can actually measure, so a signalstats-only sidecar
+scores on the same 0–1 scale as a rich one.
+
+**cropdetect is deliberately not scored**, though the profiles still collect its edge medians.
+It reports the bounding box of non-black content, so the box moves whenever the content changes
+shape or brightness rather than when the picture is unstable. Measured across the sample set: absent
+from 3 of the 9 JPC reports (including both ground-truth files); where present, degenerate boxes
+(`x2 <= x1` or `y2 <= y1`, emitted when there is no non-black content to bound) run from 1.2% to
+32.6% of frames; and rejecting those degenerate boxes reproduced the *same* selection on every JPC
+file, which is what ruled the metric out — its influence was never detector failure, it was content.
+The bins it promoted were a dark scene on one tape (YAVG 218 against a file median of 355) and a
+bright one on another. `BinProfiler` now drops degenerate boxes at collection time regardless, so
+the edge medians are trustworthy for any future use.
+
+### TOUT: the mean, over a floor
+
+Two calibration decisions here came from operator spot-checks of four verified bins — three
+regions with confirmed dropout/head-switching damage, and one confirmed to have illegal pixels
+from graphics but *no* dropout or instability.
+
+**The mean, not the 95th percentile.** A bin full of cuts and fades has a high TOUT p95 (a handful
+of outlier frames) and a low mean; sustained dropout raises both. On the verified bins p95 gave
+0.0219–0.0407 for the true positives against 0.0190 for the false positive — overlapping — while
+the mean gave 0.0168–0.0214 against 0.0086, a clean 2× gap.
+
+**An absolute floor of 0.012.** Rank normalization guarantees that *some* bin tops the impulsive
+family on every tape, including tapes with no dropouts at all. The floor is what lets the family
+score zero across a clean transfer and leave selection to legality — `JPC_AV_01056` has no bin
+above it; `JPC_AV_02212` has 20 of 141.
+
+**A motion residual was tried and rejected.** TOUT rank correlates with YDIF rank (+0.44 to +0.88
+across the sample reports), so subtracting motion looked like the fix. It is not: on the verified
+bins no subtraction coefficient separated true from false positives, and at full strength the false
+positive *beat* a true positive (0.76 against 0.00). Damaged passages are often the high-motion ones
+— dubbed material is both a generation down and cut quickly — so removing motion removes real
+damage with it. The statistic, not the confound, was the problem.
+
+**YDIF is deliberately not scored.** It measures motion, which is content rather than
+damage — the busiest bin of a healthy tape is a fast cut. Stage 0 uses it only as an
+extreme-value rule, where it means something different.
+
+### Normalization: within-file rank of the excess over a floor
+
+Not a z-score. Two properties of the data rule that out:
+
+- VREP is exactly 0 in 89–100% of content bins, so its median *and* MAD are both 0 — every
+  z-score divides by zero.
+- Rank handles the zero-heavy case natively. Ties resolve **downward** (rank = share
+  of bins strictly below), so the quiet bins all score 0 and a lone spike lands near 1.
+  An average-rank convention would instead hand every quiet bin half a point for being
+  quiet.
+
+A metric with no spread contributes nothing, with no special case: every bin ties, so
+every bin ranks 0. Unmeasured (`None`) ranks 0 too — never evidence of a problem.
+Where a metric has a meaningful absolute floor (BRNG's existing violation threshold,
+the illegal-chroma level for SATMAX) the **excess over it** is what gets ranked, so
+entirely legal bins are not ranked against one another.
+
+Unsuitable bins are excluded from the ranking population as well as from the result:
+they are not places a period can go, and including them would shift every other bin's
+rank.
+
+**The score is a targeting score, not a severity measure.** It says where the worst of
+*this* tape is; the top bin of a pristine transfer scores the same 1.0 as the top bin
+of a ruined one. Period selection always takes the top N, so that is what it needs —
+but the number must never be shown to a user as a quality figure.
+
+### Measured effect
+
+Replaying stage 1 + stage 2 over ten sample reports, placement changes on nine of ten
+(`JPC_AV_01581` is unchanged). Notably `JPC_AV_02041` moves off `[465, 995, 1475]` to
+`[225, 465, 985]`, giving up the 24:35 period cited as ground truth in the earlier
+redesign — an accepted trade, decided deliberately: its new top bins score impulsive
+1.00 / legality 0.97, evidence the old ranking could not see. Chosen bins' dominant
+families across the set run roughly two-thirds `impulsive`, one-third `legality`.
+
 ---
 
 ## Stage 1 — Candidate periods from the violation distribution
 
 `EnhancedFrameAnalysis._analyze_qctools_violation_distribution()`.
 
-1. **Bin the violations** — prefer `histogram`; else bin the capped `violations` list at 10s.
+1. **Choose the candidate bins** — every scored bin when Stage 0b ran; else the `histogram`;
+   else the capped `violations` list binned at 10s.
 2. **Exclude bins** (`_bin_excluded`): a bin whose overlap with any black segment or bars region
    exceeds half the bin (5s), or that ends within the **last 30 seconds** of the file
    (end-of-tape static). Noise spikes that escape the per-frame black classifier get caught here.
 3. **Clamp the period duration** to the video duration if the configured duration is longer.
-4. **Rank bins** by summed severity when available, else by count (`_bin_rank`). The top 10 are
-   logged.
+4. **Rank bins** by composite score when available (Stage 0b), else by summed severity, else by
+   count (`_bin_rank`). The top 10 are logged with the families that drove them.
 5. **Place periods**, densest bin first, centering the period on the bin and clamping it inside the
-   file (`_candidate_start`). Placement runs in **two passes**:
+   file (`_candidate_start`). With composite scores the window may slide off centre: candidate
+   starts one bin apart are tried, and a position replaces the centred one only when it covers
+   **strictly more** evidence. Only bins that survived the exclusions *and* score at least
+   `EVIDENCE_MIN_SCORE` vote — summing raw score over every bin pulled `JPC_AV_01056`'s window onto
+   its black tail, whose bins still score, and letting mediocre neighbours vote drifts the window
+   off the evidence. Seeding with the centred position matters because candidate offsets are
+   bin-aligned and the centred start usually is not; without it every single-bin period would drift
+   half a bin for nothing. Placement then runs in **two passes**:
    - Pass 1 requires each new period to start at least `2 × period_duration` from every period
      already chosen — so periods cover *distinct* problem regions instead of stacking on one burst.
    - Pass 2 (only if pass 1 came up short) relaxes the separation to `1 × period_duration`, i.e.
@@ -137,6 +370,15 @@ Then two correction passes:
   requested number of places.
 
 The final list is returned sorted by start time.
+
+### The content start bounds every period
+
+`effective_start` used to apply only to periods this stage *repaired* — a candidate under the 25%
+overlap bar passed through untouched, so a period could open inside the head-bars safety margin
+(`JPC_AV_01823` started at 01:05 against a 01:11 content start). Candidate placement upstream knows
+about bars *bins* but not about the margin, so nothing else was enforcing it. Every period is now
+clamped to `effective_start` first, and then goes through the usual overlap check — so a clamp that
+lands on black is still repaired.
 
 ### Black-segment validation and repair
 
@@ -235,8 +477,38 @@ refine against.
 
 ---
 
+## What earned each period
+
+A period is six bins wide and the evidence that won it is often one of them. On `JPC_AV_01772` the
+damage an operator confirmed ran 18:54–19:02 inside an 18:25–19:25 period — 52 of its 60 seconds are
+clean. The period is still the right unit to *measure* (it gives signalstats a stable sample), but
+nothing should make someone scrub a minute of tape to find the eight seconds that earned it.
+
+`bin_scoring.evidence_within()` returns the bins inside a period scoring at least
+`EVIDENCE_MIN_SCORE` (0.5), worst first, and `analyze()` writes them to
+`results['period_evidence']` as `{start, duration, evidence: [{start, score, dominant_family}]}`.
+An empty list is meaningful: the period was placed where nothing scored, which happens on a short
+tape whose content is mostly excluded (`JPC_AV_01056` gets two such periods).
+
 ## Where the periods surface
 
+- **HTML report**: the **Analysis Period Selection** block
+  (`_render_frame_periods_html()` in `utils/generate_report.py`, anchor `section-period-selection`),
+  rendered inside the Frame Analysis section *before* signalstats and BRNG — the reader should know
+  what was sampled before reading what it measured. It carries three things nothing else in the
+  report shows: the methodology (`PERIOD_SELECTION_METHODOLOGY_HTML`, including the warning that the
+  score is a targeting aid and not a quality grade, since it compares each bin only against the rest
+  of the same tape); which measures the QCTools sidecar actually carried, so "no dropout evidence"
+  is distinguishable from "dropouts were never looked for"; a per-period table of the
+  highest-scoring moments inside it, worst first, with the family named in plain words
+  (`legality` → "out-of-range pixels", `impulsive` → "dropouts / concealment", `instability` →
+  "brightness instability"); and the regions excluded as unanalyzable with their reasons. A period
+  whose evidence list is empty says so explicitly rather than rendering blank. The whole block
+  returns `""` when none of the three inputs are present, so reports from before this was recorded
+  are unchanged. Times use `_seconds_to_display()` to match the rest of the frame-analysis
+  section — **these are elapsed seconds, not the file's timecode**, which is a known inconsistency
+  with the rest of the report (see the `make-timecode-file-aware` skill; converting the frame
+  analysis section is a job of its own, since its other renderers share the same format).
 - **JSON**: `{video_id}_enhanced_frame_analysis.json` → `signalstats.analysis_periods` and
   `brng_analysis.analysis_periods`, each a list of `[start_seconds, duration]`. Detected black
   segments are alongside under `black_segments`.
@@ -260,6 +532,19 @@ refine against.
 - **The two overlap thresholds are intentionally different**: 25% triggers a repair, but a repaired
   position must get under 10%. Loosening the second to 25% lets a shifted period settle right back
   against a black segment.
+- **A repaired period must clear the periods that come after it, not just the validated ones.**
+  `_validate_periods_against_black_segments` walks the list in order; a shift searching outward can
+  walk the first period right up to the second, which has not been validated yet. Composite ranking
+  packs candidates more tightly (the relaxed separation pass fires more often), which made the
+  collision reachable — `JPC_AV_03796` produced two periods 20 seconds apart. The repair now checks
+  `validated + periods[index+1:]`, and the function sorts its result, because a repair can move a
+  period past its neighbour and two of the three call sites used the order as returned.
+- **Avoid segments must be merged before use.** The validators measure a period's overlap with the
+  avoid list by *summing* per-segment overlaps, so two spans describing the same seconds count them
+  twice and a period that is 10% black reads as 20% and gets shifted off a fine position. Sources
+  genuinely overlap — a bars flash inside a black tail, an unanalyzable bin inside a black segment —
+  so `merge_avoid_segments()` normalizes them where the list is built. It is also what keeps the
+  suitability gate from silently re-weighting the black segments it duplicates.
 - **Period placement is not free.** Every period costs two full decodes of its duration in the BRNG
   differential step, so `analysis_period_count × analysis_period_duration` is the real runtime knob.
 - **Bars are avoided in two different ways.** The scalar `color_bars_end_time` sets `effective_start`

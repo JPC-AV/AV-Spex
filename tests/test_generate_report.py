@@ -1561,3 +1561,114 @@ def test_brng_unknown_confidence_value_still_warns():
     html = gr.generate_frame_analysis_html(outputs, "JPC_AV_02222")
 
     assert "Reduced confidence:" in html
+
+
+# ===========================================================================
+# Analysis Period Selection block
+# ===========================================================================
+
+def _period_outputs(**overrides):
+    """A frame_outputs dict shaped like the collector builds it.
+
+    The sibling renderers index some keys directly rather than using .get(),
+    which is fine by contract — they are only ever handed the full dict.
+    """
+    outputs = {
+        'border_visualization': None, 'border_data': None,
+        'brng_analysis': None, 'brng_unavailable_reason': None,
+        'brng_thumbnails': [], 'signalstats_analysis': None,
+        'enhanced_frame_analysis': None, 'dropped_sample_spectrogram': None,
+        'dropped_sample_detection': None, 'duplicate_frame_detection': None,
+        'bin_scoring': None, 'period_evidence': None, 'unanalyzable_regions': None,
+    }
+    outputs.update(overrides)
+    return outputs
+
+
+def test_period_selection_absent_without_inputs():
+    """A report from before this was recorded renders exactly as it did."""
+    assert gr._render_frame_periods_html(_period_outputs()) == ""
+
+
+def test_period_selection_lists_what_earned_each_period():
+    html = gr._render_frame_periods_html(_period_outputs(period_evidence=[
+        {'start': 985.0, 'duration': 60,
+         'evidence': [{'start': 1010.0, 'score': 0.99, 'dominant_family': 'impulsive'}]},
+    ]))
+    assert "id='section-period-selection'" in html
+    assert "Period 1" in html
+    assert "dropouts / concealment" in html
+
+
+def test_period_selection_says_when_nothing_stood_out():
+    """An empty evidence list is a finding, not a gap in the data."""
+    html = gr._render_frame_periods_html(_period_outputs(period_evidence=[
+        {'start': 27.0, 'duration': 60, 'evidence': []},
+    ]))
+    assert "stood out" in html
+
+
+def test_period_selection_lists_unanalyzable_regions_with_reasons():
+    html = gr._render_frame_periods_html(_period_outputs(unanalyzable_regions=[
+        {'start': 2080.0, 'end': 2100.0, 'duration': 20.0,
+         'reasons': ['average luma below broadcast black (54)']},
+    ]))
+    assert "Regions excluded as unanalyzable" in html
+    assert "below broadcast black" in html
+
+
+def test_period_selection_names_the_tags_behind_each_exclusion():
+    """Black and bars dominate the list, so the copy has to say what the
+    other reasons were measured from — otherwise every row reads the same."""
+    html = gr._render_frame_periods_html(_period_outputs(unanalyzable_regions=[
+        {'start': 0.0, 'end': 10.0, 'duration': 10.0,
+         'reasons': ['no picture frames (all black or excluded)']},
+    ]))
+    assert "black leader or tail" in html
+    for tag in ("YMAX", "YAVG", "ssim.All", "YDIF",
+                "idet.repeated.current_frame", "VREP",
+                "entropy.normalized_entropy.normal.Y"):
+        assert tag in html, tag
+
+
+def test_period_selection_names_the_available_measures():
+    """A family never measured cannot have steered anything."""
+    html = gr._render_frame_periods_html(_period_outputs(
+        bin_scoring={'metrics': ['psnr', 'signalstats']}))
+    assert "signalstats" in html
+    assert "Measures available" in html
+
+
+def test_period_selection_lists_every_region():
+    """Nothing is truncated: a static report has no way to expand a summary."""
+    regions = [{'start': float(i * 100), 'end': float(i * 100 + 10),
+                'duration': 10.0, 'reasons': ['no picture frames']}
+               for i in range(20)]
+    html = gr._render_frame_periods_html(_period_outputs(unanalyzable_regions=regions))
+    assert "more" not in html.split("Regions excluded")[1]
+    assert html.count("no picture frames") == 20
+
+
+def test_period_selection_lists_every_scoring_moment():
+    """A 60s period holds six bins; truncating at four hid rows behind a
+    "+2 more" that nothing could expand."""
+    evidence = [{'start': float(1000 + i * 10), 'score': 0.9 - i * 0.05,
+                 'dominant_family': 'impulsive'} for i in range(6)]
+    html = gr._render_frame_periods_html(_period_outputs(period_evidence=[
+        {'start': 1000.0, 'duration': 60, 'evidence': evidence}]))
+    assert html.count("dropouts / concealment") == 6
+    assert "more</div>" not in html
+
+
+def test_period_selection_renders_inside_the_frame_analysis_section():
+    html = gr.generate_frame_analysis_html(_period_outputs(period_evidence=[
+        {'start': 985.0, 'duration': 60, 'evidence': []}]), "JPC_AV_TEST")
+    assert "id='section-period-selection'" in html
+    assert 'id="section-frame-analysis"' in html
+
+
+def test_period_selection_anchor_is_a_known_toc_entry():
+    """The TOC reads anchors back out of the markup; the pair must agree."""
+    import inspect
+    source = inspect.getsource(gr.write_html_report)
+    assert "('section-period-selection', 'Analysis Period Selection')" in source

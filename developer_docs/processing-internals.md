@@ -12,7 +12,7 @@ Unified module controlled by `FrameAnalysisConfig`. Three optional sub-steps, ea
 - **BRNG analysis**: Detects out-of-range luma/chroma values using multi-method voting; generates diagnostic thumbnails and an HTML report with magenta highlights.
 - **Signalstats**: FFmpeg `signalstats` filter analysis over selected time periods (default: 3 periods of 60s each).
 
-Signalstats and BRNG analysis sample **analysis periods** rather than the whole file. How those periods are chosen — the QCTools violation histogram, the black-segment/bars avoidance and repair passes, and the post-signalstats refinement — is documented separately in **`developer_docs/analysis-period-selection.md`**.
+Signalstats and BRNG analysis sample **analysis periods** rather than the whole file. How those periods are chosen — per-bin profiles of every measure the QCTools report carries, the suitability gate that rules out stretches holding no analyzable picture, the composite score that replaced BRNG density as the ranking, the black-segment/bars avoidance and repair passes, and the post-signalstats refinement — is documented separately in **`developer_docs/analysis-period-selection.md`**, with a step-by-step account of every threshold in **`docs/frame_analysis_process.md`**.
 
 The head-bars end time and all detected bars spans (the qct-parse + CLAMS consensus) are passed to frame analysis so test patterns are skipped; `brng_skip_color_bars` gates that for the BRNG side (violation scan, period placement, signalstats, BRNG), while duplicate-frame detection always excludes bars. Results feed into the HTML report.
 

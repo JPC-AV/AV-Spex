@@ -42,6 +42,13 @@ from AV_Spex.checks import frame_analysis as fa
 # Test fixtures: synthetic QCTools XML
 # ===========================================================================
 
+def _full_tag_key(key):
+    """Expand a fixture tag name to its full lavfi key."""
+    if "." in key:
+        return f"lavfi.{key}"
+    return f"lavfi.signalstats.{key}"
+
+
 def _qctools_xml(frames):
     """Build a minimal qctools-shaped XML document.
 
@@ -49,6 +56,9 @@ def _qctools_xml(frames):
       pkt_pts_time (str): timestamp; default str(idx)
       tags (dict[str, str]): {key_suffix → attribute value}, e.g.
                               {"YMAX": "940", "BRNG": "0.05"}
+        A bare name is a signalstats key; a name containing a dot is taken as
+        a full lavfi key suffix ("ssim.All", "cropdetect.x1"), for the filters
+        outside signalstats.
         Tag elements use BOTH attribute style (`value="..."`) and text content
         so they exercise both `.get('value')` and `findtext()` consumers.
     """
@@ -59,7 +69,7 @@ def _qctools_xml(frames):
         ts = f.get("pkt_pts_time", str(idx))
         out.append(f'    <frame media_type="video" pkt_pts_time="{ts}" n="{idx}">')
         for key, value in f.get("tags", {}).items():
-            full_key = f"lavfi.signalstats.{key}"
+            full_key = _full_tag_key(key)
             out.append(f'      <tag key="{full_key}" value="{value}">{value}</tag>')
         out.append('    </frame>')
     out.append('  </frames>')
@@ -232,8 +242,7 @@ def _frame_elem(frame_dict):
         ts=frame_dict.get("pkt_pts_time", "0.0"),
         n=frame_dict.get("n", "0"))]
     for key, value in frame_dict.get("tags", {}).items():
-        full_key = f"lavfi.signalstats.{key}"
-        xml.append(f'  <tag key="{full_key}" value="{value}"/>')
+        xml.append(f'  <tag key="{_full_tag_key(key)}" value="{value}"/>')
     xml.append('</frame>')
     return ET.fromstring("\n".join(xml))
 
@@ -2189,3 +2198,185 @@ def test_improvement_check_compares_overall_worst_frames():
 
     obj = fa.EnhancedFrameAnalysis.__new__(fa.EnhancedFrameAnalysis)
     assert obj._is_meaningful_improvement(result(3.0, 9.0), result(2.0, 1.9)) is True
+
+
+# ===========================================================================
+# Section 6 — merge_avoid_segments
+# ===========================================================================
+
+def test_merge_avoid_segments_combines_and_sorts():
+    merged = fa.merge_avoid_segments([(30.0, 40.0)], [(0.0, 10.0)])
+    assert merged == [(0.0, 10.0), (30.0, 40.0)]
+
+
+def test_merge_avoid_segments_merges_overlapping_spans():
+    """Double-counted overlap is what makes a 10%-black period read as 20%."""
+    merged = fa.merge_avoid_segments([(1409.6, 1531.9)], [(1410.0, 1530.0)])
+    assert merged == [(1409.6, 1531.9)]
+
+
+def test_merge_avoid_segments_merges_touching_spans():
+    assert fa.merge_avoid_segments([(0.0, 10.0), (10.0, 20.0)]) == [(0.0, 20.0)]
+
+
+def test_merge_avoid_segments_keeps_separated_spans():
+    merged = fa.merge_avoid_segments([(0.0, 10.0)], [(20.0, 30.0)])
+    assert merged == [(0.0, 10.0), (20.0, 30.0)]
+
+
+def test_merge_avoid_segments_drops_empty_and_inverted_spans():
+    assert fa.merge_avoid_segments([(5.0, 5.0), (10.0, 4.0)], None, []) == []
+
+
+def test_merge_avoid_segments_no_double_counted_overlap():
+    """The property the period validators depend on: summed overlap is real."""
+    merged = fa.merge_avoid_segments([(0.0, 30.0)], [(10.0, 20.0)], [(25.0, 35.0)])
+    total = sum(end - start for start, end in merged)
+    assert total == pytest.approx(35.0)
+
+
+# ===========================================================================
+# Section 7 — period repair keeps clear of pending periods
+# ===========================================================================
+
+def _analyzer(duration):
+    a = fa.IntegratedSignalstatsAnalyzer.__new__(fa.IntegratedSignalstatsAnalyzer)
+    a.duration = duration
+    a.last_resort_period_note = None
+    return a
+
+
+def test_shifted_period_stays_clear_of_a_pending_period():
+    """A repair must not walk the first period onto the second.
+
+    Period 1 (0-60s) is 32% black and has to move. Shifting forward lands it
+    on period 2, which has not been validated yet — checking only the
+    already-validated periods let the two overlap.
+    """
+    analyzer = _analyzer(320.0)
+    periods = [(0.0, 60), (65.0, 60), (205.0, 60)]
+    black = [(13.0, 22.0), (39.0, 49.0)]
+
+    result = analyzer._validate_periods_against_black_segments(periods, black, 10.0, 60)
+
+    starts = [start for start, _ in result]
+    assert len(result) == 3
+    for earlier, later in zip(starts, starts[1:]):
+        assert later - earlier >= 60
+
+
+def test_validated_periods_are_returned_in_start_order():
+    """A repair can move a period past its neighbour."""
+    analyzer = _analyzer(320.0)
+    periods = [(0.0, 60), (65.0, 60), (205.0, 60)]
+    black = [(13.0, 22.0), (39.0, 49.0)]
+
+    result = analyzer._validate_periods_against_black_segments(periods, black, 10.0, 60)
+    assert result == sorted(result)
+
+
+def test_clean_periods_are_untouched():
+    analyzer = _analyzer(600.0)
+    periods = [(100.0, 60), (300.0, 60)]
+    result = analyzer._validate_periods_against_black_segments(periods, [(0.0, 50.0)], 10.0, 60)
+    assert result == periods
+
+
+# ===========================================================================
+# Section 8 — period placement over scored bins
+# ===========================================================================
+
+def _bin_scores(**by_bin):
+    from AV_Spex.checks.bin_scoring import BinScore
+    return {float(b): BinScore(bin_start=float(b), score=v,
+                               dominant_family='legality')
+            for b, v in by_bin.items()}
+
+
+def _place(bin_scores, duration=600.0, black=None, num=1):
+    analysis = fa.EnhancedFrameAnalysis.__new__(fa.EnhancedFrameAnalysis)
+    return analysis._analyze_qctools_violation_distribution(
+        violations=[], num_periods=num, period_duration=60,
+        video_duration=duration, black_segments=black or [],
+        histogram=None, severity=None, bin_scores=bin_scores)
+
+
+def test_placement_centres_on_a_lone_scoring_bin():
+    """The common case: one bin earned the period, so centre on it."""
+    scores = _bin_scores(**{'300': 0.9, '100': 0.1, '200': 0.1})
+    assert _place(scores)[0][0] == pytest.approx(275.0)
+
+
+def test_placement_slides_to_cover_a_run_of_evidence():
+    """Centring on the winner alone would cut a longer run in half."""
+    scores = _bin_scores(**{'300': 0.9, '310': 0.85, '320': 0.85, '330': 0.8})
+    start = _place(scores)[0][0]
+    covered = [b for b in (300.0, 310.0, 320.0, 330.0) if start <= b and b + 10 <= start + 60]
+    assert covered == [300.0, 310.0, 320.0, 330.0]
+
+
+def test_placement_ignores_bins_below_the_evidence_threshold():
+    """Mediocre neighbours must not steer the window off the real evidence."""
+    scores = _bin_scores(**{'300': 0.9, '340': 0.2, '350': 0.2, '360': 0.2})
+    assert _place(scores)[0][0] == pytest.approx(275.0)
+
+
+def test_placement_ignores_bins_excluded_as_black():
+    """Bins inside black still carry a score; they must not attract a period.
+
+    JPC_AV_01056's black tail scores well, and summing raw score over every
+    bin pulled the window onto it.
+    """
+    scores = _bin_scores(**{'300': 0.9, '400': 0.9, '410': 0.9, '420': 0.9})
+    start = _place(scores, black=[(395.0, 440.0)])[0][0]
+    assert start == pytest.approx(275.0)
+
+
+def test_placement_still_contains_the_winning_bin():
+    scores = _bin_scores(**{'300': 0.9, '330': 0.8, '340': 0.8, '350': 0.8})
+    start = _place(scores)[0][0]
+    assert start <= 300.0 and 310.0 <= start + 60
+
+
+def test_period_is_clamped_to_the_content_start():
+    """The bars safety margin bounds every period, not just repaired ones."""
+    analyzer = _analyzer(600.0)
+    result = analyzer._validate_periods_against_black_segments(
+        [(20.0, 60)], [], effective_start=71.0, period_duration=60)
+    assert result[0][0] == pytest.approx(71.0)
+
+
+def test_clamped_period_is_still_checked_against_black():
+    analyzer = _analyzer(600.0)
+    result = analyzer._validate_periods_against_black_segments(
+        [(20.0, 60)], [(71.0, 120.0)], effective_start=71.0, period_duration=60)
+    assert result[0][0] != pytest.approx(71.0)
+
+
+def test_period_after_the_content_start_is_untouched():
+    analyzer = _analyzer(600.0)
+    result = analyzer._validate_periods_against_black_segments(
+        [(200.0, 60)], [], effective_start=71.0, period_duration=60)
+    assert result == [(200.0, 60)]
+
+
+def test_final_analysis_periods_prefers_signalstats():
+    results = {'signalstats': {'analysis_periods': [[27.0, 60], [95.0, 31]]},
+               'brng_analysis': {'analysis_periods': [[0.0, 60]]}}
+    assert fa._final_analysis_periods(results) == [(27.0, 60), (95.0, 31)]
+
+
+def test_final_analysis_periods_falls_back_to_brng():
+    results = {'signalstats': {'analysis_periods': []},
+               'brng_analysis': {'analysis_periods': [[10.0, 60]]}}
+    assert fa._final_analysis_periods(results) == [(10.0, 60)]
+
+
+def test_final_analysis_periods_empty_without_either():
+    assert fa._final_analysis_periods({}) == []
+    assert fa._final_analysis_periods({'signalstats': {}}) == []
+
+
+def test_final_analysis_periods_skips_malformed_entries():
+    results = {'signalstats': {'analysis_periods': [[27.0, 60], 'nonsense', [95.0]]}}
+    assert fa._final_analysis_periods(results) == [(27.0, 60)]
