@@ -297,14 +297,16 @@ def evidence_within(period_start: float, period_duration: float,
     stable sample — but nothing should make someone scrub a minute of tape to
     find the eight seconds that earned it.
 
-    Returned worst-first.
+    Returned in time order, which is the order someone reviewing the tape
+    moves through them. Callers wanting the strongest evidence rather than the
+    first should sort on `.score` themselves.
     """
     period_end = period_start + period_duration
     inside = [score for bin_start, score in scores.items()
               if bin_start >= period_start - 1e-9
               and bin_start + bin_size <= period_end + 1e-9
               and score.score >= min_score]
-    return sorted(inside, key=lambda score: (-score.score, score.bin_start))
+    return sorted(inside, key=lambda score: score.bin_start)
 
 
 def describe_scores(scores: Dict[float, BinScore], limit: int = 10) -> List[str]:

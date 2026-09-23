@@ -5266,9 +5266,12 @@ class EnhancedFrameAnalysis:
                         evidence = bin_scoring.evidence_within(
                             start, duration, bin_scores)
                         if evidence:
+                            # Strongest first here — the log is naming why the
+                            # period was chosen, not walking the tape.
+                            strongest = sorted(evidence, key=lambda s: -s.score)[:3]
                             spans = ", ".join(
                                 f"{score.bin_start:.0f}s ({score.dominant_family or '-'} "
-                                f"{score.score:.2f})" for score in evidence[:3])
+                                f"{score.score:.2f})" for score in strongest)
                             logger.debug(f"    Candidate period at {start:.0f}s earned by: {spans}")
 
 

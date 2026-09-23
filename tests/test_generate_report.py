@@ -1617,6 +1617,20 @@ def test_period_selection_lists_unanalyzable_regions_with_reasons():
     assert "below broadcast black" in html
 
 
+def test_period_selection_names_the_tags_behind_each_exclusion():
+    """Black and bars dominate the list, so the copy has to say what the
+    other reasons were measured from — otherwise every row reads the same."""
+    html = gr._render_frame_periods_html(_period_outputs(unanalyzable_regions=[
+        {'start': 0.0, 'end': 10.0, 'duration': 10.0,
+         'reasons': ['no picture frames (all black or excluded)']},
+    ]))
+    assert "black leader or tail" in html
+    for tag in ("YMAX", "YAVG", "ssim.All", "YDIF",
+                "idet.repeated.current_frame", "VREP",
+                "entropy.normalized_entropy.normal.Y"):
+        assert tag in html, tag
+
+
 def test_period_selection_names_the_available_measures():
     """A family never measured cannot have steered anything."""
     html = gr._render_frame_periods_html(_period_outputs(
@@ -1625,12 +1639,25 @@ def test_period_selection_names_the_available_measures():
     assert "Measures available" in html
 
 
-def test_period_selection_truncates_long_region_lists():
+def test_period_selection_lists_every_region():
+    """Nothing is truncated: a static report has no way to expand a summary."""
     regions = [{'start': float(i * 100), 'end': float(i * 100 + 10),
                 'duration': 10.0, 'reasons': ['no picture frames']}
                for i in range(20)]
     html = gr._render_frame_periods_html(_period_outputs(unanalyzable_regions=regions))
-    assert "+8 further regions" in html
+    assert "more" not in html.split("Regions excluded")[1]
+    assert html.count("no picture frames") == 20
+
+
+def test_period_selection_lists_every_scoring_moment():
+    """A 60s period holds six bins; truncating at four hid rows behind a
+    "+2 more" that nothing could expand."""
+    evidence = [{'start': float(1000 + i * 10), 'score': 0.9 - i * 0.05,
+                 'dominant_family': 'impulsive'} for i in range(6)]
+    html = gr._render_frame_periods_html(_period_outputs(period_evidence=[
+        {'start': 1000.0, 'duration': 60, 'evidence': evidence}]))
+    assert html.count("dropouts / concealment") == 6
+    assert "more</div>" not in html
 
 
 def test_period_selection_renders_inside_the_frame_analysis_section():

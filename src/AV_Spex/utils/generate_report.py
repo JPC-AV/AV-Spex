@@ -5490,7 +5490,7 @@ def _render_frame_periods_html(frame_outputs) -> str:
     <table style="border-collapse: collapse; width: 100%; max-width: 860px; font-size: 13px;">
         <tr style="background-color: #fbe4eb;">
             <th style="border: 1px solid #4d2b12; padding: 6px 10px; text-align: left;">Period</th>
-            <th style="border: 1px solid #4d2b12; padding: 6px 10px; text-align: left;">Highest-scoring moments inside it</th>
+            <th style="border: 1px solid #4d2b12; padding: 6px 10px; text-align: left;">Moments that scored highest, in order</th>
         </tr>
     """
         for index, period in enumerate(evidence, start=1):
@@ -5501,8 +5501,12 @@ def _render_frame_periods_html(frame_outputs) -> str:
             span = f"{_seconds_to_display(start)} &ndash; {_seconds_to_display(start + duration)}"
             bins = period.get('evidence') or []
             if bins:
+                # Listed in full rather than truncated: a period holds one bin
+                # per ten seconds of its length, so the default 60s period can
+                # only ever have six, and a "+2 more" that cannot be expanded
+                # is worse than the two extra rows it saves.
                 parts = []
-                for item in bins[:4]:
+                for item in bins:
                     bin_start = item.get('start')
                     if bin_start is None:
                         continue
@@ -5512,9 +5516,6 @@ def _render_frame_periods_html(frame_outputs) -> str:
                         f"<div style='margin: 2px 0;'>{_seconds_to_display(bin_start)}"
                         f"&ndash;{_seconds_to_display(bin_start + 10)} &mdash; {family}</div>")
                 detail = "".join(parts)
-                if len(bins) > 4:
-                    detail += (f"<div style='margin: 2px 0; color: #666;'>"
-                               f"+{len(bins) - 4} more</div>")
             else:
                 # Not a gap in the data: the period was placed somewhere
                 # nothing stood out, which is the honest description of a
@@ -5540,9 +5541,29 @@ def _render_frame_periods_html(frame_outputs) -> str:
         Regions excluded as unanalyzable ({len(unanalyzable)}, {total:.0f}s total)
     </p>
     <p style="margin: 0 0 6px 0; font-size: 13px;">
-        These stretches hold no picture that signalstats or BRNG can describe &mdash; signal loss,
-        static, or long runs of repeated frames. They were kept out of period placement, because
-        they measure as severely out-of-range and would otherwise attract every period on the tape.
+        Most entries here are the tape's black leader or tail and its color bars, listed at the
+        10-second resolution period placement works in &mdash; black frames are classified from the
+        signalstats <code>YMAX</code>, <code>YHIGH</code> and <code>YLOW</code> tags. The rest are
+        stretches ruled out on their own measurements:
+    </p>
+    <ul style="margin: 0 0 8px 20px; padding: 0; font-size: 13px;">
+        <li style="margin: 2px 0;"><strong>Signal loss</strong> &mdash; average luma below broadcast
+            black (signalstats <code>YAVG</code>): the deck emitting a flat sub-black frame where
+            the tape gave it nothing.</li>
+        <li style="margin: 2px 0;"><strong>Static or hash</strong> &mdash; frames uncorrelated with
+            the one before them (<code>ssim.All</code>, signalstats <code>YDIF</code>).</li>
+        <li style="margin: 2px 0;"><strong>Concealment</strong> &mdash; long runs of repeated fields
+            or repeated lines (<code>idet.repeated.current_frame</code>, signalstats
+            <code>VREP</code>).</li>
+        <li style="margin: 2px 0;"><strong>Flat field</strong> &mdash; almost no picture detail
+            (<code>entropy.normalized_entropy.normal.Y</code>).</li>
+    </ul>
+    <p style="margin: 0 0 6px 0; font-size: 13px;">
+        Signal loss is conclusive on its own; the other three have to agree in pairs before a
+        stretch is excluded, so a cut-heavy passage or a noisy transfer is not thrown away on one
+        measurement. All of them are kept out of period placement because they measure as severely
+        out of range &mdash; a flat sub-black frame reads as almost every pixel illegal &mdash; and
+        would otherwise attract every period on the tape.
     </p>
     <table style="border-collapse: collapse; width: 100%; max-width: 860px; font-size: 13px;">
         <tr style="background-color: #fbe4eb;">
@@ -5550,7 +5571,9 @@ def _render_frame_periods_html(frame_outputs) -> str:
             <th style="border: 1px solid #4d2b12; padding: 6px 10px; text-align: left;">Why</th>
         </tr>
     """
-        for region in unanalyzable[:12]:
+        # Also listed in full, for the same reason: contiguous bins are merged
+        # into one span before they get here, so the count stays small.
+        for region in unanalyzable:
             start, end = region.get('start'), region.get('end')
             if start is None or end is None:
                 continue
@@ -5565,9 +5588,6 @@ def _render_frame_periods_html(frame_outputs) -> str:
         </tr>
     """
         html += "</table>"
-        if len(unanalyzable) > 12:
-            html += (f"<p style='margin: 6px 0 0 0; font-size: 12px; color: #666;'>"
-                     f"+{len(unanalyzable) - 12} further regions not listed.</p>")
 
     return html
 

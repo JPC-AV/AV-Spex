@@ -300,8 +300,9 @@ def _scores(**by_bin):
             for b, v in by_bin.items()}
 
 
-def test_evidence_within_returns_scoring_bins_worst_first():
-    scores = _scores(**{'0': 0.9, '10': 0.6, '20': 0.2})
+def test_evidence_within_returns_scoring_bins_in_time_order():
+    """Time order, because a reader walks the tape forwards."""
+    scores = _scores(**{'0': 0.6, '10': 0.9, '20': 0.2})
     found = sc.evidence_within(0.0, 30.0, scores)
     assert [e.bin_start for e in found] == [0.0, 10.0]
 
@@ -322,3 +323,11 @@ def test_evidence_within_can_be_empty():
     """A period placed where nothing scored says so, rather than inventing."""
     scores = _scores(**{'0': 0.2, '10': 0.3})
     assert sc.evidence_within(0.0, 60.0, scores) == []
+
+
+def test_evidence_within_time_order_does_not_depend_on_score():
+    """The strongest moment is not necessarily the first one listed."""
+    scores = _scores(**{'0': 0.55, '10': 0.99, '20': 0.70})
+    found = sc.evidence_within(0.0, 30.0, scores)
+    assert [e.bin_start for e in found] == [0.0, 10.0, 20.0]
+    assert max(found, key=lambda e: e.score).bin_start == 10.0
