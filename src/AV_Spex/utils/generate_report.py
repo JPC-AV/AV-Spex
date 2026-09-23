@@ -258,7 +258,13 @@ def find_frame_analysis_outputs(source_directory, destination_directory, video_i
         'enhanced_frame_analysis': None,
         'dropped_sample_spectrogram': None,
         'dropped_sample_detection': None,
-        'duplicate_frame_detection': None
+        'duplicate_frame_detection': None,
+        # How the analysis periods were chosen: the metric families the
+        # QCTools report carried, which bins earned each period, and the
+        # regions excluded as holding no analyzable picture.
+        'bin_scoring': None,
+        'period_evidence': None,
+        'unanalyzable_regions': None
     }
     
     # Check for border detection outputs
@@ -342,6 +348,14 @@ def find_frame_analysis_outputs(source_directory, destination_directory, video_i
                 frame_outputs['qctools_violations_found'] = enhanced_data['qctools_violations_found']
             if enhanced_data.get('color_bars_end_time'):
                 frame_outputs['color_bars_end_time'] = enhanced_data['color_bars_end_time']
+
+            # Extract period-selection provenance
+            if enhanced_data.get('bin_scoring'):
+                frame_outputs['bin_scoring'] = enhanced_data['bin_scoring']
+            if enhanced_data.get('period_evidence'):
+                frame_outputs['period_evidence'] = enhanced_data['period_evidence']
+            if enhanced_data.get('unanalyzable_regions'):
+                frame_outputs['unanalyzable_regions'] = enhanced_data['unanalyzable_regions']
 
             # Extract dropped sample detection data
             if enhanced_data.get('dropped_sample_detection'):
@@ -5400,6 +5414,164 @@ def _render_frame_signalstats_html(frame_outputs) -> str:
     return html
 
 
+PERIOD_SELECTION_METHODOLOGY_HTML = """
+<div style="background-color: var(--report-notice-bg); padding: 12px 16px; margin: 10px 0;
+            border-left: 4px solid var(--report-gold); border-radius: 0 4px 4px 0;">
+    <p style="margin: 0 0 6px 0; font-size: 13px;">
+        Signalstats and BRNG analysis do not examine every frame &mdash; decoding a full tape twice is
+        prohibitively slow. They sample a few fixed-length <strong>analysis periods</strong>, so where
+        those periods land decides whether the figures below describe this tape's real problems or a
+        random slice of it.
+    </p>
+    <p style="margin: 0 0 6px 0; font-size: 13px;">
+        The tape is divided into 10-second bins and each bin is scored against the rest of
+        <em>this file</em> over three kinds of evidence: <strong>legality</strong> (pixels outside
+        broadcast range &mdash; BRNG, illegal chroma), <strong>impulsive</strong> damage (dropouts and
+        the deck's concealment of them &mdash; TOUT, VREP) and <strong>instability</strong>
+        (brightness deviating from neighbouring frames). Periods are then placed on the
+        highest-scoring bins, away from color bars, black segments and the end of the tape.
+    </p>
+    <p style="margin: 0; font-size: 13px; color: #6b5a3e;">
+        Because the score compares each bin against the rest of the same tape, it says
+        <em>where</em> this tape is worst, not <em>how bad</em> it is. A clean transfer still has a
+        highest-scoring bin. It is a targeting aid, not a quality grade.
+    </p>
+</div>
+"""
+
+
+def _render_frame_periods_html(frame_outputs) -> str:
+    """Period selection: why the analysis periods sit where they do.
+
+    Covers three things nothing else in the report shows: what evidence was
+    available in the QCTools sidecar, which bins earned each period, and which
+    stretches of tape were ruled out as holding no analyzable picture.
+
+    Returns an empty string when none of those inputs are present, so a report
+    from before this was recorded renders exactly as it did.
+    """
+    scoring = frame_outputs.get('bin_scoring') or {}
+    evidence = frame_outputs.get('period_evidence') or []
+    unanalyzable = frame_outputs.get('unanalyzable_regions') or []
+    if not scoring and not evidence and not unanalyzable:
+        return ""
+
+    family_labels = {
+        'legality': 'out-of-range pixels',
+        'impulsive': 'dropouts / concealment',
+        'instability': 'brightness instability',
+    }
+
+    html = ("<h3 id='section-period-selection' style='color: var(--report-gold);'>"
+            "Analysis Period Selection</h3>")
+    html += PERIOD_SELECTION_METHODOLOGY_HTML
+
+    # ── What the QCTools report could measure ──
+    # Sidecars differ in which filters they carry, and a family that was never
+    # measured cannot have steered anything. Saying so is the difference
+    # between "no dropout evidence" and "dropouts were never looked for".
+    metrics = scoring.get('metrics') or []
+    if metrics:
+        html += f"""
+    <p style="margin: 10px 0 4px 0; font-size: 13px;">
+        <strong>Measures available in this QCTools report:</strong> {', '.join(sorted(metrics))}
+    </p>
+    """
+
+    # ── What earned each period ──
+    # A period is six bins wide and the evidence is often one of them, so
+    # without this the reader has to scrub a minute of tape to find the
+    # seconds that mattered.
+    if evidence:
+        html += """
+    <p style="font-weight: bold; margin: 14px 0 6px 0; color: var(--report-ink);">
+        What each period was chosen for
+    </p>
+    <table style="border-collapse: collapse; width: 100%; max-width: 860px; font-size: 13px;">
+        <tr style="background-color: #fbe4eb;">
+            <th style="border: 1px solid #4d2b12; padding: 6px 10px; text-align: left;">Period</th>
+            <th style="border: 1px solid #4d2b12; padding: 6px 10px; text-align: left;">Highest-scoring moments inside it</th>
+        </tr>
+    """
+        for index, period in enumerate(evidence, start=1):
+            start = period.get('start')
+            duration = period.get('duration') or 0
+            if start is None:
+                continue
+            span = f"{_seconds_to_display(start)} &ndash; {_seconds_to_display(start + duration)}"
+            bins = period.get('evidence') or []
+            if bins:
+                parts = []
+                for item in bins[:4]:
+                    bin_start = item.get('start')
+                    if bin_start is None:
+                        continue
+                    family = family_labels.get(item.get('dominant_family'),
+                                               item.get('dominant_family') or 'mixed evidence')
+                    parts.append(
+                        f"<div style='margin: 2px 0;'>{_seconds_to_display(bin_start)}"
+                        f"&ndash;{_seconds_to_display(bin_start + 10)} &mdash; {family}</div>")
+                detail = "".join(parts)
+                if len(bins) > 4:
+                    detail += (f"<div style='margin: 2px 0; color: #666;'>"
+                               f"+{len(bins) - 4} more</div>")
+            else:
+                # Not a gap in the data: the period was placed somewhere
+                # nothing stood out, which is the honest description of a
+                # short tape whose content is mostly bars and black.
+                detail = ("<span style='color: #666; font-style: italic;'>Nothing in this period "
+                          "stood out against the rest of the tape &mdash; it was sampled to cover "
+                          "the file, not because of a specific finding.</span>")
+            html += f"""
+        <tr>
+            <td style="border: 1px solid #4d2b12; padding: 6px 10px; white-space: nowrap;">
+                <strong>Period {index}</strong><br>{span}
+            </td>
+            <td style="border: 1px solid #4d2b12; padding: 6px 10px;">{detail}</td>
+        </tr>
+    """
+        html += "</table>"
+
+    # ── Regions ruled out ──
+    if unanalyzable:
+        total = sum((region.get('duration') or 0) for region in unanalyzable)
+        html += f"""
+    <p style="font-weight: bold; margin: 16px 0 6px 0; color: var(--report-ink);">
+        Regions excluded as unanalyzable ({len(unanalyzable)}, {total:.0f}s total)
+    </p>
+    <p style="margin: 0 0 6px 0; font-size: 13px;">
+        These stretches hold no picture that signalstats or BRNG can describe &mdash; signal loss,
+        static, or long runs of repeated frames. They were kept out of period placement, because
+        they measure as severely out-of-range and would otherwise attract every period on the tape.
+    </p>
+    <table style="border-collapse: collapse; width: 100%; max-width: 860px; font-size: 13px;">
+        <tr style="background-color: #fbe4eb;">
+            <th style="border: 1px solid #4d2b12; padding: 6px 10px; text-align: left;">Span</th>
+            <th style="border: 1px solid #4d2b12; padding: 6px 10px; text-align: left;">Why</th>
+        </tr>
+    """
+        for region in unanalyzable[:12]:
+            start, end = region.get('start'), region.get('end')
+            if start is None or end is None:
+                continue
+            reasons = region.get('reasons') or []
+            why = "; ".join(reasons) if reasons else "no analyzable picture"
+            html += f"""
+        <tr>
+            <td style="border: 1px solid #4d2b12; padding: 6px 10px; white-space: nowrap;">
+                {_seconds_to_display(start)} &ndash; {_seconds_to_display(end)}
+            </td>
+            <td style="border: 1px solid #4d2b12; padding: 6px 10px;">{why}</td>
+        </tr>
+    """
+        html += "</table>"
+        if len(unanalyzable) > 12:
+            html += (f"<p style='margin: 6px 0 0 0; font-size: 12px; color: #666;'>"
+                     f"+{len(unanalyzable) - 12} further regions not listed.</p>")
+
+    return html
+
+
 def _render_frame_brng_html(frame_outputs) -> str:
     """BRNG: broadcast-range violation counts per analysis period, with the
     severity assessment and recommendations.
@@ -5970,6 +6142,8 @@ def generate_frame_analysis_html(frame_outputs, video_id):
         frame_outputs.get('border_visualization') or
         frame_outputs.get('border_data') or
         frame_outputs.get('brng_analysis') or
+        frame_outputs.get('period_evidence') or
+        frame_outputs.get('unanalyzable_regions') or
         # A BRNG run that could not measure anything is a finding, so it keeps
         # the wrapper alive even when it is the only thing to report.
         frame_outputs.get('brng_unavailable_reason') or
@@ -5985,6 +6159,9 @@ def generate_frame_analysis_html(frame_outputs, video_id):
 
     # Border Detection Section
     html += _render_frame_border_html(frame_outputs)
+    # Period selection comes before the two analyses that consume the periods,
+    # so the reader knows what was sampled before reading what it measured.
+    html += _render_frame_periods_html(frame_outputs)
     html += _render_frame_signalstats_html(frame_outputs)
     html += _render_frame_brng_html(frame_outputs)
     html += _render_frame_thumbs_html(frame_outputs)
@@ -7623,6 +7800,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     if pieces.frame_analysis_html:
         frame_subsections = [
             ('section-border-detection', 'Border Detection'),
+            ('section-period-selection', 'Analysis Period Selection'),
             ('section-signalstats', 'Signalstats Analysis'),
             ('section-brng-analysis', 'BRNG Violation Analysis'),
         ]

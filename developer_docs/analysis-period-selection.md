@@ -488,11 +488,27 @@ nothing should make someone scrub a minute of tape to find the eight seconds tha
 `EVIDENCE_MIN_SCORE` (0.5), worst first, and `analyze()` writes them to
 `results['period_evidence']` as `{start, duration, evidence: [{start, score, dominant_family}]}`.
 An empty list is meaningful: the period was placed where nothing scored, which happens on a short
-tape whose content is mostly excluded (`JPC_AV_01056` gets two such periods). Report rendering of
-this is Phase 4.
+tape whose content is mostly excluded (`JPC_AV_01056` gets two such periods).
 
 ## Where the periods surface
 
+- **HTML report**: the **Analysis Period Selection** block
+  (`_render_frame_periods_html()` in `utils/generate_report.py`, anchor `section-period-selection`),
+  rendered inside the Frame Analysis section *before* signalstats and BRNG — the reader should know
+  what was sampled before reading what it measured. It carries three things nothing else in the
+  report shows: the methodology (`PERIOD_SELECTION_METHODOLOGY_HTML`, including the warning that the
+  score is a targeting aid and not a quality grade, since it compares each bin only against the rest
+  of the same tape); which measures the QCTools sidecar actually carried, so "no dropout evidence"
+  is distinguishable from "dropouts were never looked for"; a per-period table of the
+  highest-scoring moments inside it, worst first, with the family named in plain words
+  (`legality` → "out-of-range pixels", `impulsive` → "dropouts / concealment", `instability` →
+  "brightness instability"); and the regions excluded as unanalyzable with their reasons. A period
+  whose evidence list is empty says so explicitly rather than rendering blank. The whole block
+  returns `""` when none of the three inputs are present, so reports from before this was recorded
+  are unchanged. Times use `_seconds_to_display()` to match the rest of the frame-analysis
+  section — **these are elapsed seconds, not the file's timecode**, which is a known inconsistency
+  with the rest of the report (see the `make-timecode-file-aware` skill; converting the frame
+  analysis section is a job of its own, since its other renderers share the same format).
 - **JSON**: `{video_id}_enhanced_frame_analysis.json` → `signalstats.analysis_periods` and
   `brng_analysis.analysis_periods`, each a list of `[start_seconds, duration]`. Detected black
   segments are alongside under `black_segments`.

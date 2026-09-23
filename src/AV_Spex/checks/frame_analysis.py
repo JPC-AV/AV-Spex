@@ -1199,6 +1199,26 @@ def probe_video_properties(video_path) -> Dict[str, Any]:
 PERIOD_CONFIDENCE_LEVELS = ('normal', 'partial_coverage', 'last_resort')
 
 
+def _final_analysis_periods(results: Dict) -> List[Tuple[float, int]]:
+    """The periods that were actually analyzed, as the report reads them.
+
+    Mirrors the report's own lookup order (signalstats first, then BRNG) so
+    the two cannot describe different windows.
+    """
+    for key in ('signalstats', 'brng_analysis'):
+        section = results.get(key) or {}
+        periods = section.get('analysis_periods')
+        if not periods:
+            continue
+        out = []
+        for period in periods:
+            if isinstance(period, (list, tuple)) and len(period) >= 2:
+                out.append((float(period[0]), period[1]))
+        if out:
+            return out
+    return []
+
+
 def merge_avoid_segments(*span_lists) -> List[Tuple[float, float]]:
     """Combine span lists into one sorted list of non-overlapping spans.
 
@@ -5237,29 +5257,19 @@ class EnhancedFrameAnalysis:
                 logger.info(f"Identified {len(qctools_suggested_periods)} periods "
                             f"with highest {basis}\n")
 
-                # Name the bins that earned each period. A period is six bins
-                # wide and the evidence is often one of them, so without this
-                # the reader is left scrubbing a minute of tape to find the
-                # seconds that mattered.
+                # What each candidate was chosen for. These are still
+                # *candidates* — stage 2 clamps, shifts and shrinks them — so
+                # the record written for the report is rebuilt from the final
+                # periods further down, not from here.
                 if bin_scores and qctools_suggested_periods:
-                    period_evidence = []
                     for start, duration in qctools_suggested_periods:
                         evidence = bin_scoring.evidence_within(
                             start, duration, bin_scores)
-                        period_evidence.append({
-                            'start': start, 'duration': duration,
-                            'evidence': [
-                                {'start': score.bin_start, 'score': score.score,
-                                 'dominant_family': score.dominant_family}
-                                for score in evidence
-                            ],
-                        })
                         if evidence:
                             spans = ", ".join(
                                 f"{score.bin_start:.0f}s ({score.dominant_family or '-'} "
                                 f"{score.score:.2f})" for score in evidence[:3])
-                            logger.debug(f"    Period at {start:.0f}s earned by: {spans}")
-                    results['period_evidence'] = period_evidence
+                            logger.debug(f"    Candidate period at {start:.0f}s earned by: {spans}")
 
 
         # Step 3: Border detection (conditional)
@@ -5800,7 +5810,31 @@ class EnhancedFrameAnalysis:
         if self.check_cancelled():
             return results
         results['summary'] = self._generate_summary(results)
-        
+
+        # Record what earned each period, from the periods that were actually
+        # analyzed. Stage 2 clamps a period to the content start, shifts it off
+        # black and can shrink it to fit a gap, so the candidates chosen
+        # upstream are not what ran: JPC_AV_01056 reported evidence for
+        # 00:00-01:00 and a 60s window when it had analyzed 00:27-01:27 and a
+        # 31s one. Reading the periods back out of `results` is what keeps this
+        # agreeing with the periods the report displays beside it.
+        if bin_scores:
+            final_periods = _final_analysis_periods(results)
+            if final_periods:
+                results['period_evidence'] = [
+                    {
+                        'start': start,
+                        'duration': duration,
+                        'evidence': [
+                            {'start': score.bin_start, 'score': score.score,
+                             'dominant_family': score.dominant_family}
+                            for score in bin_scoring.evidence_within(
+                                start, duration, bin_scores)
+                        ],
+                    }
+                    for start, duration in final_periods
+                ]
+
         # Save results
         self._save_results(results)
         

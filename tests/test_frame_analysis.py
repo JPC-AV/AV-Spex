@@ -2358,3 +2358,25 @@ def test_period_after_the_content_start_is_untouched():
     result = analyzer._validate_periods_against_black_segments(
         [(200.0, 60)], [], effective_start=71.0, period_duration=60)
     assert result == [(200.0, 60)]
+
+
+def test_final_analysis_periods_prefers_signalstats():
+    results = {'signalstats': {'analysis_periods': [[27.0, 60], [95.0, 31]]},
+               'brng_analysis': {'analysis_periods': [[0.0, 60]]}}
+    assert fa._final_analysis_periods(results) == [(27.0, 60), (95.0, 31)]
+
+
+def test_final_analysis_periods_falls_back_to_brng():
+    results = {'signalstats': {'analysis_periods': []},
+               'brng_analysis': {'analysis_periods': [[10.0, 60]]}}
+    assert fa._final_analysis_periods(results) == [(10.0, 60)]
+
+
+def test_final_analysis_periods_empty_without_either():
+    assert fa._final_analysis_periods({}) == []
+    assert fa._final_analysis_periods({'signalstats': {}}) == []
+
+
+def test_final_analysis_periods_skips_malformed_entries():
+    results = {'signalstats': {'analysis_periods': [[27.0, 60], 'nonsense', [95.0]]}}
+    assert fa._final_analysis_periods(results) == [(27.0, 60)]
