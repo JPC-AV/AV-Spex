@@ -331,3 +331,55 @@ def test_evidence_within_time_order_does_not_depend_on_score():
     found = sc.evidence_within(0.0, 30.0, scores)
     assert [e.bin_start for e in found] == [0.0, 10.0, 20.0]
     assert max(found, key=lambda e: e.score).bin_start == 10.0
+
+
+# ===========================================================================
+# Per-bin series written for the report's chart
+# ===========================================================================
+
+def test_series_carries_every_profiled_bin_in_time_order():
+    profiles = _profiles(brng_mean=[0.5, 0.02, 0.9], tout_mean=[0.0, 0.05, 0.01])
+    rows = sc.series_for_report(profiles, sc.score_bins(profiles))
+    assert [row['start'] for row in rows] == [0.0, 10.0, 20.0]
+
+
+def test_series_carries_every_scored_metric_as_raw_and_rank():
+    """The chart plots all five, so all five have to be written.
+
+    Rank is what gets plotted — it is the only unit the five share — and the
+    raw reading rides along for the hover.
+    """
+    profiles = _profiles(brng_mean=[0.5, 0.02, 0.9], satmax_max=[400.0, 100.0, 500.0],
+                         tout_mean=[0.0, 0.05, 0.01], vrep_mean=[0.0, 0.0, 0.02],
+                         deflicker_absmax=[1.0, 8.0, 2.0])
+    row = sc.series_for_report(profiles, sc.score_bins(profiles))[2]
+    for spec in sc.METRICS:
+        assert row[spec.field] is not None
+        assert row[sc._rank_key(spec.field)] is not None
+    assert row['brng_mean'] == pytest.approx(0.9)
+    assert row['brng_mean_rank'] == pytest.approx(1.0)
+
+
+def test_series_scores_unsuitable_bins_as_none_but_keeps_their_metrics():
+    """An excluded bin must break the curve, not draw a zero it never scored.
+
+    Its raw measures are still carried: the burst that got a stretch excluded
+    is exactly what a reader looking at the gap wants to see.
+    """
+    profiles = _profiles(brng_mean=[0.5, 0.02, 0.9], tout_mean=[0.04, 0.05, 0.01])
+    verdicts = {10.0: BinVerdict(bin_start=10.0, suitable=False, reasons=('signal loss',))}
+    rows = sc.series_for_report(profiles, sc.score_bins(profiles, verdicts))
+    excluded = next(row for row in rows if row['start'] == 10.0)
+    assert excluded['score'] is None
+    assert excluded['dominant_family'] is None
+    assert excluded['tout_mean_rank'] is None
+    assert excluded['tout_mean'] == pytest.approx(0.05)
+    assert all(row['score'] is not None for row in rows if row['start'] != 10.0)
+
+
+def test_series_reports_an_unmeasured_metric_as_none():
+    """None means "never measured" — it must not arrive as a zero reading."""
+    profiles = _profiles(brng_mean=[0.5, 0.02, 0.9])
+    rows = sc.series_for_report(profiles, sc.score_bins(profiles))
+    assert all(row['tout_mean'] is None and row['tout_mean_rank'] is None
+               for row in rows)
