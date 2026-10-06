@@ -321,3 +321,48 @@ def describe_scores(scores: Dict[float, BinScore], limit: int = 10) -> List[str]
         lines.append(f"    {bin_start:.1f}s: score {score.score:.3f}"
                      f"{f' ({families})' if families else ''}")
     return lines
+
+
+def _rank_key(field_name: str) -> str:
+    """JSON key holding a metric's within-file rank, beside its raw value."""
+    return f"{field_name}_rank"
+
+
+def series_for_report(profiles: Dict[float, BinProfile],
+                      scores: Dict[float, BinScore]) -> List[Dict]:
+    """Per-bin rows for the report's period-selection chart, in time order.
+
+    Every metric in `METRICS` is carried twice: its raw reading, and the
+    within-file rank that is what actually entered the score. The chart plots
+    the ranks, because that is the only unit the five share — BRNG can run at
+    50% of pixels on a noisy tape while TOUT peaks at 2%, so drawing them
+    against a common axis would flatten the impulsive evidence to a line along
+    zero. The raw readings ride along for the hover, where the physical value
+    belongs.
+
+    Every profiled bin appears, including the ones `score_bins` left out as
+    unsuitable: their score and ranks are None so the curves break over them,
+    rather than drawing a zero they never scored. Their raw readings are kept
+    either way — someone looking at an excluded dropout burst should still see
+    the burst that got it excluded.
+
+    Rounded on the way out: this is display data and a full tape is ~360 bins
+    an hour, so the JSON should not carry float noise.
+    """
+    rows: List[Dict] = []
+    for bin_start in sorted(profiles):
+        profile = profiles[bin_start]
+        score = scores.get(bin_start)
+        ranks = score.metric_ranks if score is not None else {}
+        row: Dict = {
+            'start': round(bin_start, 3),
+            'score': round(score.score, 4) if score is not None else None,
+            'dominant_family': score.dominant_family if score is not None else None,
+        }
+        for spec in METRICS:
+            value = getattr(profile, spec.field, None)
+            row[spec.field] = round(value, 6) if value is not None else None
+            rank = ranks.get(spec.field)
+            row[_rank_key(spec.field)] = round(rank, 4) if rank is not None else None
+        rows.append(row)
+    return rows

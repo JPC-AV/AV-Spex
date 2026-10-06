@@ -1667,6 +1667,115 @@ def test_period_selection_renders_inside_the_frame_analysis_section():
     assert 'id="section-frame-analysis"' in html
 
 
+def _scoring_bin(start, score, **overrides):
+    """One row of the per-bin series, carrying every metric by default."""
+    row = {
+        'start': start, 'score': score,
+        'dominant_family': ('impulsive' if isinstance(score, (int, float)) and score > 0.5
+                            else 'legality'),
+        'brng_mean': 0.08, 'brng_mean_rank': 0.3,
+        'satmax_max': 340.0, 'satmax_max_rank': 0.1,
+        'tout_mean': 0.021, 'tout_mean_rank': 0.9,
+        'vrep_mean': 0.004, 'vrep_mean_rank': 0.6,
+        'deflicker_absmax': 2.4, 'deflicker_absmax_rank': 0.4,
+    }
+    row.update(overrides)
+    return row
+
+
+def _scoring(bins=None, **overrides):
+    """A bin_scoring dict shaped like frame_analysis writes it."""
+    out = {'metrics': ['signalstats'], 'bit_depth_10': True,
+           'bins': bins if bins is not None else [
+               _scoring_bin(0.0, 0.1), _scoring_bin(10.0, 0.9)]}
+    out.update(overrides)
+    return out
+
+
+def test_period_chart_plots_the_composite_and_all_five_metrics():
+    """Every metric that steers selection, not just the impulsive pair.
+
+    The complaint this pins: a chart showing only TOUT and VREP cannot explain
+    a period won on legality, which is 40% of the score's weight.
+    """
+    html = gr._make_period_score_chart_html(_scoring(), [], [], 'JPC_AV_TEST')
+    assert 'Composite score' in html
+    for label in ('Out-of-range pixels (BRNG)', 'Illegal chroma (SATMAX)',
+                  'Dropouts (TOUT)', 'Concealment (VREP)',
+                  'Brightness instability (deflicker)'):
+        assert label in html
+
+
+def test_period_chart_plots_ranks_not_raw_readings():
+    """The five have no common physical scale, so the axis has to be rank.
+
+    BRNG at 40% of pixels against TOUT at 2% on one axis of physical units
+    would draw the impulsive evidence as a line along zero.
+    """
+    html = gr._make_period_score_chart_html(_scoring(bins=[
+        _scoring_bin(0.0, 0.1, brng_mean=0.40, brng_mean_rank=0.2,
+                     tout_mean=0.02, tout_mean_rank=0.95),
+        _scoring_bin(10.0, 0.9),
+    ]), [], [])
+    assert 'Rank within this file' in html
+    # The raw readings ride along in the hover instead.
+    assert '40.00% of pixels' in html
+    assert '2.00% of pixels' in html
+
+
+def test_period_chart_absent_for_a_report_without_the_series():
+    """Reports written before the series was recorded render as they did."""
+    assert gr._make_period_score_chart_html(None, [], []) == ""
+    assert gr._make_period_score_chart_html({'metrics': ['signalstats']}, [], []) == ""
+
+
+def test_period_chart_omits_a_metric_the_report_never_carried():
+    """Unmeasured must not be drawn flat along zero — that reads as clean."""
+    unmeasured = {'vrep_mean': None, 'vrep_mean_rank': None,
+                  'deflicker_absmax': None, 'deflicker_absmax_rank': None}
+    html = gr._make_period_score_chart_html(_scoring(bins=[
+        _scoring_bin(0.0, 0.1, **unmeasured),
+        _scoring_bin(10.0, 0.9, **unmeasured),
+    ]), [], [])
+    assert 'Out-of-range pixels (BRNG)' in html
+    assert 'Concealment (VREP)' not in html
+    assert 'Brightness instability (deflicker)' not in html
+
+
+def test_period_chart_quotes_the_satmax_limit_in_the_reports_scale():
+    assert '355' in gr._make_period_score_chart_html(_scoring(), [], [])
+    assert '89' in gr._make_period_score_chart_html(
+        _scoring(bit_depth_10=False), [], [])
+
+
+def test_period_chart_marks_the_bins_that_earned_a_period():
+    html = gr._make_period_score_chart_html(
+        _scoring(),
+        [{'start': 10.0, 'duration': 60,
+          'evidence': [{'start': 10.0, 'score': 0.9, 'dominant_family': 'impulsive'}]}],
+        [])
+    assert 'Earned a period' in html
+
+
+def test_period_chart_survives_malformed_rows():
+    """JSON off disk: a bad row costs its own point, not the section."""
+    html = gr._make_period_score_chart_html(_scoring(bins=[
+        {'start': 'not a number', 'score': 0.4},
+        _scoring_bin(10.0, 'nope'),
+        _scoring_bin(20.0, 0.9),
+    ]), [], [{'start': None, 'end': None}])
+    assert 'Composite score' in html
+
+
+def test_period_chart_renders_inside_the_period_selection_section():
+    html = gr._render_frame_periods_html(
+        _period_outputs(bin_scoring=_scoring(), period_evidence=[
+            {'start': 10.0, 'duration': 60, 'evidence': []}]),
+        'JPC_AV_TEST')
+    assert "id='section-period-selection'" in html
+    assert 'Composite score' in html
+
+
 def test_period_selection_anchor_is_a_known_toc_entry():
     """The TOC reads anchors back out of the markup; the pair must agree."""
     import inspect

@@ -5228,6 +5228,14 @@ class EnhancedFrameAnalysis:
                 if bin_scores:
                     results['bin_scoring'] = {
                         'metrics': list(getattr(parser, 'bin_profile_metrics', ())),
+                        # Which scale the level metrics are on, so the report
+                        # can quote SATMAX's legal limit in the same units.
+                        'bit_depth_10': bool(parser.bit_depth_10),
+                        # The whole per-bin series, not just the winners: the
+                        # report plots it, and a period only looks arbitrary
+                        # until you can see the curve it was placed on.
+                        'bins': bin_scoring.series_for_report(
+                            getattr(parser, 'bin_profiles', {}), bin_scores),
                         'top_bins': [
                             {'start': bin_start, 'score': score.score,
                              'dominant_family': score.dominant_family,

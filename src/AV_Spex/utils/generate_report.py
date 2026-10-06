@@ -21,6 +21,11 @@ from AV_Spex.utils.config_setup import ChecksConfig
 from AV_Spex.utils.config_manager import ConfigManager
 from AV_Spex.utils.log_setup import logger, report_ffmpeg_stderr
 from AV_Spex.utils import ffprobe_probe
+# The calibrated values the period-selection chart draws and quotes.
+# Imported rather than copied so they cannot drift from what selection used.
+from AV_Spex.checks.bin_scoring import (EVIDENCE_MIN_SCORE,
+                                        SATURATION_LEGAL_LIMIT_8BIT)
+from AV_Spex.checks.qctools_bin_profile import PROFILE_BIN_SIZE
 
 config_mgr = ConfigManager()
 
@@ -3932,6 +3937,29 @@ def _make_bars_thresholds_table_html(thresholds, description, table_id):
     return link, table
 
 
+def _timeline_axis_ticks(duration):
+    """Whole-second time ticks at a readable interval for a timeline x-axis.
+
+    Shared by every timeline on the page so they can be read against each
+    other without re-deriving the interval per chart.
+
+    Returns:
+        (tickvals, ticktext): positions in seconds and their H:MM:SS labels.
+    """
+    def _format_tick(seconds):
+        seconds = int(seconds)
+        hours, remainder = divmod(seconds, 3600)
+        minutes, secs = divmod(remainder, 60)
+        if hours > 0:
+            return f"{hours}:{minutes:02d}:{secs:02d}"
+        return f"{minutes}:{secs:02d}"
+
+    tick_interval = next((interval for interval in (10, 30, 60, 120, 300, 600, 1200, 1800, 3600)
+                          if duration / interval <= 10), 7200)
+    tickvals = list(range(0, int(duration) + 1, tick_interval))
+    return tickvals, [_format_tick(val) for val in tickvals]
+
+
 def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_duration=None, frame_rate=None, analysis_periods=None, black_segments=None, bars_regions=None, table_id='evalbars_all', thresholds_csv=None):
     """
     Build the failure-distribution timeline for the color bars evaluation.
@@ -4106,19 +4134,7 @@ def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_d
                 xanchor='center', yanchor='bottom', sizing='contain', layer='above',
             ))
 
-    # Time axis ticks at a readable interval, without fractional seconds
-    def _format_tick(seconds):
-        seconds = int(seconds)
-        hours, remainder = divmod(seconds, 3600)
-        minutes, secs = divmod(remainder, 60)
-        if hours > 0:
-            return f"{hours}:{minutes:02d}:{secs:02d}"
-        return f"{minutes}:{secs:02d}"
-
-    tick_interval = next((interval for interval in (10, 30, 60, 120, 300, 600, 1200, 1800, 3600)
-                          if duration / interval <= 10), 7200)
-    tickvals = list(range(0, int(duration) + 1, tick_interval))
-    ticktext = [_format_tick(val) for val in tickvals]
+    tickvals, ticktext = _timeline_axis_ticks(duration)
 
     fig.update_layout(
         height=620,
@@ -5440,12 +5456,284 @@ PERIOD_SELECTION_METHODOLOGY_HTML = """
 """
 
 
-def _render_frame_periods_html(frame_outputs) -> str:
+# The period-selection chart's traces. Hue is the family of evidence, so the
+# three kinds read as groups; within a family the second metric is dotted.
+# Drawn from the eval-bars palette, which is already validated for CVD-safe
+# adjacent separation on the report's #f5e9e3 surface (BRNG keeps the teal it
+# has there), and clear of the two band washes — tan periods, gray
+# unanalyzable — so a line is never mistaken for a region.
+PERIOD_SCORE_COLOR = '#4d2b12'          # the composite: report ink
+
+
+@dataclass(frozen=True)
+class _PeriodMetricTrace:
+    """One scored metric as the chart draws it.
+
+    field: the series key holding the raw reading; its rank is at
+        f"{field}_rank", which is what gets plotted.
+    unit: how the raw reading is phrased in the hover. 'share' is a 0-1
+        fraction of pixels shown as a percentage; 'level' is a signal level on
+        the report's own scale.
+    """
+    field: str
+    label: str
+    color: str
+    dash: Optional[str]
+    unit: str
+
+
+# Order fixes the legend. Families run legality → impulsive → instability,
+# matching the weighting the score applies and the order the methodology note
+# introduces them in.
+PERIOD_METRIC_TRACES: Tuple[_PeriodMetricTrace, ...] = (
+    _PeriodMetricTrace('brng_mean', 'Out-of-range pixels (BRNG)', '#00969e', None, 'share'),
+    _PeriodMetricTrace('satmax_max', 'Illegal chroma (SATMAX)', '#00969e', 'dot', 'level'),
+    _PeriodMetricTrace('tout_mean', 'Dropouts (TOUT)', '#eb6834', None, 'share'),
+    _PeriodMetricTrace('vrep_mean', 'Concealment (VREP)', '#eb6834', 'dot', 'share'),
+    _PeriodMetricTrace('deflicker_absmax', 'Brightness instability (deflicker)',
+                       '#4a3aa7', None, 'level'),
+)
+
+
+def _make_period_score_chart_html(scoring, evidence, unanalyzable, video_id=None):
+    """Plot the per-bin score the periods were placed on, and the metrics behind it.
+
+    The color-bars timeline elsewhere on the page plots threshold failures
+    measured against this tape's own bars, which is *not* what places analysis
+    periods: since period selection became a composite score, three of its five
+    metrics (TOUT, VREP, deflicker) appear nowhere else in the report. A period
+    won by a sustained dropout burst therefore lands where every trace on that
+    timeline reads zero, and looks arbitrary. This chart shows the quantity
+    that actually chose them, broken down into the five metrics it is made of.
+
+    Every metric is plotted as its **within-file rank**, not its raw reading,
+    because rank is the only unit the five share: BRNG runs at tens of percent
+    of pixels on a noisy tape while TOUT peaks around 2%, and SATMAX is a
+    signal level rather than a share at all, so a common axis of physical
+    units would flatten everything but BRNG. The raw readings are in the
+    hover, where a physical value is useful and a scale conflict is not.
+
+    Args:
+        scoring (dict): frame_outputs['bin_scoring'] — needs its 'bins' series;
+                        reports written before that was recorded have none.
+        evidence (list): frame_outputs['period_evidence'], for the period bands
+                         and the bins credited inside them.
+        unanalyzable (list): frame_outputs['unanalyzable_regions'], shaded so
+                             the stretches selection refused are visible rather
+                             than just absent.
+        video_id (str, optional): stem of the chart's PNG export filename.
+
+    Returns:
+        str: HTML for the chart, or "" when there is no series to plot.
+    """
+    bins = (scoring or {}).get('bins') or []
+    if not bins:
+        return ""
+
+    try:
+        import plotly.graph_objs as go
+    except ImportError as e:
+        logger.critical(f"Error importing required libraries for graphs: {e}")
+        return ""
+
+    evidence = evidence or []
+    unanalyzable = unanalyzable or []
+
+    # Rows are read defensively: this is JSON off disk, and a malformed entry
+    # should cost its own point rather than the whole section.
+    points = []
+    for row in bins:
+        try:
+            start = float(row.get('start'))
+        except (TypeError, ValueError):
+            continue
+        points.append((start, row))
+    if not points:
+        return ""
+    points.sort(key=lambda item: item[0])
+
+    def _number(row, key):
+        value = row.get(key)
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    # Bin centers, so a point sits in the middle of the ten seconds it describes
+    centers = [start + PROFILE_BIN_SIZE / 2.0 for start, _ in points]
+    labels = [f"{_seconds_to_display(start)}&ndash;{_seconds_to_display(start + PROFILE_BIN_SIZE)}"
+              for start, _ in points]
+    scores = [_number(row, 'score') for _, row in points]
+    families = [(row.get('dominant_family') or 'nothing in particular') for _, row in points]
+
+    period_bands = []
+    for period in evidence:
+        try:
+            start = float(period.get('start'))
+            duration = float(period.get('duration') or 0)
+        except (TypeError, ValueError):
+            continue
+        period_bands.append((start, start + duration))
+
+    duration = max(
+        [centers[-1] + PROFILE_BIN_SIZE / 2.0]
+        + [end for _, end in period_bands]
+        + [float(region['end']) for region in unanalyzable
+           if isinstance(region.get('end'), (int, float))]
+    )
+
+    fig = go.Figure()
+    shapes = []
+
+    # Bands first so they sit under the traces.
+    for band_start, band_end in period_bands:
+        shapes.append(dict(
+            type='rect', xref='x', yref='paper',
+            x0=band_start, x1=min(band_end, duration), y0=0, y1=1,
+            fillcolor='rgba(166,124,82,0.30)', line=dict(color='#a67c52', width=2),
+            layer='below',
+        ))
+    for region in unanalyzable:
+        try:
+            region_start, region_end = float(region['start']), float(region['end'])
+        except (KeyError, TypeError, ValueError):
+            continue
+        shapes.append(dict(
+            type='rect', xref='x', yref='paper',
+            x0=region_start, x1=min(region_end, duration), y0=0, y1=1,
+            fillcolor='rgba(70,70,70,0.30)', line=dict(color='#555555', width=1),
+            layer='below',
+        ))
+
+    # The composite the periods were ranked on. Unsuitable bins carry None,
+    # which breaks the line over them rather than drawing a zero they never
+    # scored.
+    fig.add_trace(go.Scatter(
+        x=centers, y=scores, mode='lines', name='Composite score',
+        line=dict(width=3, color=PERIOD_SCORE_COLOR),
+        text=[f"{label} &middot; {family}" for label, family in zip(labels, families)],
+        hovertemplate='%{text}<br>score %{y:.2f}<extra></extra>',
+    ))
+
+    # The five metrics the composite is made of, each as its within-file rank.
+    # A metric the QCTools report never carried is skipped rather than drawn
+    # flat along zero, which would read as "measured, and clean".
+    for spec in PERIOD_METRIC_TRACES:
+        ranks = [_number(row, f"{spec.field}_rank") for _, row in points]
+        if all(value is None for value in ranks):
+            continue
+        raws = [_number(row, spec.field) for _, row in points]
+        if spec.unit == 'share':
+            raw_text = ["not measured" if value is None else f"{value * 100:.2f}% of pixels"
+                        for value in raws]
+        else:
+            raw_text = ["not measured" if value is None else f"level {value:.1f}"
+                        for value in raws]
+        fig.add_trace(go.Scatter(
+            x=centers, y=ranks, mode='lines', name=spec.label,
+            line=dict(width=1.5, color=spec.color, dash=spec.dash) if spec.dash
+            else dict(width=1.5, color=spec.color),
+            text=[f"{label}<br>{text}" for label, text in zip(labels, raw_text)],
+            hovertemplate='%{text}<br>rank %{y:.2f}<extra></extra>',
+        ))
+
+    # The bins that earned a period, marked on the composite they earned it
+    # with — same color as that curve, because that is the curve they are a
+    # reading of.
+    evidence_starts = {round(float(item['start']), 3)
+                       for period in evidence for item in (period.get('evidence') or [])
+                       if isinstance(item.get('start'), (int, float))}
+    if evidence_starts:
+        marked = [(center, score, label)
+                  for center, score, label, (start, _) in zip(centers, scores, labels, points)
+                  if round(start, 3) in evidence_starts and score is not None]
+        if marked:
+            fig.add_trace(go.Scatter(
+                x=[m[0] for m in marked], y=[m[1] for m in marked], mode='markers',
+                name='Earned a period',
+                marker=dict(symbol='diamond', size=10, color=PERIOD_SCORE_COLOR,
+                            line=dict(color='#f5e9e3', width=1.5)),
+                text=[m[2] for m in marked],
+                hovertemplate='%{text}<br>score %{y:.2f} &mdash; credited for a period<extra></extra>',
+            ))
+
+    # The level a bin has to clear to be named as evidence.
+    shapes.append(dict(
+        type='line', xref='paper', yref='y', x0=0, x1=1,
+        y0=EVIDENCE_MIN_SCORE, y1=EVIDENCE_MIN_SCORE,
+        line=dict(color=PERIOD_SCORE_COLOR, width=1, dash='dot'),
+    ))
+
+    tickvals, ticktext = _timeline_axis_ticks(duration)
+    fig.update_layout(
+        height=460,
+        margin=dict(l=70, r=40, t=30, b=80),
+        paper_bgcolor='#f5e9e3',
+        plot_bgcolor='#f5e9e3',
+        shapes=shapes,
+        legend=dict(orientation='h', yanchor='bottom', y=-0.36, x=0),
+        hovermode='x unified',
+        xaxis=dict(title='Time', range=[0, duration], tickvals=tickvals, ticktext=ticktext,
+                   gridcolor='#e3d5c9', zeroline=False),
+        yaxis=dict(title='Rank within this file (0 = quietest, 1 = worst)', range=[0, 1.05],
+                   gridcolor='#e3d5c9', zeroline=False),
+    )
+
+    config = {
+        'toImageButtonOptions': {
+            'format': 'png',
+            'filename': f'{video_id or "video"}_period_selection_timeline',
+            'height': 460,
+            'width': 1200,
+            'scale': 1
+        }
+    }
+    chart_html = fig.to_html(full_html=False, include_plotlyjs='cdn', config=config,
+                             default_width='100%')
+
+    # SATMAX's legal limit is quoted in whatever scale the report is on, so the
+    # hover's raw level can be read against something.
+    satmax_limit = (f"{SATURATION_LEGAL_LIMIT_8BIT * 4:.0f}"
+                    if (scoring or {}).get('bit_depth_10', True)
+                    else f"{SATURATION_LEGAL_LIMIT_8BIT:.0f}")
+
+    return f"""
+    <div style="background-color: var(--report-paper); padding: 10px; margin-top: 12px;">
+        <p style="margin: 0 0 4px 0;"><b>Where the tape scored worst, and why</b></p>
+        <p style="font-size: 13px; margin: 0 0 8px 0;">
+            The thick dark line is the composite score each 10-second bin was ranked on; the dotted
+            rule across it is the level a bin has to clear to be named as evidence, and diamonds mark
+            the bins credited with earning a period. Tan bands are the periods that were analyzed,
+            gray bands the regions ruled out as holding no analyzable picture &mdash; the lines break
+            over those, because they were never scored.
+        </p>
+        <p style="font-size: 13px; margin: 0 0 8px 0;">
+            The thin lines are the five measures the composite is made of, colored by the kind of
+            evidence they carry: <span style="color: #00969e;"><b>legality</b></span> (BRNG, the
+            share of pixels outside broadcast range; SATMAX, chroma above the legal limit of
+            {satmax_limit}), <span style="color: #eb6834;"><b>impulsive damage</b></span> (TOUT,
+            temporal outlier pixels &mdash; dropouts; VREP, repeated lines &mdash; the deck
+            concealing one) and <span style="color: #4a3aa7;"><b>instability</b></span> (deflicker,
+            brightness deviating from neighbouring frames). Each is plotted as its
+            <b>rank against the rest of this tape</b> rather than its raw reading, because the five
+            have no common scale &mdash; BRNG can run at tens of percent of pixels where TOUT peaks
+            near two, and SATMAX is a signal level rather than a share. Hover any point for the
+            actual measurement. A measure the QCTools report did not carry is left off the chart
+            entirely rather than drawn flat along zero.
+        </p>
+        {chart_html}
+    </div>
+    """
+
+
+def _render_frame_periods_html(frame_outputs, video_id=None) -> str:
     """Period selection: why the analysis periods sit where they do.
 
-    Covers three things nothing else in the report shows: what evidence was
-    available in the QCTools sidecar, which bins earned each period, and which
-    stretches of tape were ruled out as holding no analyzable picture.
+    Covers four things nothing else in the report shows: what evidence was
+    available in the QCTools sidecar, the per-bin score the periods were placed
+    on (charted, with the raw impulsive measures behind it), which bins earned
+    each period, and which stretches of tape were ruled out as holding no
+    analyzable picture.
 
     Returns an empty string when none of those inputs are present, so a report
     from before this was recorded renders exactly as it did.
@@ -5477,6 +5765,12 @@ def _render_frame_periods_html(frame_outputs) -> str:
         <strong>Measures available in this QCTools report:</strong> {', '.join(sorted(metrics))}
     </p>
     """
+
+    # ── The curve the periods were placed on ──
+    # Ahead of the table, because it is the answer to the question the table
+    # only names: a period reads as arbitrary until you can see that it sits
+    # on the tape's highest-scoring bins.
+    html += _make_period_score_chart_html(scoring, evidence, unanalyzable, video_id)
 
     # ── What earned each period ──
     # A period is six bins wide and the evidence is often one of them, so
@@ -6181,7 +6475,7 @@ def generate_frame_analysis_html(frame_outputs, video_id):
     html += _render_frame_border_html(frame_outputs)
     # Period selection comes before the two analyses that consume the periods,
     # so the reader knows what was sampled before reading what it measured.
-    html += _render_frame_periods_html(frame_outputs)
+    html += _render_frame_periods_html(frame_outputs, video_id)
     html += _render_frame_signalstats_html(frame_outputs)
     html += _render_frame_brng_html(frame_outputs)
     html += _render_frame_thumbs_html(frame_outputs)
