@@ -278,6 +278,47 @@ def test_process_single_directory_stops_file_log_on_exception(monkeypatch):
     stop_mock.assert_called_once()
 
 
+def test_process_directories_continues_after_per_file_log_io_error(monkeypatch, tmp_path):
+    """EIO while closing one file's log (its drive dropped) must not abort the
+    batch: the next directory is still processed and both emit file_completed."""
+    import errno
+    from AV_Spex.utils import log_setup
+
+    class DisconnectedStream:
+        def write(self, _text):
+            pass
+
+        def flush(self):
+            raise OSError(errno.EIO, "Input/output error")
+
+        def close(self):
+            raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(
+        ap.dir_setup, "initialize_directory",
+        lambda src: ("/v/in.mkv", os.path.basename(src), str(tmp_path), None),
+    )
+    signals = MagicMock()
+    proc = ap.AVSpexProcessor(signals=signals)
+    processed = []
+
+    def contents(source_directory, *a, **kw):
+        processed.append(os.path.basename(source_directory))
+        if source_directory.endswith("first"):
+            handler = log_setup._current_file_handler
+            handler.stream.close()
+            handler.stream = DisconnectedStream()
+        return True
+
+    monkeypatch.setattr(proc, "_process_directory_contents", contents)
+
+    proc.process_directories(["/src/first", "/src/second"])
+
+    assert processed == ["first", "second"]
+    assert [c.args[0] for c in signals.file_completed.emit.call_args_list] == ["first", "second"]
+    assert log_setup._current_file_handler is None
+
+
 def test_process_single_directory_emits_file_completed(monkeypatch):
     """file_completed carries (video_id, destination_directory) for the console PDF."""
     _stub_directory_init(monkeypatch)

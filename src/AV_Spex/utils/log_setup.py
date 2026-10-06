@@ -289,17 +289,39 @@ def stop_file_log():
         logger.info("=== End of processing log ===")
 
         # Remove from logger and close
-        logger.removeHandler(_current_file_handler)
-        _current_file_handler.close()
+        handler = _current_file_handler
         _current_file_handler = None
+        _close_per_file_handler(handler)
 
     _current_file_start = None
 
     # Also check for any orphaned per-file handlers (safety cleanup)
     for handler in logger.handlers[:]:  # Use slice copy to avoid modification during iteration
         if getattr(handler, '_is_per_file_handler', False):
-            logger.removeHandler(handler)
-            handler.close()
+            _close_per_file_handler(handler)
+
+
+def _close_per_file_handler(handler):
+    """
+    Detach and close a per-file handler without letting a failed write escape.
+
+    close() flushes whatever the handler still has buffered, and unlike emit()
+    logging does not catch errors there. If the qc_metadata volume has gone
+    away mid-run (external drive slept or disconnected, network share dropped)
+    the flush raises OSError (EIO), and raised from the processor's finally
+    block that ended the whole batch. The handler is removed first so the
+    warning below reaches the console and main log, not the broken file.
+    """
+    logger.removeHandler(handler)
+    try:
+        handler.close()
+    except OSError as e:
+        log_path = getattr(handler, 'baseFilename', 'per-file log')
+        logger.warning(
+            f"Could not finish writing the per-file log {log_path}: {e}. "
+            f"The log may be incomplete; check that the drive holding it is "
+            f"still connected and healthy."
+        )
 
 
 def disconnect_qt_log_handler():

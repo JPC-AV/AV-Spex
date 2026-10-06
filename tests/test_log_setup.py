@@ -6,8 +6,10 @@ Covers start_file_log / stop_file_log lifecycle:
 * removes the handler on stop, preventing further writes
 * idempotent stop is safe
 * orphaned per-file handlers are also cleaned up
+* a failed write at close (EIO from a dropped drive) is logged, not raised
 """
 
+import errno
 import logging
 import os
 
@@ -128,6 +130,60 @@ def test_stop_file_log_cleans_up_orphaned_per_file_handlers(tmp_path):
 
     assert orphan not in log_setup.logger.handlers
     assert _per_file_handlers() == []
+
+
+class _DisconnectedStream:
+    """Stands in for a FileHandler stream whose volume has gone away: buffered
+    writes succeed, but anything that reaches the disk raises EIO."""
+
+    def write(self, _text):
+        pass
+
+    def flush(self):
+        raise OSError(errno.EIO, "Input/output error")
+
+    def close(self):
+        raise OSError(errno.EIO, "Input/output error")
+
+
+def _disconnect(handler):
+    handler.stream.close()
+    handler.stream = _DisconnectedStream()
+
+
+def test_stop_file_log_survives_io_error_on_close(tmp_path, caplog):
+    """A user's 4-hour run ended with EIO raised from FileHandler.close() inside
+    stop_file_log(), which aborted the rest of the batch. It must warn instead."""
+    log_path = log_setup.start_file_log(str(tmp_path), "video_eio")
+    _disconnect(log_setup._current_file_handler)
+
+    with caplog.at_level(logging.WARNING):
+        log_setup.stop_file_log()
+
+    assert _per_file_handlers() == []
+    assert log_setup._current_file_handler is None
+    assert any(
+        "Could not finish writing the per-file log" in r.getMessage()
+        and log_path in r.getMessage()
+        for r in caplog.records
+    )
+
+    # The next file's log still works normally
+    next_path = log_setup.start_file_log(str(tmp_path), "video_after")
+    log_setup.logger.info("next file is fine")
+    log_setup.stop_file_log()
+    assert "next file is fine" in open(next_path).read()
+
+
+def test_stop_file_log_survives_io_error_on_orphaned_handler(tmp_path):
+    orphan = logging.FileHandler(str(tmp_path / "orphan.log"))
+    orphan._is_per_file_handler = True
+    log_setup.logger.addHandler(orphan)
+    _disconnect(orphan)
+
+    log_setup.stop_file_log()
+
+    assert orphan not in log_setup.logger.handlers
 
 
 # ---------------------------------------------------------------------------
