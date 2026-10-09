@@ -532,7 +532,7 @@ def run_cli_mode(args):
     if args.export_config:
         config_types = ['spex', 'checks'] if args.export_config == 'all' else [args.export_config]
         config_io = ConfigIO(config_mgr)
-        filename = config_io.save_configs(args.export_file, config_types)
+        filename = config_io.save_config_files(args.export_file, config_types)
         print(f"Configs exported to: {filename}")
         if args.dry_run_only:
             sys.exit(0)
