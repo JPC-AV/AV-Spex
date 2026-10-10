@@ -215,8 +215,8 @@ class FrameAnalysisConfig:
     enable_border_detection: bool = True
     enable_brng_analysis: bool = True
     enable_signalstats: bool = True
-    enable_dropped_sample_detection: bool = True
-    enable_duplicate_frame_detection: bool = True
+    enable_dropped_sample_detection: bool = False
+    enable_duplicate_frame_detection: bool = False
 
     # Border detection mode and parameters
     border_detection_mode: str = "simple"      # "simple" or "sophisticated"

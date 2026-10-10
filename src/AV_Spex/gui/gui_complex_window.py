@@ -645,7 +645,7 @@ class ComplexWindow(QWidget, ThemeableMixin):
             self.enable_brng_analysis_cb.setChecked(bool(frame_config.enable_brng_analysis))
             self.enable_signalstats_cb.setChecked(bool(frame_config.enable_signalstats))
             self.enable_dropped_sample_cb.setChecked(bool(frame_config.enable_dropped_sample_detection))
-            self.enable_duplicate_frame_cb.setChecked(bool(getattr(frame_config, 'enable_duplicate_frame_detection', True)))
+            self.enable_duplicate_frame_cb.setChecked(bool(getattr(frame_config, 'enable_duplicate_frame_detection', False)))
 
             # Set border detection mode
             mode_index = self.border_mode_combo.findData(frame_config.border_detection_mode)

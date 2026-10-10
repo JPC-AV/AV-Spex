@@ -5056,7 +5056,7 @@ class EnhancedFrameAnalysis:
         signalstats_enabled = self._is_step_enabled(frame_config.enable_signalstats)
         dropped_sample_enabled = self._is_step_enabled(frame_config.enable_dropped_sample_detection)
         duplicate_frame_enabled = self._is_step_enabled(
-            getattr(frame_config, 'enable_duplicate_frame_detection', True)
+            getattr(frame_config, 'enable_duplicate_frame_detection', False)
         )
 
         # Log which steps will run

@@ -24,8 +24,8 @@
       "brng_skip_color_bars": true,
       "analysis_period_duration": 30,
       "analysis_period_count": 6,
-      "enable_dropped_sample_detection": true,
-      "enable_duplicate_frame_detection": true,
+      "enable_dropped_sample_detection": false,
+      "enable_duplicate_frame_detection": false,
       "duplicate_min_run_length": 2
     }
   },
