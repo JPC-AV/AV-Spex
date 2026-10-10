@@ -17,9 +17,9 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             arch: arm64
-            version: sonoma
+            version: sequoia
 
     runs-on: ${{ matrix.os }}
     timeout-minutes: 240
@@ -92,11 +92,7 @@ jobs:
           brew link --force --overwrite python@3.13
 
           # Set up paths
-          if [[ "${{ matrix.os }}" == "macos-14" ]]; then
-            HOMEBREW_PREFIX="/opt/homebrew"
-          else
-            HOMEBREW_PREFIX="/usr/local"
-          fi
+          HOMEBREW_PREFIX="$(brew --prefix)"
 
           export PATH="${HOMEBREW_PREFIX}/opt/python@3.13/bin:$PATH"
           echo "${HOMEBREW_PREFIX}/opt/python@3.13/bin" >> $GITHUB_PATH
