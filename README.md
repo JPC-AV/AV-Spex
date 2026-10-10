@@ -333,7 +333,7 @@ Detects out-of-range luma and chroma values (BRNG — **B**roadcast **Ra**n**g**
 
 ### Signalstats
 
-Measures broadcast-range compliance — the FFmpeg `signalstats` BRNG metric, the share of pixels in a frame outside the broadcast-legal range — across sampled time periods (default: 3 periods of 60 seconds each, the same periods BRNG analysis then uses).
+Measures broadcast-range compliance — the FFmpeg `signalstats` BRNG metric, the share of pixels in a frame outside the broadcast-legal range — across sampled time periods (default: 6 periods of 30 seconds each, the same periods BRNG analysis then uses).
 
 When border detection has identified an active picture area, each period is measured twice: the **full frame**, read from the QCTools report, and the **active picture area only**, computed by FFprobe with a crop filter applied. Comparing the two separates violations that come from borders and blanking from violations in the picture content itself, and each period is classified as *border violations*, *content violations*, or *minimal violations*. The figures reported for the file come from the active-area pass. With border detection off, signalstats still runs from the CLI, measuring the full frame only and labelling its diagnosis accordingly.
 

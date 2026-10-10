@@ -18,8 +18,28 @@ segments, end-of-tape static).
 
 | Field (`FrameAnalysisConfig`, `utils/config_setup.py`) | Default | Meaning |
 |---|---|---|
-| `analysis_period_count` | `3` | How many periods to select |
-| `analysis_period_duration` | `60` | Length of each period, in seconds |
+| `analysis_period_count` | `6` | How many periods to select |
+| `analysis_period_duration` | `30` | Length of each period, in seconds |
+
+**Why 6 × 30 (was 3 × 60, changed October 2026).** Both settings sample the same 180 s, but on
+19 long test tapes (≥ 20 min) six shorter periods landed on the worst stretches more often. Each
+setting was scored against a whole-file active-area signalstats pass, with the real selection code
+replayed offline at each grid point:
+
+| Metric (mean) | 3 × 60 | 6 × 30 |
+|---|---|---|
+| worst BRNG bin covered | 0.21 | 0.42 |
+| worst TOUT bin covered | 0.42 | 0.53 |
+| top-5 BRNG bins covered | 0.28 | 0.40 |
+| BRNG damage events touched | 0.28 | 0.39 |
+
+The replay predicted the real 6 × 30 periods exactly. Measured frame-analysis time rose from about
+140 s to about 180 s on a 30–60 min tape, because each period carries roughly 12–17 s of fixed
+overhead (about 5% of a full run). 4 × 60 did no better than 3 × 60, and 8 × 30 added little for a
+further ~10%. Above ~20% coverage, every setting converges to random placement. The exception is
+tapes whose damage comes in sustained ~60 s bursts (`JPC_AV_02041`), which do better with longer
+periods. The study scripts (`replay_period_grid.py`, `avspex_with_groundtruth.sh`) live outside the
+repo.
 
 Both are settable from the GUI Complex tab (`gui/gui_complex_window.py`, the "Analysis Periods" row)
 and the checks-profile dialog, but **not** from the CLI — edit the saved config or use the GUI.

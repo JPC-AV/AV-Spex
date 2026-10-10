@@ -474,7 +474,7 @@ CLI: `av-spex --enable-brng-analysis {on,off}`, `--frame-no-colorbar-skip`
 
 ### Analysis Periods
 
-The number and length of the time windows sampled across the video, shared by Signalstats Analysis and BRNG Analysis (default: 3 periods of 60 seconds each). Because the differential BRNG detector decodes and compares video frames with computer-vision analysis on every sample, neither check examines the whole tape — this targeted sampling keeps processing time manageable while concentrating analysis on the frames most likely to contain violations. Period count multiplied by period duration is effectively the runtime dial for frame analysis: every period costs two full decodes of its length.
+The number and length of the time windows sampled across the video, shared by Signalstats Analysis and BRNG Analysis (default: 6 periods of 30 seconds each). Because the differential BRNG detector decodes and compares video frames with computer-vision analysis on every sample, neither check examines the whole tape — this targeted sampling keeps processing time manageable while concentrating analysis on the frames most likely to contain violations. Period count multiplied by period duration is effectively the runtime dial for frame analysis: every period costs two full decodes of its length.
 
 Because only a few minutes of a tape are actually examined, *where* those periods land determines whether the report describes the tape's real problems or an arbitrary slice of it. The guiding principle is that periods should land where the QCTools report says the out-of-range pixels actually are, and never on content that can't be meaningfully analyzed.
 

@@ -3621,8 +3621,8 @@ class IntegratedSignalstatsAnalyzer:
                         border_data: BorderDetectionResult = None,
                         content_start_time: float = 0,
                         color_bars_end_time: float = None,
-                        analysis_duration: int = 60,
-                        num_periods: int = 3,
+                        analysis_duration: int = 30,
+                        num_periods: int = 6,
                         qctools_periods: List[Tuple[float, int]] = None,
                         black_segments: List[Tuple[float, float]] = None) -> SignalstatsResult:
         """
@@ -5152,6 +5152,9 @@ class EnhancedFrameAnalysis:
         # excludes them — bars are a static test pattern and would otherwise
         # be reported as one long freeze.
         bars_regions = [(s, e) for s, e in (bars_regions or []) if e > s]
+        if bars_regions:
+            # Recorded so period placement can be replayed from the JSON alone
+            results['bars_regions'] = [{'start': s, 'end': e} for s, e in bars_regions]
         if skip_color_bars:
             brng_bars_end = color_bars_end_time
             brng_bars_regions = bars_regions
@@ -6299,8 +6302,8 @@ class EnhancedFrameAnalysis:
         logger.info(f"Results saved to: {output_file}\n")
 
     def _analyze_qctools_violation_distribution(self, violations: List[FrameViolation],
-                                                num_periods: int = 3,
-                                                period_duration: int = 60,
+                                                num_periods: int = 6,
+                                                period_duration: int = 30,
                                                 video_duration: float = None,
                                                 black_segments: List[Tuple[float, float]] = None,
                                                 histogram: Dict[float, int] = None,

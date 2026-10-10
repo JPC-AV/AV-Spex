@@ -308,8 +308,8 @@ All frame-analysis fields live under `outputs.frame_analysis` unless noted.
   excludes the detected color bars (head end time and `all_bars_regions`) from the QCTools violation
   scan, analysis-period placement, signalstats and BRNG. Off keeps them in; duplicate-frame detection
   excludes bars either way.
-- **Analysis Periods** row — **Count** (`analysis_period_count`, 3) and **Duration (s)**
-  (`analysis_period_duration`, 60), shared by signalstats and BRNG
+- **Analysis Periods** row — **Count** (`analysis_period_count`, 6) and **Duration (s)**
+  (`analysis_period_duration`, 30), shared by signalstats and BRNG
 
 #### 4. Audio Checks (`setup_audio_section`)
 

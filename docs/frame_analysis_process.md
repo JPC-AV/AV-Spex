@@ -225,7 +225,7 @@ ungated).
 ## 2. Analysis period selection
 
 Signalstats and BRNG both sample a few fixed-length windows rather than the whole file.
-Config: `analysis_period_count` (3), `analysis_period_duration` (60 s).
+Config: `analysis_period_count` (6), `analysis_period_duration` (30 s).
 
 ### 2.1 Stage 1 — Candidate periods (`_analyze_qctools_violation_distribution`)
 Runs right after scoring, if there were violations **or** any scored bins. (It no longer waits for

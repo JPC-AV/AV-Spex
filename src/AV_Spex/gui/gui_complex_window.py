@@ -386,10 +386,10 @@ class ComplexWindow(QWidget, ThemeableMixin):
         periods_label = QLabel("Analysis Periods:")
         periods_label.setStyleSheet("font-weight: bold;")
         periods_count_label = QLabel("Count:")
-        self.analysis_period_count_input = QLineEdit("3")
+        self.analysis_period_count_input = QLineEdit("6")
         self.analysis_period_count_input.setMaximumWidth(60)
         periods_duration_label = QLabel("Duration (s):")
-        self.analysis_period_duration_input = QLineEdit("60")
+        self.analysis_period_duration_input = QLineEdit("30")
         self.analysis_period_duration_input.setMaximumWidth(60)
         periods_row.addWidget(periods_label)
         periods_row.addWidget(periods_count_label)
@@ -662,7 +662,7 @@ class ComplexWindow(QWidget, ThemeableMixin):
             self.brng_skip_colorbars_cb.setChecked(bool(frame_config.brng_skip_color_bars))
             self.max_border_retries_input.setText(str(getattr(frame_config, 'max_border_retries', 3)))
             self.analysis_period_duration_input.setText(str(frame_config.analysis_period_duration))
-            self.analysis_period_count_input.setText(str(getattr(frame_config, 'analysis_period_count', 3)))
+            self.analysis_period_count_input.setText(str(getattr(frame_config, 'analysis_period_count', 6)))
 
             # Update visibility based on loaded state
             self.update_border_detection_visibility()

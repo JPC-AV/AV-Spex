@@ -232,8 +232,8 @@ class FrameAnalysisConfig:
     brng_skip_color_bars: bool = True    # Exclude detected bars from BRNG/signalstats/periods
 
     # Shared analysis-period settings (BRNG + signalstats)
-    analysis_period_duration: int = 60   # Seconds per window
-    analysis_period_count: int = 3       # Number of windows
+    analysis_period_duration: int = 30   # Seconds per window
+    analysis_period_count: int = 6       # Number of windows
 
     # Duplicate frame detection
     duplicate_min_run_length: int = 2

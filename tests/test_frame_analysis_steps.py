@@ -399,7 +399,7 @@ def test_no_bars_with_skip_off_brng_fallback_periods_do_not_crash(monkeypatch, t
     assert 'brng_analysis' in results
     assert len(brng_calls) == 1
     periods = brng_calls[0]['analysis_periods']
-    assert len(periods) == 3
+    assert len(periods) == _config().analysis_period_count
     assert periods[0][0] >= 10   # content starts 10s in when there are no bars
 
 

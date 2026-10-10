@@ -10,7 +10,7 @@ Unified module controlled by `FrameAnalysisConfig`. Three optional sub-steps, ea
 
 - **Border detection**: Detects active video area and head-switching artifacts. Modes: `simple` (fixed pixel crop, `simple_border_pixels`, default 25px) or `sophisticated` (brightness scan in from each edge of well-exposed sample frames, tunable via the `sophisticated_*` fields). Sophisticated mode supports auto-retry refinement, which stops early when a round makes no meaningful improvement.
 - **BRNG analysis**: Detects out-of-range luma/chroma values using multi-method voting; generates diagnostic thumbnails and an HTML report with magenta highlights.
-- **Signalstats**: FFmpeg `signalstats` filter analysis over selected time periods (default: 3 periods of 60s each).
+- **Signalstats**: FFmpeg `signalstats` filter analysis over selected time periods (default: 6 periods of 30s each).
 
 Signalstats and BRNG analysis sample **analysis periods** rather than the whole file. How those periods are chosen — per-bin profiles of every measure the QCTools report carries, the suitability gate that rules out stretches holding no analyzable picture, the composite score that replaced BRNG density as the ranking, the black-segment/bars avoidance and repair passes, and the post-signalstats refinement — is documented separately in **`developer_docs/analysis-period-selection.md`**, with a step-by-step account of every threshold in **`docs/frame_analysis_process.md`**.
 
