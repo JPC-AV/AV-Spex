@@ -792,7 +792,7 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
         periods_row = QHBoxLayout()
         periods_label = QLabel("Number of Periods:")
         periods_label.setStyleSheet("font-weight: bold;")
-        self.analysis_period_count_input = QLineEdit("3")
+        self.analysis_period_count_input = QLineEdit("6")
         self.analysis_period_count_input.setMaximumWidth(60)
         periods_row.addWidget(periods_label)
         periods_row.addWidget(self.analysis_period_count_input)
@@ -805,7 +805,7 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
         duration_row = QHBoxLayout()
         duration_label = QLabel("Period Duration (s):")
         duration_label.setStyleSheet("font-weight: bold;")
-        self.analysis_period_duration_input = QLineEdit("60")
+        self.analysis_period_duration_input = QLineEdit("30")
         self.analysis_period_duration_input.setMaximumWidth(60)
         duration_row.addWidget(duration_label)
         duration_row.addWidget(self.analysis_period_duration_input)
@@ -971,8 +971,8 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
             ("Sample Frames", self.soph_sample_frames_input, 30),
             ("Padding", self.soph_padding_input, 5),
             ("Max Retries", self.max_border_retries_input, 3),
-            ("Number of Periods", self.analysis_period_count_input, 3),
-            ("Period Duration", self.analysis_period_duration_input, 60),
+            ("Number of Periods", self.analysis_period_count_input, 6),
+            ("Period Duration", self.analysis_period_duration_input, 30),
         ]
         numbers = {}
         for label, line_edit, default in numeric_fields:

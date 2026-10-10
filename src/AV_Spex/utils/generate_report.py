@@ -5796,8 +5796,8 @@ def _render_frame_periods_html(frame_outputs, video_id=None) -> str:
             bins = period.get('evidence') or []
             if bins:
                 # Listed in full rather than truncated: a period holds one bin
-                # per ten seconds of its length, so the default 60s period can
-                # only ever have six, and a "+2 more" that cannot be expanded
+                # per ten seconds of its length, so the default 30s period can
+                # only ever have three (a 120s one twelve), and a "+2 more" that cannot be expanded
                 # is worse than the two extra rows it saves.
                 parts = []
                 for item in bins:

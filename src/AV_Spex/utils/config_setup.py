@@ -294,14 +294,14 @@ class FrameAnalysisConfig:
     brng_skip_color_bars: bool = True
     
     # Analysis period settings (used by signalstats and BRNG analysis)
-    analysis_period_duration: int = 60
-    analysis_period_count: int = 3
+    analysis_period_duration: int = 30
+    analysis_period_count: int = 6
 
     # Dropped sample detection settings
-    enable_dropped_sample_detection: bool = True
+    enable_dropped_sample_detection: bool = False
 
     # Duplicate frame detection settings
-    enable_duplicate_frame_detection: bool = True
+    enable_duplicate_frame_detection: bool = False
     duplicate_min_run_length: int = 2
 
 # Output configuration

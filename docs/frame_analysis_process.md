@@ -225,7 +225,7 @@ ungated).
 ## 2. Analysis period selection
 
 Signalstats and BRNG both sample a few fixed-length windows rather than the whole file.
-Config: `analysis_period_count` (3), `analysis_period_duration` (60 s).
+Config: `analysis_period_count` (6), `analysis_period_duration` (30 s).
 
 ### 2.1 Stage 1 — Candidate periods (`_analyze_qctools_violation_distribution`)
 Runs right after scoring, if there were violations **or** any scored bins. (It no longer waits for
@@ -235,12 +235,15 @@ BRNG threshold, and used to be invisible to selection.)
    histogram, falling back to binning the top-100 list.
 2. Drop a bin if:
    - it ends within the **last 30 s** of the file, or
+   - more than half of it (> 5 s) lies before the content start (head bars + 10 s margin), or
    - more than half of it (> 5 s) overlaps a single avoid-list segment.
 3. If the period length is longer than the video, shorten it to the video length.
 4. Rank bins by **composite score** (section 1.8); with no scores, by summed severity; with
    neither, by count.
 5. For each bin in rank order, the candidate period starts **centered on the bin**
-   (`bin_start + 5 − duration/2`), clamped to start ≥ 0 and to end at or before the end of the file.
+   (`bin_start + 5 − duration/2`), clamped to start at or after the content start and to end at or
+   before the end of the file. Because candidates already respect the content start, the spacing
+   checked in step 6 is the spacing the periods keep.
    With scores, the window may then slide off centre: candidate starts one bin apart are tried and
    a position replaces the centred one only when it covers **strictly more** evidence. Only bins
    that survived step 2 *and* score at least `EVIDENCE_MIN_SCORE` (0.5) vote — summing raw score
@@ -278,9 +281,10 @@ BRNG threshold, and used to be invisible to selection.)
 ### 2.3 Validation and repair against black/bars (`_validate_periods_against_black_segments`)
 For each period, in list order:
 0. **Clamp to the effective start.** The content start bounds every period, not only the ones this
-   stage repairs — candidate placement upstream knows about bars *bins* but not about the 10 s
-   safety margin, so a period under the overlap threshold used to pass through and could open
-   inside it. A clamp that lands on black is still repaired by the steps below.
+   stage repairs, so a period under the overlap threshold can no longer pass through and open
+   inside the margin. A clamp that lands on black, **or on another period**, is repaired by the
+   shift and shrink steps below. Stage 1 now respects the content start itself, so this mostly
+   guards other callers.
 1. Sum its overlap with all avoid-list segments (the list is merged, so nothing is counted twice —
    section 1.9).
 2. Overlap **≤ 25 %** of its length → keep it unchanged.
@@ -306,7 +310,9 @@ For each period, in list order:
 ### 2.4 Top-up (`_fill_periods_to_count`)
 1. Only runs if fewer periods than requested, and the window (effective start → file end − 30 s)
    is at least one period long.
-2. Lay out a grid of `max(2 × count, 4)` evenly spaced candidate starts across the window.
+2. Lay out a grid of `max(2 × count, 4)` evenly spaced candidate starts across the window, then
+   add starts that butt against an existing period on either side (`end`, or `start − length`).
+   The grid alone misses free gaps that fall between its slots.
 3. Accept a candidate if it doesn't overlap an existing period and overlaps the avoid list by
    ≤ 25 %. Stop at the requested count.
 

@@ -3621,8 +3621,8 @@ class IntegratedSignalstatsAnalyzer:
                         border_data: BorderDetectionResult = None,
                         content_start_time: float = 0,
                         color_bars_end_time: float = None,
-                        analysis_duration: int = 60,
-                        num_periods: int = 3,
+                        analysis_duration: int = 30,
+                        num_periods: int = 6,
                         qctools_periods: List[Tuple[float, int]] = None,
                         black_segments: List[Tuple[float, float]] = None) -> SignalstatsResult:
         """
@@ -4103,7 +4103,8 @@ class IntegratedSignalstatsAnalyzer:
 
         Candidate starts are spread across the content window (a denser grid
         than needed, so candidates rejected for overlapping existing periods
-        or black segments still leave enough alternatives). Candidates that
+        or black segments still leave enough alternatives), followed by
+        starts that butt against an existing period on either side. Candidates that
         overlap an existing period, or overlap black segments by more than
         25%, are skipped.
         """
@@ -4116,10 +4117,16 @@ class IntegratedSignalstatsAnalyzer:
         slots = max(num_periods * 2, 4)
         filled = list(periods)
         added = 0
-        for i in range(slots):
+        grid = [effective_start + span * i / (slots - 1) for i in range(slots)]
+        # Then positions butted against the periods already placed. The grid
+        # alone misses gaps that are wide enough but fall between its slots,
+        # which on a short tape with several periods is most of them:
+        # JPC_AV_03806 got five of six 30s periods with a free 32s gap left.
+        abutting = sorted({c for s, d in periods for c in (s + d, s - duration)
+                           if effective_start <= c <= window_end - duration})
+        for candidate in grid + abutting:
             if len(filled) >= num_periods:
                 break
-            candidate = effective_start + span * i / (slots - 1)
             candidate_end = candidate + duration
 
             if any(candidate < p_start + p_dur and p_start < candidate_end
@@ -4182,15 +4189,23 @@ class IntegratedSignalstatsAnalyzer:
 
             # The content start (head bars plus the safety margin) bounds every
             # period, not only the ones this function repairs. Candidate
-            # placement upstream knows about bars *bins* but not about the
-            # margin, so a period could open inside it — JPC_AV_01823 started
-            # at 01:05 against a 01:11 content start — because a period under
-            # the overlap threshold was passed through untouched.
-            if start < effective_start:
+            # placement upstream now respects it too, but other callers need
+            # not, and before it did a period could open inside the margin:
+            # JPC_AV_01823 started at 01:05 against a 01:11 content start,
+            # because a period under the overlap threshold was passed through
+            # untouched.
+            clamped = start < effective_start
+            if clamped:
                 start = effective_start
                 if self.duration:
                     start = min(start, max(0.0, self.duration - dur))
             end = start + dur
+            # Pulling a period forward can land it on its neighbour, which the
+            # repair path below guards against but this clamp did not. Treat
+            # that collision like too much black, so the period is shifted
+            # clear of the others instead.
+            collides = clamped and any(start < o_start + o_dur and o_start < end
+                                       for o_start, o_dur in occupied)
             
             # Calculate total overlap with all black segments
             total_overlap = 0.0
@@ -4202,13 +4217,15 @@ class IntegratedSignalstatsAnalyzer:
             
             overlap_pct = (total_overlap / dur) * 100 if dur > 0 else 0
             
-            if overlap_pct <= 25:
+            if overlap_pct <= 25 and not collides:
                 # Period is fine, keep it
                 validated.append((start, dur))
             else:
-                # Period overlaps significantly with black content
                 start_tc = f"{int(start // 60):02d}:{start % 60:05.2f}"
-                logger.info(f"  Period at {start_tc} overlaps {overlap_pct:.0f}% with black segment, attempting to shift...")
+                if collides:
+                    logger.info(f"  Period moved to the content start at {start_tc} overlaps another period, attempting to shift...")
+                else:
+                    logger.info(f"  Period at {start_tc} overlaps {overlap_pct:.0f}% with black segment, attempting to shift...")
                 
                 shifted = self._shift_period_away_from_black(
                     start, dur, black_segments, effective_start,
@@ -5056,7 +5073,7 @@ class EnhancedFrameAnalysis:
         signalstats_enabled = self._is_step_enabled(frame_config.enable_signalstats)
         dropped_sample_enabled = self._is_step_enabled(frame_config.enable_dropped_sample_detection)
         duplicate_frame_enabled = self._is_step_enabled(
-            getattr(frame_config, 'enable_duplicate_frame_detection', True)
+            getattr(frame_config, 'enable_duplicate_frame_detection', False)
         )
 
         # Log which steps will run
@@ -5152,6 +5169,9 @@ class EnhancedFrameAnalysis:
         # excludes them — bars are a static test pattern and would otherwise
         # be reported as one long freeze.
         bars_regions = [(s, e) for s, e in (bars_regions or []) if e > s]
+        if bars_regions:
+            # Recorded so period placement can be replayed from the JSON alone
+            results['bars_regions'] = [{'start': s, 'end': e} for s, e in bars_regions]
         if skip_color_bars:
             brng_bars_end = color_bars_end_time
             brng_bars_regions = bars_regions
@@ -5259,7 +5279,8 @@ class EnhancedFrameAnalysis:
                     black_segments=avoid_segments,
                     histogram=getattr(parser, 'violation_histogram', None),
                     severity=getattr(parser, 'violation_severity', None),
-                    bin_scores=bin_scores
+                    bin_scores=bin_scores,
+                    content_start=content_start_after_bars(brng_bars_end)
                 )
                 basis = "composite score" if bin_scores else "violation density"
                 logger.info(f"Identified {len(qctools_suggested_periods)} periods "
@@ -6299,13 +6320,14 @@ class EnhancedFrameAnalysis:
         logger.info(f"Results saved to: {output_file}\n")
 
     def _analyze_qctools_violation_distribution(self, violations: List[FrameViolation],
-                                                num_periods: int = 3,
-                                                period_duration: int = 60,
+                                                num_periods: int = 6,
+                                                period_duration: int = 30,
                                                 video_duration: float = None,
                                                 black_segments: List[Tuple[float, float]] = None,
                                                 histogram: Dict[float, int] = None,
                                                 severity: Dict[float, float] = None,
-                                                bin_scores: Dict[float, 'BinScore'] = None) -> List[Tuple[float, int]]:
+                                                bin_scores: Dict[float, 'BinScore'] = None,
+                                                content_start: float = 0.0) -> List[Tuple[float, int]]:
         """
         Analyze the temporal distribution of QCTools violations and suggest analysis periods.
 
@@ -6323,6 +6345,15 @@ class EnhancedFrameAnalysis:
             black_segments: Known all-black segments (plus detected bars
                 regions); bins mostly inside them are excluded so period
                 selection doesn't target unwatchable content
+            content_start: Earliest time a period may start
+                (`content_start_after_bars()`: head bars plus the safety
+                margin). Bins mostly before it are excluded and no candidate
+                opens before it, so the spacing checked here is the spacing
+                the periods keep. Placing a candidate inside the margin left
+                it to `_validate_periods_against_black_segments()` to push
+                forward, onto the next period: with 6 x 30 on short tapes
+                (JPC_AV_01056, 03801, 03802, 03806) that overlapped two
+                periods by 10-18s.
             histogram: {bin_start_seconds: violation_count} over ALL violation
                 frames (parser.violation_histogram). Preferred over the capped
                 violations list, whose "distribution" collapses to the few
@@ -6372,6 +6403,8 @@ class EnhancedFrameAnalysis:
         def _bin_excluded(bin_start):
             bin_end = bin_start + bin_size
             if video_duration and bin_end > video_duration - 30:
+                return True
+            if content_start - bin_start > bin_size / 2:
                 return True
             for seg_start, seg_end in black_segments or []:
                 overlap = min(bin_end, seg_end) - max(bin_start, seg_start)
@@ -6464,7 +6497,7 @@ class EnhancedFrameAnalysis:
                 start = best_start
             if video_duration:
                 start = min(start, video_duration - period_duration)
-            return max(0.0, start)
+            return max(0.0, content_start, start)
 
         # Pass 1: densest bins first, requiring periods to sit well apart so
         # they cover distinct problem regions. Pass 2 relaxes the separation to
