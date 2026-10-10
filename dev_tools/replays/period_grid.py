@@ -277,7 +277,8 @@ def replay_package(pkg, counts, durations):
                 cands = ea._analyze_qctools_violation_distribution(
                     violations, num_periods=count, period_duration=dur, video_duration=duration,
                     black_segments=avoid, histogram=getattr(parser, "violation_histogram", None),
-                    severity=getattr(parser, "violation_severity", None), bin_scores=scores)
+                    severity=getattr(parser, "violation_severity", None), bin_scores=scores,
+                    content_start=content_start_after_bars(bars_end))
             stage2 = ss._find_analysis_periods(0, bars_end, dur, count, hints or None,
                                                qctools_periods=cands, black_segments=avoid)
             final = stage2

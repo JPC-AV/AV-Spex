@@ -333,11 +333,13 @@ families across the set run roughly two-thirds `impulsive`, one-third `legality`
 2. **Exclude bins** (`_bin_excluded`): a bin whose overlap with any black segment or bars region
    exceeds half the bin (5s), or that ends within the **last 30 seconds** of the file
    (end-of-tape static). Noise spikes that escape the per-frame black classifier get caught here.
+   A bin more than half before `content_start` (head bars plus the safety margin, passed in by
+   `analyze()`) is excluded too.
 3. **Clamp the period duration** to the video duration if the configured duration is longer.
 4. **Rank bins** by composite score when available (Stage 0b), else by summed severity, else by
    count (`_bin_rank`). The top 10 are logged with the families that drove them.
 5. **Place periods**, densest bin first, centering the period on the bin and clamping it inside the
-   file (`_candidate_start`). With composite scores the window may slide off centre: candidate
+   file and after `content_start` (`_candidate_start`). With composite scores the window may slide off centre: candidate
    starts one bin apart are tried, and a position replaces the centred one only when it covers
    **strictly more** evidence. Only bins that survived the exclusions *and* score at least
    `EVIDENCE_MIN_SCORE` vote — summing raw score over every bin pulled `JPC_AV_01056`'s window onto
@@ -384,7 +386,8 @@ Then two correction passes:
 - **Count guarantee** (`_fill_periods_to_count`) — if clusters or validation left fewer periods than
   requested, top up with evenly spaced ones. Candidate starts are drawn from a grid of
   `max(2 × count, 4)` slots across the content window (denser than needed, so rejections still leave
-  alternatives); a candidate is skipped if it overlaps an existing period or overlaps black segments
+  alternatives), then from starts butted against the existing periods, since on a short tape the
+  free gaps rarely line up with a grid slot. A candidate is skipped if it overlaps an existing period or overlaps black segments
   by more than 25% of its duration. This exists because violation-cluster selection legitimately
   returns fewer than `count` periods on a clean tape, and the report should still sample the
   requested number of places.
@@ -395,10 +398,25 @@ The final list is returned sorted by start time.
 
 `effective_start` used to apply only to periods this stage *repaired* — a candidate under the 25%
 overlap bar passed through untouched, so a period could open inside the head-bars safety margin
-(`JPC_AV_01823` started at 01:05 against a 01:11 content start). Candidate placement upstream knows
-about bars *bins* but not about the margin, so nothing else was enforcing it. Every period is now
-clamped to `effective_start` first, and then goes through the usual overlap check — so a clamp that
-lands on black is still repaired.
+(`JPC_AV_01823` started at 01:05 against a 01:11 content start). Every period is now clamped to
+`effective_start` first, and then goes through the usual overlap check, so a clamp that lands on
+black is still repaired.
+
+The clamp itself caused overlapping periods (October 2026). Stage 1 did not know about the margin,
+so on a short tape it could place a candidate that opened inside it, a period length before the
+next one. Stage 1 only falls back to that one-length spacing when its two-length spacing cannot
+fill the count. The clamp then pushed the candidate forward onto its neighbour. At 6 × 30 this
+overlapped periods by 10–18 s on `JPC_AV_01056`, `03801`, `03802` and `03806`, so the same frames
+were decoded twice. It never showed at 3 × 60, where the clamp is shorter than the spacing. Three
+changes fixed it:
+- Stage 1 takes `content_start`, so its candidates already respect the margin.
+- A clamp that collides with another period is repaired like one that lands on black.
+- The top-up also tries positions butted against existing periods.
+
+Replaying the period study, no period overlaps at the 3 × 60, 6 × 30 or 8 × 30 settings any more,
+and long tapes improved slightly (6 × 30 worst-BRNG-bin hit 0.42 → 0.47). On tapes whose content
+is shorter than the requested total, fewer periods may be placed (JPC_AV_01056 and 03802 get three
+at 6 × 30). That replaces windows that were partly decoded twice.
 
 ### Black-segment validation and repair
 

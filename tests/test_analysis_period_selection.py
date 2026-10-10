@@ -143,3 +143,48 @@ def test_fill_periods_no_room_returns_unchanged(signalstats_analyzer):
     result = signalstats_analyzer._fill_periods_to_count(
         existing, num_periods=3, duration=60, effective_start=10.0)
     assert result == existing
+
+
+# Short tapes at 6 x 30: periods used to overlap when one was placed inside the
+# head-bars margin and then pulled forward onto its neighbour (JPC_AV_01056,
+# 03801, 03802, 03806 overlapped by 10-18s). Shapes below follow JPC_AV_03806:
+# a 281s tape whose content starts at 28s.
+
+def _no_overlaps(periods):
+    ordered = sorted(periods)
+    return all(s1 + d1 <= s2 for (s1, d1), (s2, _) in zip(ordered, ordered[1:]))
+
+
+def test_distribution_respects_content_start(analyzer):
+    # Bin 20-30 is mostly inside the margin; bin 30-40 centres a period at 20s
+    histogram = _histogram([(20, 40, 50), (300, 310, 40)])
+    periods = analyzer._analyze_qctools_violation_distribution(
+        [], num_periods=3, period_duration=30, video_duration=1800.0,
+        histogram=histogram, content_start=28.0)
+
+    assert periods, "the bins after the content start still earn periods"
+    assert all(start >= 28.0 for start, _ in periods)
+    assert _no_overlaps(periods)
+
+
+def test_validate_shifts_a_clamped_period_off_its_neighbour(signalstats_analyzer):
+    signalstats_analyzer.duration = 281.0
+    periods = signalstats_analyzer._validate_periods_against_black_segments(
+        [(10.0, 30), (40.0, 30)], black_segments=[(262.0, 290.0)],
+        effective_start=28.0, period_duration=30)
+
+    assert len(periods) == 2
+    assert all(start >= 28.0 for start, _ in periods)
+    assert _no_overlaps(periods)
+
+
+def test_fill_uses_gaps_between_the_grid_slots(signalstats_analyzer):
+    # The only free 30s window is 58-88s, which no evenly spaced slot lands on
+    signalstats_analyzer.duration = 281.0
+    existing = [(28.0, 30), (90.0, 30), (120.0, 30), (160.0, 30), (200.0, 30)]
+    periods = signalstats_analyzer._fill_periods_to_count(
+        existing, num_periods=6, duration=30, effective_start=28.0)
+
+    assert len(periods) == 6
+    assert (58.0, 30) in periods
+    assert _no_overlaps(periods)
