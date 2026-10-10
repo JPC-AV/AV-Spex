@@ -380,3 +380,77 @@ def test_validate_embedded_md5_writes_fixity_summary(
         "embedded_hash": stored_a, "computed_hash": computed_a, "match": False,
     }
     assert stream["validated_at"]
+
+
+# ---------------------------------------------------------------------------
+# get_total_frames — JSON probes
+#
+# The nb_frames and packet-count probes used `-of csv=p=0`, which prints
+# "30," for a stream carrying side data (e.g. an MP4 rotation display matrix).
+# Method 1 then failed isdigit() and method 3 failed int(), falling back to
+# the 1000-frame guess.
+# ---------------------------------------------------------------------------
+
+def _fake_ffprobe_by_query(monkeypatch, responses):
+    """Answer each ffprobe call by the -show_entries it asks for."""
+    import json as _json
+    from unittest.mock import MagicMock as _MM
+    from AV_Spex.checks import embed_fixity as ef
+    calls = []
+
+    def fake_run(cmd, *a, **kw):
+        entries = cmd[cmd.index('-show_entries') + 1]
+        calls.append(entries)
+        return _MM(stdout=_json.dumps(responses.get(entries, {})), returncode=0)
+
+    monkeypatch.setattr(ef.subprocess, "run", fake_run)
+    return calls
+
+
+SIDE_DATA = [{"side_data_type": "Display Matrix", "rotation": 90}]
+
+
+def test_total_frames_from_nb_frames_with_stream_side_data(monkeypatch):
+    from AV_Spex.checks import embed_fixity as ef
+    calls = _fake_ffprobe_by_query(monkeypatch, {
+        'stream=nb_frames': {"streams": [{"nb_frames": "30", "side_data_list": SIDE_DATA}]},
+    })
+    assert ef.get_total_frames("/v.mp4") == 30
+    assert calls == ['stream=nb_frames']
+
+
+def test_total_frames_from_duration_and_rate(monkeypatch):
+    from AV_Spex.checks import embed_fixity as ef
+    _fake_ffprobe_by_query(monkeypatch, {
+        'stream=nb_frames': {"streams": [{}]},
+        'stream=duration,r_frame_rate': {"streams": [{"duration": "10.010000", "r_frame_rate": "30000/1001"}]},
+    })
+    assert ef.get_total_frames("/v.mkv") == 300
+
+
+def test_total_frames_duration_falls_back_to_format(monkeypatch):
+    from AV_Spex.checks import embed_fixity as ef
+    _fake_ffprobe_by_query(monkeypatch, {
+        'stream=nb_frames': {"streams": [{}]},
+        'stream=duration,r_frame_rate': {"streams": [{"r_frame_rate": "25/1"}]},
+        'format=duration': {"format": {"duration": "4.000000"}},
+    })
+    assert ef.get_total_frames("/v.mkv") == 100
+
+
+def test_total_frames_counts_packets_with_stream_side_data(monkeypatch):
+    from AV_Spex.checks import embed_fixity as ef
+    _fake_ffprobe_by_query(monkeypatch, {
+        'stream=nb_frames': {"streams": [{}]},
+        'stream=duration,r_frame_rate': {"streams": [{}]},
+        'format=duration': {"format": {}},
+        'stream=nb_read_packets': {"streams": [{"nb_read_packets": "55861", "side_data_list": SIDE_DATA}]},
+    })
+    assert ef.get_total_frames("/v.mp4") == 55861
+
+
+def test_total_frames_guesses_when_every_probe_fails(monkeypatch):
+    from unittest.mock import MagicMock as _MM
+    from AV_Spex.checks import embed_fixity as ef
+    monkeypatch.setattr(ef.subprocess, "run", lambda *a, **kw: _MM(stdout="", returncode=1))
+    assert ef.get_total_frames("/v.mkv") == 1000

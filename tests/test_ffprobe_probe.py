@@ -50,10 +50,12 @@ def test_as_float_rejects_unusable_values(raw):
     assert fp._as_float(raw) is None
 
 
-def test_as_float_tolerates_trailing_separator():
-    """ffprobe's csv output gains a trailing separator when the stream carries
-    side data, which is what broke the old per-module parsers."""
-    assert fp._as_float("25/1,".rstrip(',')) == 25.0
+def _format_json(**fields):
+    return json.dumps({"format": fields})
+
+
+def _video_stream_json(**fields):
+    return json.dumps({"streams": [fields]})
 
 
 # ---------------------------------------------------------------------------
@@ -61,20 +63,31 @@ def test_as_float_tolerates_trailing_separator():
 # ---------------------------------------------------------------------------
 
 def test_duration_reads_the_container(monkeypatch):
-    _responses(monkeypatch, "1800.5\n")
+    calls = _responses(monkeypatch, _format_json(duration="1800.500000"))
     assert fp.duration("/v.mkv") == pytest.approx(1800.5)
+    assert "json" in calls[0] and "csv=p=0" not in calls[0]
 
 
 def test_duration_falls_back_to_the_video_stream(monkeypatch):
     """Some MKVs report N/A for format=duration; the stream still knows."""
-    calls = _responses(monkeypatch, "N/A\n", "1800.5\n")
+    calls = _responses(monkeypatch, _format_json(duration="N/A"),
+                       _video_stream_json(duration="1800.500000"))
     assert fp.duration("/v.mkv") == pytest.approx(1800.5)
     assert len(calls) == 2
     assert "-select_streams" in calls[1]
 
 
+def test_duration_stream_fallback_survives_stream_side_data(monkeypatch):
+    """csv printed '1.000000,' for a stream with side data (e.g. an MP4
+    rotation display matrix), so the stream fallback returned None."""
+    side_data = json.dumps({"streams": [{"duration": "1.000000", "side_data_list": [
+        {"side_data_type": "Display Matrix", "rotation": 90}]}]})
+    _responses(monkeypatch, json.dumps({"format": {}}), side_data)
+    assert fp.duration("/v.mp4") == pytest.approx(1.0)
+
+
 def test_duration_returns_none_when_both_are_unavailable(monkeypatch):
-    _responses(monkeypatch, "N/A\n", "")
+    _responses(monkeypatch, _format_json(duration="N/A"), json.dumps({"streams": [{}]}))
     assert fp.duration("/v.mkv") is None
 
 
@@ -96,7 +109,7 @@ def test_probe_passes_a_timeout(monkeypatch):
 
     def _run(cmd, *a, **kw):
         seen.update(kw)
-        return _proc("1.0")
+        return _proc(_format_json(duration="1.0"))
 
     monkeypatch.setattr(fp.subprocess, "run", _run)
     fp.duration("/v.mkv")
@@ -236,14 +249,14 @@ def test_first_audio_channel_count_without_audio_is_none(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_video_dimensions(monkeypatch):
-    _responses(monkeypatch, "720,486\n")
+    _responses(monkeypatch, _video_stream_json(width=720, height=486))
     assert fp.video_dimensions("/v.mkv") == (720, 486)
 
 
-def test_video_dimensions_tolerates_a_trailing_separator(monkeypatch):
-    """ffprobe emits '720,576,' when the stream carries side data — the old
-    'x'-separated parser produced int('576x') and gave up."""
-    _responses(monkeypatch, "720,576,\n")
+def test_video_dimensions_with_stream_side_data(monkeypatch):
+    """csv emitted '720,576,' when the stream carries side data."""
+    _responses(monkeypatch, json.dumps({"streams": [{"width": 720, "height": 576,
+                                                     "side_data_list": [{"rotation": 90}]}]}))
     assert fp.video_dimensions("/v.mov") == (720, 576)
 
 
@@ -252,8 +265,13 @@ def test_video_dimensions_empty_returns_none(monkeypatch):
     assert fp.video_dimensions("/v.mkv") is None
 
 
+def test_video_dimensions_no_stream_returns_none(monkeypatch):
+    _responses(monkeypatch, json.dumps({"streams": []}))
+    assert fp.video_dimensions("/v.mkv") is None
+
+
 def test_video_dimensions_garbage_returns_none(monkeypatch):
-    _responses(monkeypatch, "abc,def\n")
+    _responses(monkeypatch, _video_stream_json(width="abc", height="def"))
     assert fp.video_dimensions("/v.mkv") is None
 
 

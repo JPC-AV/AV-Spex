@@ -42,7 +42,6 @@ def _frame_analysis(**over):
         simple_border_pixels=25,
         auto_retry_borders=False,
         max_border_retries=3,
-        brng_duration_limit=300,
         brng_skip_color_bars=True,
         analysis_period_duration=60,
         analysis_period_count=3,

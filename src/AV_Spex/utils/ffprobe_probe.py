@@ -103,14 +103,14 @@ def duration(video_path) -> Optional[float]:
     Reads the container duration, falling back to the first video stream's —
     some MKVs report ``N/A`` for ``format=duration``.
     """
-    out = _run(video_path, ['-show_entries', 'format=duration', '-of', 'csv=p=0'])
-    seconds = _as_float(out)
+    data = _run_json(video_path, ['-show_entries', 'format=duration'])
+    seconds = _as_float(((data or {}).get('format') or {}).get('duration'))
     if seconds is not None:
         return seconds
 
-    out = _run(video_path, ['-select_streams', 'v:0',
-                            '-show_entries', 'stream=duration', '-of', 'csv=p=0'])
-    return _as_float(out)
+    data = _run_json(video_path, ['-select_streams', 'v:0', '-show_entries', 'stream=duration'])
+    streams = (data or {}).get('streams') or []
+    return _as_float(streams[0].get('duration')) if streams else None
 
 
 def frame_rate(video_path) -> Optional[float]:
@@ -153,14 +153,13 @@ def start_timecode(video_path) -> Optional[str]:
 
 def video_dimensions(video_path) -> Optional[Tuple[int, int]]:
     """(width, height) of the first video stream."""
-    out = _run(video_path, ['-select_streams', 'v:0',
-                            '-show_entries', 'stream=width,height', '-of', 'csv=p=0'])
-    if not out:
+    data = _run_json(video_path, ['-select_streams', 'v:0', '-show_entries', 'stream=width,height'])
+    streams = (data or {}).get('streams') or []
+    if not streams:
         return None
-    parts = [p for p in out.replace('\n', ',').split(',') if p.strip()]
     try:
-        return int(parts[0]), int(parts[1])
-    except (IndexError, ValueError):
+        return int(streams[0]['width']), int(streams[0]['height'])
+    except (KeyError, TypeError, ValueError):
         return None
 
 

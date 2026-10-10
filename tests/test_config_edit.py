@@ -322,6 +322,27 @@ def test_apply_profile_non_mkv_forces_mkv_only_checks_off(mock_cfg):
     assert updates["fixity"]["validate_stream_fixity"] is False
     assert updates["fixity"]["overwrite_stream_fixity"] is False
     assert updates["tools"]["mediatrace"] == {"run_tool": False, "check_tool": False}
+    assert updates["tools"]["mkvalidator"] == {"run_tool": False, "check_tool": False}
+
+
+def test_enforce_extension_compatibility_forces_mkvalidator_off_alone():
+    """mkvalidator validates Matroska conformance, so it is forced off on its own
+    even when every other MKV-only setting is already off."""
+    from types import SimpleNamespace
+    off = SimpleNamespace(run_tool=False, check_tool=False)
+    cfg = SimpleNamespace(
+        video_file_extension="mp4",
+        fixity=SimpleNamespace(embed_stream_fixity=False, validate_stream_fixity=False,
+                               overwrite_stream_fixity=False),
+        tools=SimpleNamespace(mediatrace=off,
+                              mkvalidator=SimpleNamespace(run_tool=True, check_tool=False)),
+    )
+    mock = MagicMock()
+    mock.get_config.return_value = cfg
+    with patch.object(config_edit, "config_mgr", mock):
+        assert config_edit.enforce_extension_compatibility() is True
+    updates = mock.update_config.call_args.args[1]
+    assert updates == {"tools": {"mkvalidator": {"run_tool": False, "check_tool": False}}}
 
 
 def test_enforce_extension_compatibility_noop_for_mkv(mock_cfg):

@@ -21,6 +21,11 @@ from AV_Spex.utils.config_setup import ChecksConfig
 from AV_Spex.utils.config_manager import ConfigManager
 from AV_Spex.utils.log_setup import logger, report_ffmpeg_stderr
 from AV_Spex.utils import ffprobe_probe
+# The calibrated values the period-selection chart draws and quotes.
+# Imported rather than copied so they cannot drift from what selection used.
+from AV_Spex.checks.bin_scoring import (EVIDENCE_MIN_SCORE,
+                                        SATURATION_LEGAL_LIMIT_8BIT)
+from AV_Spex.checks.qctools_bin_profile import PROFILE_BIN_SIZE
 
 config_mgr = ConfigManager()
 
@@ -250,12 +255,21 @@ def find_frame_analysis_outputs(source_directory, destination_directory, video_i
         'border_visualization': None,
         'border_data': None,
         'brng_analysis': None,
+        # Set when BRNG ran but could not measure anything; renders in place of
+        # the section instead of letting it vanish. See _render_frame_brng_html.
+        'brng_unavailable_reason': None,
         'brng_thumbnails': [],
         'signalstats_analysis': None,
         'enhanced_frame_analysis': None,
         'dropped_sample_spectrogram': None,
         'dropped_sample_detection': None,
-        'duplicate_frame_detection': None
+        'duplicate_frame_detection': None,
+        # How the analysis periods were chosen: the metric families the
+        # QCTools report carried, which bins earned each period, and the
+        # regions excluded as holding no analyzable picture.
+        'bin_scoring': None,
+        'period_evidence': None,
+        'unanalyzable_regions': None
     }
     
     # Check for border detection outputs
@@ -298,6 +312,9 @@ def find_frame_analysis_outputs(source_directory, destination_directory, video_i
                 brng_data = enhanced_data.get('final_brng_analysis') or enhanced_data.get('brng_analysis')
                 if brng_data:
                     frame_outputs['brng_analysis'] = brng_data  # Store as dict directly
+                else:
+                    frame_outputs['brng_unavailable_reason'] = enhanced_data.get(
+                        'brng_analysis_unavailable')
             
             # Extract bitplane check data from enhanced JSON
             if enhanced_data.get('bitplane_check'):
@@ -336,6 +353,14 @@ def find_frame_analysis_outputs(source_directory, destination_directory, video_i
                 frame_outputs['qctools_violations_found'] = enhanced_data['qctools_violations_found']
             if enhanced_data.get('color_bars_end_time'):
                 frame_outputs['color_bars_end_time'] = enhanced_data['color_bars_end_time']
+
+            # Extract period-selection provenance
+            if enhanced_data.get('bin_scoring'):
+                frame_outputs['bin_scoring'] = enhanced_data['bin_scoring']
+            if enhanced_data.get('period_evidence'):
+                frame_outputs['period_evidence'] = enhanced_data['period_evidence']
+            if enhanced_data.get('unanalyzable_regions'):
+                frame_outputs['unanalyzable_regions'] = enhanced_data['unanalyzable_regions']
 
             # Extract dropped sample detection data
             if enhanced_data.get('dropped_sample_detection'):
@@ -387,6 +412,13 @@ class ReportArtifacts:
     colorbars_values_output: Optional[str] = None
     windowed_colorbars_values: List[str] = field(default_factory=list)
     colorbars_eval_fails_csv: Optional[str] = None
+    colorbars_eval_thresholds_csv: Optional[str] = None
+    # SMPTE pass of an evaluation run with the "both" reference. Present only
+    # for such runs, and their presence is what switches the report to the
+    # detected/SMPTE toggle.
+    colorbars_eval_smpte_summary: Optional[str] = None
+    colorbars_eval_smpte_fails_csv: Optional[str] = None
+    colorbars_eval_smpte_thresholds_csv: Optional[str] = None
 
     # qct-parse — threshold profile and tag checks
     qctools_content_check_outputs: List[str] = field(default_factory=list)
@@ -448,6 +480,10 @@ _QCT_PARSE_SIDECARS = (
     ("qct-parse_colorbars_durations",     "qctools_colorbars_duration_output"),
     ("qct-parse_colorbars_eval_summary",  "qctools_bars_eval_check_output"),
     ("qct-parse_colorbars_eval_failures", "colorbars_eval_fails_csv"),
+    ("qct-parse_colorbars_eval_smpte_summary",  "colorbars_eval_smpte_summary"),
+    ("qct-parse_colorbars_eval_smpte_failures", "colorbars_eval_smpte_fails_csv"),
+    ("qct-parse_colorbars_eval_smpte_thresholds", "colorbars_eval_smpte_thresholds_csv"),
+    ("qct-parse_colorbars_eval_thresholds",      "colorbars_eval_thresholds_csv"),
     ("qct-parse_profile_summary",         "qctools_profile_check_output"),
     ("qct-parse_profile_failures",        "profile_fails_csv"),
     ("qct-parse_tags_summary.csv",        "tags_check_output"),
@@ -3372,15 +3408,17 @@ FAILURE_SECTION_JS = """
         newWindow.document.close();
     }
 
-    function toggleTable(tagId) {
+    function toggleTable(tagId, showText, hideText) {
+        showText = showText || 'Show all failures \u25BC';
+        hideText = hideText || 'Hide all failures \u25B2';
         var table = document.getElementById('table_' + tagId);
         var link = document.getElementById('link_' + tagId);
         if (table.style.display === 'none') {
             table.style.display = 'block';
-            link.textContent = 'Hide all failures ▲';
+            link.textContent = hideText;
         } else {
             table.style.display = 'none';
-            link.textContent = 'Show all failures ▼';
+            link.textContent = showText;
         }
     }
     </script>
@@ -3829,7 +3867,100 @@ def get_frame_analysis_black_segments(frame_outputs):
         return []
 
 
-def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_duration=None, frame_rate=None, analysis_periods=None, black_segments=None, bars_regions=None):
+# Tags whose threshold is a floor rather than a ceiling: a frame fails by
+# falling below it. Mirrors threshFinder()'s operator choice in qct_parse.
+EVAL_BARS_MINIMUM_TAGS = ('YMIN', 'UMIN', 'VMIN', 'SATMIN')
+
+
+def _format_threshold(threshold):
+    """Render a threshold the way qct-parse wrote it: BRNG keeps its decimals,
+    the 0-1023 level tags are whole numbers."""
+    return f"{threshold:g}" if threshold != int(threshold) else str(int(threshold))
+
+
+def _read_bars_thresholds_csv(thresholds_csv_path):
+    """Read a qct-parse bars-evaluation thresholds CSV.
+
+    Returns (description, {tag: threshold}); ({}, None) when the file is
+    absent or unreadable. The first row is prose describing where the
+    thresholds came from; the rest are tag,value pairs.
+    """
+    if not thresholds_csv_path or not os.path.isfile(thresholds_csv_path):
+        return None, {}
+    try:
+        with open(thresholds_csv_path, 'r', encoding='utf-8') as csvfile:
+            rows = [row for row in csv.reader(csvfile) if row]
+    except Exception as e:
+        logger.error(f"Error reading bars thresholds CSV {thresholds_csv_path}: {e}")
+        return None, {}
+    description = rows[0][0] if rows and len(rows[0]) == 1 else None
+    thresholds = {row[0]: row[1] for row in rows if len(row) == 2}
+    return description, thresholds
+
+
+def _make_bars_thresholds_table_html(thresholds, description, table_id):
+    """Expandable table of the thresholds the evaluation graded against."""
+    if not thresholds:
+        return "", ""
+    rows = []
+    for tag, value in thresholds.items():
+        direction = "Below" if tag in EVAL_BARS_MINIMUM_TAGS else "Above"
+        # Config-sourced SMPTE values arrive as floats ("940.0"); the level
+        # tags are whole numbers on the 0-1023 scale, BRNG keeps its decimals.
+        try:
+            value = _format_threshold(float(value))
+        except (TypeError, ValueError):
+            pass
+        rows.append(f"""
+        <tr>
+            <td>{tag}</td>
+            <td>{value}</td>
+            <td>{direction}</td>
+        </tr>
+        """)
+    link = (f'<a id="link_{table_id}" href="javascript:void(0);" '
+            f'onclick="toggleTable(&quot;{table_id}&quot;, &quot;Show thresholds &#9660;&quot;, &quot;Hide thresholds &#9650;&quot;)" '
+            f'style="color: var(--report-accent); text-decoration: underline;">Show thresholds &#9660;</a>')
+    table = f"""
+    <div id="table_{table_id}" style="display: none; margin-top: 10px; max-width: 520px;">
+        <p style="font-size: 13px; margin: 0 0 6px 0;">{description or 'Thresholds used by this evaluation:'}</p>
+        <table style="border-collapse: collapse; width: 100%; border: 1px solid var(--report-ink);">
+            <tr style="background-color: #fbe4eb;">
+                <th style="border: 1px solid var(--report-ink); padding: 8px;">Tag</th>
+                <th style="border: 1px solid var(--report-ink); padding: 8px;">Threshold</th>
+                <th style="border: 1px solid var(--report-ink); padding: 8px;">Fails when</th>
+            </tr>
+            {''.join(rows)}
+        </table>
+    </div>
+    """
+    return link, table
+
+
+def _timeline_axis_ticks(duration):
+    """Whole-second time ticks at a readable interval for a timeline x-axis.
+
+    Shared by every timeline on the page so they can be read against each
+    other without re-deriving the interval per chart.
+
+    Returns:
+        (tickvals, ticktext): positions in seconds and their H:MM:SS labels.
+    """
+    def _format_tick(seconds):
+        seconds = int(seconds)
+        hours, remainder = divmod(seconds, 3600)
+        minutes, secs = divmod(remainder, 60)
+        if hours > 0:
+            return f"{hours}:{minutes:02d}:{secs:02d}"
+        return f"{minutes}:{secs:02d}"
+
+    tick_interval = next((interval for interval in (10, 30, 60, 120, 300, 600, 1200, 1800, 3600)
+                          if duration / interval <= 10), 7200)
+    tickvals = list(range(0, int(duration) + 1, tick_interval))
+    return tickvals, [_format_tick(val) for val in tickvals]
+
+
+def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_duration=None, frame_rate=None, analysis_periods=None, black_segments=None, bars_regions=None, table_id='evalbars_all', thresholds_csv=None):
     """
     Build the failure-distribution timeline for the color bars evaluation.
 
@@ -3861,6 +3992,14 @@ def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_d
                                        from _parse_bars_durations_csv); drawn
                                        as plum bands with a saturated rule
                                        along the baseline.
+        table_id (str, optional): Element id stem of the expandable failures
+                                  table; must be unique when more than one
+                                  timeline is on the page.
+        thresholds_csv (str, optional): Path to the evaluation's thresholds
+                                        CSV; listed in a second expandable
+                                        table beside the failures one. Falls
+                                        back to the thresholds carried by the
+                                        failures themselves.
 
     Returns:
         str or None: HTML string containing the timeline, None if there is no data.
@@ -3995,19 +4134,7 @@ def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_d
                 xanchor='center', yanchor='bottom', sizing='contain', layer='above',
             ))
 
-    # Time axis ticks at a readable interval, without fractional seconds
-    def _format_tick(seconds):
-        seconds = int(seconds)
-        hours, remainder = divmod(seconds, 3600)
-        minutes, secs = divmod(remainder, 60)
-        if hours > 0:
-            return f"{hours}:{minutes:02d}:{secs:02d}"
-        return f"{minutes}:{secs:02d}"
-
-    tick_interval = next((interval for interval in (10, 30, 60, 120, 300, 600, 1200, 1800, 3600)
-                          if duration / interval <= 10), 7200)
-    tickvals = list(range(0, int(duration) + 1, tick_interval))
-    ticktext = [_format_tick(val) for val in tickvals]
+    tickvals, ticktext = _timeline_axis_ticks(duration)
 
     fig.update_layout(
         height=620,
@@ -4026,7 +4153,7 @@ def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_d
     config = {
         'toImageButtonOptions': {
             'format': 'png',
-            'filename': f'{video_id}_eval_bars_timeline',
+            'filename': f'{video_id}_{table_id.replace("evalbars_all", "eval_bars_timeline")}',
             'height': 620,
             'width': 1200,
             'scale': 1
@@ -4074,9 +4201,24 @@ def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_d
             <td>{threshold}</td>
         </tr>
         """)
+    # Thresholds every frame was graded against. Prefer the sidecar, which
+    # covers tags that never failed; older report dirs have no sidecar, so fall
+    # back to the thresholds carried by the failure rows themselves.
+    thresholds_description, thresholds = _read_bars_thresholds_csv(thresholds_csv)
+    if not thresholds:
+        thresholds = {tag: _format_threshold(threshold)
+                      for _, _, tag, _, threshold in rows}
+        thresholds = {tag: thresholds[tag] for tag in ordered_tags if tag in thresholds}
+    thresholds_link_html, thresholds_table_html = _make_bars_thresholds_table_html(
+        thresholds, thresholds_description, f"{table_id}_thresholds")
+
     full_table_html = f"""
-    <a id="link_evalbars_all" href="javascript:void(0);" onclick="toggleTable('evalbars_all')" style="color: var(--report-accent); text-decoration: underline; margin-top: 10px;">Show all failures ▼</a>
-    <div id="table_evalbars_all" style="display: none; margin-top: 10px; max-height: 400px; overflow-y: auto;">
+    <div style="display: flex; flex-wrap: wrap; gap: 24px; margin-top: 10px;">
+        <a id="link_{table_id}" href="javascript:void(0);" onclick="toggleTable('{table_id}')" style="color: var(--report-accent); text-decoration: underline;">Show all failures ▼</a>
+        {thresholds_link_html}
+    </div>
+    {thresholds_table_html}
+    <div id="table_{table_id}" style="display: none; margin-top: 10px; max-height: 400px; overflow-y: auto;">
         <table style="border-collapse: collapse; width: 100%; border: 1px solid var(--report-ink);">
             <tr style="background-color: #fbe4eb;">
                 <th style="border: 1px solid var(--report-ink); padding: 8px;">Timestamp</th>
@@ -4090,6 +4232,8 @@ def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_d
     """
 
     bin_label = f"{bin_width:.1f}".rstrip('0').rstrip('.')
+    thresholds_sentence = (" &mdash; the thresholds themselves are listed under <b>Show thresholds</b> below the chart."
+                           if thresholds else ".")
     periods_note = ""
     if analysis_periods:
         periods_note = " Shaded bands mark the periods sampled by frame analysis (signalstats/BRNG)."
@@ -4109,7 +4253,7 @@ def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_d
     <div style="background-color: var(--report-paper); padding: 10px; margin-top: 10px;">
         <p><b>Failure distribution over the video's duration</b></p>
         <p style="font-size: 13px;">Each line shows, per {bin_label}-second interval, the percentage of frames
-        whose value fell outside that tag's threshold.
+        whose value fell outside that tag's threshold{thresholds_sentence}
         Dotted lines mark the largest failure clusters; the thumbnail above each shows a representative frame
         (out-of-range areas highlighted in cyan).{brng_note}{periods_note}</p>
         {chart_html}
@@ -4118,6 +4262,100 @@ def make_eval_bars_timeline_html(failure_csv_path, video_id, peaks=None, video_d
     </div>
     """
     return timeline_html
+
+
+def _render_bars_evaluation_html(summary_csv, failures_csv, peaks, thumbs_dict, video_id,
+                                 timeline_context, check_cancelled=None, table_id='evalbars_all',
+                                 thresholds_csv=None):
+    """Render one color bars evaluation result set.
+
+    Returns (evaluation_html, timeline_html): the per-tag pies (or an
+    all-within-thresholds note) and the failure timeline. Either is None when
+    its inputs are absent; the timeline is None when nothing failed.
+    """
+    if not summary_csv:
+        return None, None
+    failure_summary = summarize_failures(failures_csv) if failures_csv else None
+    if failure_summary:
+        eval_html = make_profile_piecharts(summary_csv, thumbs_dict, failure_summary, video_id,
+                                           failure_csv_path=failures_csv,
+                                           check_cancelled=check_cancelled, failure_details=False)
+        timeline_html = make_eval_bars_timeline_html(failures_csv, video_id, peaks=peaks,
+                                                     table_id=table_id,
+                                                     thresholds_csv=thresholds_csv,
+                                                     **timeline_context)
+        return eval_html, timeline_html
+    eval_html = """
+    <div style="display:inline-block; margin-right: 10px; padding-bottom: 20px;">
+        <div style="display: flex; flex-direction: column; align-items: start; background-color: var(--report-paper); padding: 10px;">
+            <p><b>All QCTools values of the video file are within the median values of the color bars.</b></p>
+        </div>
+    </div>
+    """
+    return eval_html, None
+
+
+# The two result sets of a "both"-reference evaluation, in switch order.
+BARS_REFERENCE_PANELS = (
+    ('detected', "This tape's detected color bars"),
+    ('smpte', 'Standard SMPTE values'),
+)
+
+# Every switch on the page drives every panel, so the evaluation and timeline
+# sections always show the same reference. Plotly sizes a chart from its
+# container, which is zero-width while hidden, so charts are resized when
+# their panel is revealed.
+BARS_REFERENCE_SWITCH_JS = """
+    <script>
+    function showBarsReference(ref) {
+        document.querySelectorAll('.bars-ref-panel').forEach(function (panel) {
+            var active = panel.getAttribute('data-bars-ref') === ref;
+            panel.hidden = !active;
+            if (active && window.Plotly) {
+                panel.querySelectorAll('.js-plotly-plot').forEach(function (plot) {
+                    Plotly.Plots.resize(plot);
+                });
+            }
+        });
+        document.querySelectorAll('.bars-ref-btn').forEach(function (button) {
+            var active = button.getAttribute('data-bars-ref') === ref;
+            button.classList.toggle('active', active);
+            button.setAttribute('aria-pressed', active ? 'true' : 'false');
+        });
+    }
+    </script>
+    """
+
+
+def _bars_reference_switch_html(detected_html, smpte_html):
+    """Wrap detected- and SMPTE-graded results in panels behind a switch.
+
+    The detected panel is shown first. A missing side renders a short note
+    rather than an empty panel.
+    """
+    contents = {'detected': detected_html, 'smpte': smpte_html}
+    buttons = []
+    panels = []
+    for index, (ref, label) in enumerate(BARS_REFERENCE_PANELS):
+        active = index == 0
+        active_class = " active" if active else ""
+        pressed = "true" if active else "false"
+        hidden = "" if active else " hidden"
+        buttons.append(
+            f'<button type="button" class="bars-ref-btn{active_class}" '
+            f'data-bars-ref="{ref}" aria-pressed="{pressed}" '
+            f'onclick="showBarsReference(&quot;{ref}&quot;)">{label}</button>'
+        )
+        body = contents[ref] or '<p><i>No results for this reference.</i></p>'
+        panels.append(f'<div class="bars-ref-panel" data-bars-ref="{ref}"{hidden}>{body}</div>')
+    return f"""
+    {BARS_REFERENCE_SWITCH_JS}
+    <div class="bars-ref-switch" role="group" aria-label="Evaluation reference">
+        <span class="bars-ref-switch-label">Graded against:</span>
+        {''.join(buttons)}
+    </div>
+    {''.join(panels)}
+    """
 
 
 def _seconds_to_display(seconds):
@@ -4279,21 +4517,24 @@ BORDER_DETECTION_METHODOLOGY_HTML = """
             <ul style="margin: 4px 0 10px 20px; padding: 0;">
                 <li style="margin-bottom: 4px;"><strong>Sophisticated (quality-based)</strong> — samples 
                     multiple frames across the video, selecting high-quality frames with good contrast. 
-                    Analyzes luminance gradients at frame edges to find where active picture content begins. 
+                    Scans in from each frame edge for the first row or column brighter than a threshold to 
+                    find where active picture content begins, taking the median across frames. 
                     Also detects head switching artifacts in the bottom rows of the frame. If the
-                    average head switching artifact height exceeds the luminance-based bottom border crop,
-                    the bottom crop is expanded to match the artifact height.</li>
+                    average head switching artifact height exceeds the measured bottom border,
+                    the bottom crop is expanded to match the artifact height. A small padding is then 
+                    trimmed from every side.</li>
                 <li style="margin-bottom: 4px;"><strong>Simple (fixed)</strong> — applies a uniform border 
                     crop (default 25 pixels) on all sides. Used as a fallback when sophisticated detection 
                     is not possible.</li>
             </ul>
-            <p style="margin: 0 0 10px 0; font-weight: bold;">Iterative refinement:</p>
+            <p style="margin: 0 0 10px 0; font-weight: bold;">Iterative refinement (sophisticated mode only):</p>
             <p style="margin: 0 0 10px 0;">
                 After initial border detection, AV Spex runs BRNG (broadcast range) analysis on the detected 
                 active area. If a high percentage of violations occur at the edges of the active area 
                 (suggesting the borders were not cropped aggressively enough), the borders are automatically 
                 expanded and analysis is re-run. This iterative refinement continues until edge violations 
-                are reduced or a maximum number of iterations is reached. The goal is to separate true 
+                are reduced, a round makes no meaningful improvement, or a maximum number of iterations 
+                is reached. The goal is to separate true 
                 content violations from border artifacts.
             </p>
         </div>
@@ -4312,10 +4553,30 @@ SIGNALSTATS_METHODOLOGY_HTML = """
                 <strong>Signalstats analysis</strong> evaluates broadcast range compliance across sampled 
                 time periods of the video. It reads the FFmpeg 
                 <code style="background: #eee; padding: 1px 4px; border-radius: 2px;">signalstats</code> 
-                BRNG metric, which counts the number of pixels in each frame that fall outside the 
-                broadcast-legal range (luma &lt; 16 or &gt; 235, chroma &lt; 16 or &gt; 240 for 8-bit video) 
-                and divides by the total pixel count to produce a ratio from 0.0 to 1.0. AV Spex 
-                converts this ratio to a percentage for display.
+                BRNG metric, which counts the number of pixels in each frame that fall outside the
+                broadcast-legal range and divides by the total pixel count to produce a ratio from
+                0.0 to 1.0. AV Spex converts this ratio to a percentage for display.
+            </p>
+            <p style="margin: 0 0 6px 0; font-weight: bold;">What counts as a violation:</p>
+            <ul style="margin: 4px 0 10px 16px; padding: 0;">
+                <li style="margin-bottom: 4px;"><strong>Out-of-range pixel</strong> — luma below 64 or above 940,
+                    or chroma below 64 or above 960, in 10-bit code values (16–235 luma and 16–240 chroma
+                    in 8-bit video). FFmpeg applies the limits for the file's own bit depth, so values are
+                    always measured on the native scale.</li>
+                <li style="margin-bottom: 4px;"><strong>Flagged frame, full frame (QCTools)</strong> — at least
+                    one pixel anywhere in the frame is out of range. All-black frames are skipped first, because
+                    the sub-black noise in analog tape black would otherwise dominate the results. A frame is
+                    treated as black when, in 10-bit code values, its maximum luma (YMAX) is below 300, its
+                    90th-percentile luma (YHIGH) is below 115 and its 10th-percentile luma (YLOW) is below 97
+                    (75, 28.75 and 24.25 in 8-bit).</li>
+                <li style="margin-bottom: 4px;"><strong>Flagged frame, active area (FFprobe)</strong> — at least
+                    one pixel inside the active picture area is out of range. Both sources use the same rule,
+                    so their shares of flagged frames can be compared directly.</li>
+            </ul>
+            <p style="margin: 0 0 10px 0;">
+                Because a single out-of-range pixel is enough to flag a frame, the share of flagged frames
+                is not a severity measure by itself. Severity is based mainly on the <em>average BRNG</em>:
+                the average percentage of out-of-range pixels per analyzed frame.
             </p>
             <p style="margin: 0 0 6px 0; font-weight: bold;">Dual-source comparison:</p>
             <p style="margin: 0 0 6px 0;">
@@ -4331,24 +4592,45 @@ SIGNALSTATS_METHODOLOGY_HTML = """
                     picture area, excluding borders</li>
             </ol>
             <p style="margin: 0 0 10px 0;">
-                Comparing these two results reveals whether violations originate from border/blanking 
-                regions or from the actual picture content. If the full frame shows significantly more 
-                violations (>5%) than the active area, violations are classified as <em>border violations</em>. 
-                If the active area itself shows >10% violations, they are classified as <em>content violations</em> 
-                that may require correction.
+                Comparing these two results reveals whether violations originate from border/blanking
+                regions or from the actual picture content. Each period is classified by its share of
+                flagged frames:
             </p>
+            <ul style="margin: 4px 0 10px 16px; padding: 0;">
+                <li style="margin-bottom: 4px;"><strong>Border violations</strong> — the full frame has more than
+                    5 percentage points more flagged frames than the active area, and fewer than 30% of
+                    active-area frames are flagged</li>
+                <li style="margin-bottom: 4px;"><strong>Content violations</strong> — otherwise, more than 10% of
+                    active-area frames are flagged; these may require correction</li>
+                <li style="margin-bottom: 4px;"><strong>Minimal violations</strong> — neither of the above</li>
+            </ul>
+            <p style="margin: 0 0 6px 0; font-weight: bold;">Overall severity:</p>
+            <ul style="margin: 4px 0 10px 16px; padding: 0;">
+                <li style="margin-bottom: 4px;"><strong>With border detection</strong> — if more periods show
+                    border violations than content violations, the result is OK. Otherwise, if any period
+                    shows content violations, an average BRNG of 10% or more is an alert; below that it is
+                    a warning when more than 50% of frames are flagged, and informational otherwise. With no
+                    border or content periods, the result is OK.</li>
+                <li style="margin-bottom: 4px;"><strong>Without border detection</strong> (full frame, borders
+                    included) — an average BRNG of 10% or more is an alert. The result is OK when fewer than
+                    10% of frames are flagged and the worst frame has under 0.1% of pixels out of range, and
+                    informational when fewer than 50% are flagged and the worst frame is under 1%. Anything
+                    else is a warning.</li>
+            </ul>
             <p style="margin: 0 0 6px 0; font-weight: bold;">Period selection priority:</p>
             <ol style="margin: 4px 0 10px 20px; padding: 0;">
                 <li style="margin-bottom: 4px;"><strong>QCTools violation clusters</strong> — periods targeting 
                     timestamps where QCTools detected the highest concentrations of BRNG activity</li>
-                <li style="margin-bottom: 4px;"><strong>Border detection quality hints</strong> — timestamps 
-                    flagged during border detection as having interesting signal characteristics</li>
+                <li style="margin-bottom: 4px;"><strong>Border detection quality hints</strong> — well-exposed 
+                    frames found by sophisticated border detection, used only when there are enough of them 
+                    for every period</li>
                 <li style="margin-bottom: 4px;"><strong>Even distribution</strong> — fallback to evenly 
                     spaced periods across the video content (after color bars)</li>
             </ol>
             <p style="margin: 0; color: #777;">
-                The final diagnosis is based on active area results, which reflect the actual picture 
-                content that would be seen in playback or broadcast.
+                When border detection ran, the final diagnosis is based on active area results, which 
+                reflect the actual picture content that would be seen in playback or broadcast. Without 
+                border detection it is based on the full frame, borders included.
             </p>
         </div>
         """
@@ -4380,7 +4662,7 @@ BRNG_METHODOLOGY_HTML = """
                     (cropped to active area only)</li>
             </ol>
             <p style="margin: 0 0 6px 0;">
-                Frames are then compared pixel-by-pixel using three independent detection methods that vote 
+                Frames are then compared pixel-by-pixel using four independent detection methods that vote 
                 on whether a pixel is a genuine violation:
             </p>
             <ol style="margin: 4px 0 10px 20px; padding: 0;">
@@ -4390,10 +4672,13 @@ BRNG_METHODOLOGY_HTML = """
                     channel increases are proportional (characteristic of magenta overlay)</li>
                 <li style="margin-bottom: 4px;"><strong>HSV analysis</strong> — confirms magenta hue range with 
                     saturation increase in HSV color space</li>
+                <li style="margin-bottom: 4px;"><strong>Green-channel drop</strong> — catches already-bright 
+                    pixels, where the overlay shows up as a sharp drop in green rather than a rise in red and blue</li>
             </ol>
             <p style="margin: 0 0 10px 0;">
-                A pixel is classified as a violation only when <strong>at least 2 of 3 methods agree</strong>. 
-                Small isolated pixel clusters (fewer than 10 connected pixels) are filtered out as noise.
+                A pixel is classified as a violation only when <strong>at least 2 of 4 methods agree</strong>. 
+                Small isolated pixel clusters (fewer than 10 connected pixels, or 15 at the stricter 
+                sensitivity) are filtered out as noise.
             </p>
             <p style="margin: 0 0 6px 0; font-weight: bold;">Violation classification:</p>
             <p style="margin: 0 0 4px 0;">Each frame with detected violations is then classified by spatial pattern:</p>
@@ -4425,8 +4710,9 @@ BRNG_METHODOLOGY_HTML = """
                     frames examined by the differential detector. The sample count adapts based on signalstats 
                     findings for each period: periods with significant active-area violations receive denser 
                     sampling (~200 frames) while periods with negligible active-area BRNG use lighter sampling 
-                    (~30 frames). When no upstream data is available, the default behavior targets ~50–100 frames 
-                    per period.</li>
+                    (~30 frames). Otherwise every QCTools-flagged frame in the period is examined; if fewer than 50 
+                    map to it, evenly spaced frames are added (up to ~100–200 samples), and a tape with no 
+                    QCTools violations at all gets up to 500 evenly spaced samples per period.</li>
             </ul>
             <p style="margin: 0 0 6px 0; font-weight: bold;">Adaptive detection:</p>
             <p style="margin: 0 0 10px 0;">
@@ -4434,10 +4720,10 @@ BRNG_METHODOLOGY_HTML = """
                 signalstats diagnosis. Periods diagnosed as <em>border-dominated</em> or <em>minimal</em> 
                 use stricter detection thresholds (requiring stronger evidence to classify a pixel as a 
                 violation), reducing false positives in regions where actual content violations are unlikely. 
-                Periods with <em>content violations</em> use standard sensitivity. When head switching 
-                artifacts were detected during border detection, the bottom-edge analysis zone is 
-                automatically widened to classify head switching noise as edge artifacts rather than 
-                content violations.
+                Periods with <em>content violations</em> use standard sensitivity. Border detection already crops 
+                the average head switching height; when head switching reaches further than that crop, 
+                the bottom-edge analysis zone is widened to cover the remainder so the noise is 
+                classified as an edge artifact rather than a content violation.
             </p>
             <p style="margin: 0; color: #777;">
                 Because the differential detector compares two decoded video frames and runs multi-method 
@@ -4816,6 +5102,30 @@ def _render_frame_signalstats_html(frame_outputs) -> str:
             avg_brng = signalstats_data.get('avg_brng')
             used_qctools = signalstats_data.get('used_qctools', False)
 
+            # ── Sampling-coverage caveat ──
+            # The stats below aggregate only the periods that returned data, so
+            # say before the reader interprets them that the sample is short.
+            # Mirrors the BRNG 'partial_coverage' caveat. Absent counts mean a
+            # result from before the field existed — say nothing rather than
+            # guess at coverage.
+            periods_attempted = signalstats_data.get('periods_attempted')
+            periods_measured = signalstats_data.get('periods_measured')
+            if (periods_attempted and periods_measured is not None
+                    and periods_measured < periods_attempted):
+                coverage_note = signalstats_data.get('coverage_note') or (
+                    f"Only {periods_measured} of {periods_attempted} analysis "
+                    f"period(s) returned data."
+                )
+                html += f"""
+            <div style="background-color: var(--report-notice-bg); padding: 12px 16px; margin: 10px 0;
+                        border-left: 4px solid var(--report-gold); border-radius: 0 4px 4px 0;">
+                <p style="margin: 0; font-size: 14px;"><strong>&#x26A0; Partial coverage:</strong> {coverage_note}</p>
+                <p style="margin: 6px 0 0 0; font-size: 13px; color: #6b5a3e;">The periods that were
+                analyzed are valid, but this is not the full intended sample &mdash; the figures below
+                describe only the parts of the file that could be measured.</p>
+            </div>
+            """
+
             if violation_pct is not None or max_brng is not None:
                 # Label the heading with the region the stats were measured on
                 # ('' for legacy results that didn't record it)
@@ -5120,6 +5430,462 @@ def _render_frame_signalstats_html(frame_outputs) -> str:
     return html
 
 
+PERIOD_SELECTION_METHODOLOGY_HTML = """
+<div style="background-color: var(--report-notice-bg); padding: 12px 16px; margin: 10px 0;
+            border-left: 4px solid var(--report-gold); border-radius: 0 4px 4px 0;">
+    <p style="margin: 0 0 6px 0; font-size: 13px;">
+        Signalstats and BRNG analysis do not examine every frame &mdash; decoding a full tape twice is
+        prohibitively slow. They sample a few fixed-length <strong>analysis periods</strong>, so where
+        those periods land decides whether the figures below describe this tape's real problems or a
+        random slice of it.
+    </p>
+    <p style="margin: 0 0 6px 0; font-size: 13px;">
+        The tape is divided into 10-second bins and each bin is scored against the rest of
+        <em>this file</em> over three kinds of evidence: <strong>legality</strong> (pixels outside
+        broadcast range &mdash; BRNG, illegal chroma), <strong>impulsive</strong> damage (dropouts and
+        the deck's concealment of them &mdash; TOUT, VREP) and <strong>instability</strong>
+        (brightness deviating from neighbouring frames). Periods are then placed on the
+        highest-scoring bins, away from color bars, black segments and the end of the tape.
+    </p>
+    <p style="margin: 0; font-size: 13px; color: #6b5a3e;">
+        Because the score compares each bin against the rest of the same tape, it says
+        <em>where</em> this tape is worst, not <em>how bad</em> it is. A clean transfer still has a
+        highest-scoring bin. It is a targeting aid, not a quality grade.
+    </p>
+</div>
+"""
+
+
+# The period-selection chart's traces. Hue is the family of evidence, so the
+# three kinds read as groups; within a family the second metric is dotted.
+# Drawn from the eval-bars palette, which is already validated for CVD-safe
+# adjacent separation on the report's #f5e9e3 surface (BRNG keeps the teal it
+# has there), and clear of the two band washes — tan periods, gray
+# unanalyzable — so a line is never mistaken for a region.
+PERIOD_SCORE_COLOR = '#4d2b12'          # the composite: report ink
+
+
+@dataclass(frozen=True)
+class _PeriodMetricTrace:
+    """One scored metric as the chart draws it.
+
+    field: the series key holding the raw reading; its rank is at
+        f"{field}_rank", which is what gets plotted.
+    unit: how the raw reading is phrased in the hover. 'share' is a 0-1
+        fraction of pixels shown as a percentage; 'level' is a signal level on
+        the report's own scale.
+    """
+    field: str
+    label: str
+    color: str
+    dash: Optional[str]
+    unit: str
+
+
+# Order fixes the legend. Families run legality → impulsive → instability,
+# matching the weighting the score applies and the order the methodology note
+# introduces them in.
+PERIOD_METRIC_TRACES: Tuple[_PeriodMetricTrace, ...] = (
+    _PeriodMetricTrace('brng_mean', 'Out-of-range pixels (BRNG)', '#00969e', None, 'share'),
+    _PeriodMetricTrace('satmax_max', 'Illegal chroma (SATMAX)', '#00969e', 'dot', 'level'),
+    _PeriodMetricTrace('tout_mean', 'Dropouts (TOUT)', '#eb6834', None, 'share'),
+    _PeriodMetricTrace('vrep_mean', 'Concealment (VREP)', '#eb6834', 'dot', 'share'),
+    _PeriodMetricTrace('deflicker_absmax', 'Brightness instability (deflicker)',
+                       '#4a3aa7', None, 'level'),
+)
+
+
+def _make_period_score_chart_html(scoring, evidence, unanalyzable, video_id=None):
+    """Plot the per-bin score the periods were placed on, and the metrics behind it.
+
+    The color-bars timeline elsewhere on the page plots threshold failures
+    measured against this tape's own bars, which is *not* what places analysis
+    periods: since period selection became a composite score, three of its five
+    metrics (TOUT, VREP, deflicker) appear nowhere else in the report. A period
+    won by a sustained dropout burst therefore lands where every trace on that
+    timeline reads zero, and looks arbitrary. This chart shows the quantity
+    that actually chose them, broken down into the five metrics it is made of.
+
+    Every metric is plotted as its **within-file rank**, not its raw reading,
+    because rank is the only unit the five share: BRNG runs at tens of percent
+    of pixels on a noisy tape while TOUT peaks around 2%, and SATMAX is a
+    signal level rather than a share at all, so a common axis of physical
+    units would flatten everything but BRNG. The raw readings are in the
+    hover, where a physical value is useful and a scale conflict is not.
+
+    Args:
+        scoring (dict): frame_outputs['bin_scoring'] — needs its 'bins' series;
+                        reports written before that was recorded have none.
+        evidence (list): frame_outputs['period_evidence'], for the period bands
+                         and the bins credited inside them.
+        unanalyzable (list): frame_outputs['unanalyzable_regions'], shaded so
+                             the stretches selection refused are visible rather
+                             than just absent.
+        video_id (str, optional): stem of the chart's PNG export filename.
+
+    Returns:
+        str: HTML for the chart, or "" when there is no series to plot.
+    """
+    bins = (scoring or {}).get('bins') or []
+    if not bins:
+        return ""
+
+    try:
+        import plotly.graph_objs as go
+    except ImportError as e:
+        logger.critical(f"Error importing required libraries for graphs: {e}")
+        return ""
+
+    evidence = evidence or []
+    unanalyzable = unanalyzable or []
+
+    # Rows are read defensively: this is JSON off disk, and a malformed entry
+    # should cost its own point rather than the whole section.
+    points = []
+    for row in bins:
+        try:
+            start = float(row.get('start'))
+        except (TypeError, ValueError):
+            continue
+        points.append((start, row))
+    if not points:
+        return ""
+    points.sort(key=lambda item: item[0])
+
+    def _number(row, key):
+        value = row.get(key)
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    # Bin centers, so a point sits in the middle of the ten seconds it describes
+    centers = [start + PROFILE_BIN_SIZE / 2.0 for start, _ in points]
+    labels = [f"{_seconds_to_display(start)}&ndash;{_seconds_to_display(start + PROFILE_BIN_SIZE)}"
+              for start, _ in points]
+    scores = [_number(row, 'score') for _, row in points]
+    families = [(row.get('dominant_family') or 'nothing in particular') for _, row in points]
+
+    period_bands = []
+    for period in evidence:
+        try:
+            start = float(period.get('start'))
+            duration = float(period.get('duration') or 0)
+        except (TypeError, ValueError):
+            continue
+        period_bands.append((start, start + duration))
+
+    duration = max(
+        [centers[-1] + PROFILE_BIN_SIZE / 2.0]
+        + [end for _, end in period_bands]
+        + [float(region['end']) for region in unanalyzable
+           if isinstance(region.get('end'), (int, float))]
+    )
+
+    fig = go.Figure()
+    shapes = []
+
+    # Bands first so they sit under the traces.
+    for band_start, band_end in period_bands:
+        shapes.append(dict(
+            type='rect', xref='x', yref='paper',
+            x0=band_start, x1=min(band_end, duration), y0=0, y1=1,
+            fillcolor='rgba(166,124,82,0.30)', line=dict(color='#a67c52', width=2),
+            layer='below',
+        ))
+    for region in unanalyzable:
+        try:
+            region_start, region_end = float(region['start']), float(region['end'])
+        except (KeyError, TypeError, ValueError):
+            continue
+        shapes.append(dict(
+            type='rect', xref='x', yref='paper',
+            x0=region_start, x1=min(region_end, duration), y0=0, y1=1,
+            fillcolor='rgba(70,70,70,0.30)', line=dict(color='#555555', width=1),
+            layer='below',
+        ))
+
+    # The composite the periods were ranked on. Unsuitable bins carry None,
+    # which breaks the line over them rather than drawing a zero they never
+    # scored.
+    fig.add_trace(go.Scatter(
+        x=centers, y=scores, mode='lines', name='Composite score',
+        line=dict(width=3, color=PERIOD_SCORE_COLOR),
+        text=[f"{label} &middot; {family}" for label, family in zip(labels, families)],
+        hovertemplate='%{text}<br>score %{y:.2f}<extra></extra>',
+    ))
+
+    # The five metrics the composite is made of, each as its within-file rank.
+    # A metric the QCTools report never carried is skipped rather than drawn
+    # flat along zero, which would read as "measured, and clean".
+    for spec in PERIOD_METRIC_TRACES:
+        ranks = [_number(row, f"{spec.field}_rank") for _, row in points]
+        if all(value is None for value in ranks):
+            continue
+        raws = [_number(row, spec.field) for _, row in points]
+        if spec.unit == 'share':
+            raw_text = ["not measured" if value is None else f"{value * 100:.2f}% of pixels"
+                        for value in raws]
+        else:
+            raw_text = ["not measured" if value is None else f"level {value:.1f}"
+                        for value in raws]
+        fig.add_trace(go.Scatter(
+            x=centers, y=ranks, mode='lines', name=spec.label,
+            line=dict(width=1.5, color=spec.color, dash=spec.dash) if spec.dash
+            else dict(width=1.5, color=spec.color),
+            text=[f"{label}<br>{text}" for label, text in zip(labels, raw_text)],
+            hovertemplate='%{text}<br>rank %{y:.2f}<extra></extra>',
+        ))
+
+    # The bins that earned a period, marked on the composite they earned it
+    # with — same color as that curve, because that is the curve they are a
+    # reading of.
+    evidence_starts = {round(float(item['start']), 3)
+                       for period in evidence for item in (period.get('evidence') or [])
+                       if isinstance(item.get('start'), (int, float))}
+    if evidence_starts:
+        marked = [(center, score, label)
+                  for center, score, label, (start, _) in zip(centers, scores, labels, points)
+                  if round(start, 3) in evidence_starts and score is not None]
+        if marked:
+            fig.add_trace(go.Scatter(
+                x=[m[0] for m in marked], y=[m[1] for m in marked], mode='markers',
+                name='Earned a period',
+                marker=dict(symbol='diamond', size=10, color=PERIOD_SCORE_COLOR,
+                            line=dict(color='#f5e9e3', width=1.5)),
+                text=[m[2] for m in marked],
+                hovertemplate='%{text}<br>score %{y:.2f} &mdash; credited for a period<extra></extra>',
+            ))
+
+    # The level a bin has to clear to be named as evidence.
+    shapes.append(dict(
+        type='line', xref='paper', yref='y', x0=0, x1=1,
+        y0=EVIDENCE_MIN_SCORE, y1=EVIDENCE_MIN_SCORE,
+        line=dict(color=PERIOD_SCORE_COLOR, width=1, dash='dot'),
+    ))
+
+    tickvals, ticktext = _timeline_axis_ticks(duration)
+    fig.update_layout(
+        height=460,
+        margin=dict(l=70, r=40, t=30, b=80),
+        paper_bgcolor='#f5e9e3',
+        plot_bgcolor='#f5e9e3',
+        shapes=shapes,
+        legend=dict(orientation='h', yanchor='bottom', y=-0.36, x=0),
+        hovermode='x unified',
+        xaxis=dict(title='Time', range=[0, duration], tickvals=tickvals, ticktext=ticktext,
+                   gridcolor='#e3d5c9', zeroline=False),
+        yaxis=dict(title='Rank within this file (0 = quietest, 1 = worst)', range=[0, 1.05],
+                   gridcolor='#e3d5c9', zeroline=False),
+    )
+
+    config = {
+        'toImageButtonOptions': {
+            'format': 'png',
+            'filename': f'{video_id or "video"}_period_selection_timeline',
+            'height': 460,
+            'width': 1200,
+            'scale': 1
+        }
+    }
+    chart_html = fig.to_html(full_html=False, include_plotlyjs='cdn', config=config,
+                             default_width='100%')
+
+    # SATMAX's legal limit is quoted in whatever scale the report is on, so the
+    # hover's raw level can be read against something.
+    satmax_limit = (f"{SATURATION_LEGAL_LIMIT_8BIT * 4:.0f}"
+                    if (scoring or {}).get('bit_depth_10', True)
+                    else f"{SATURATION_LEGAL_LIMIT_8BIT:.0f}")
+
+    return f"""
+    <div style="background-color: var(--report-paper); padding: 10px; margin-top: 12px;">
+        <p style="margin: 0 0 4px 0;"><b>Where the tape scored worst, and why</b></p>
+        <p style="font-size: 13px; margin: 0 0 8px 0;">
+            The thick dark line is the composite score each 10-second bin was ranked on; the dotted
+            rule across it is the level a bin has to clear to be named as evidence, and diamonds mark
+            the bins credited with earning a period. Tan bands are the periods that were analyzed,
+            gray bands the regions ruled out as holding no analyzable picture &mdash; the lines break
+            over those, because they were never scored.
+        </p>
+        <p style="font-size: 13px; margin: 0 0 8px 0;">
+            The thin lines are the five measures the composite is made of, colored by the kind of
+            evidence they carry: <span style="color: #00969e;"><b>legality</b></span> (BRNG, the
+            share of pixels outside broadcast range; SATMAX, chroma above the legal limit of
+            {satmax_limit}), <span style="color: #eb6834;"><b>impulsive damage</b></span> (TOUT,
+            temporal outlier pixels &mdash; dropouts; VREP, repeated lines &mdash; the deck
+            concealing one) and <span style="color: #4a3aa7;"><b>instability</b></span> (deflicker,
+            brightness deviating from neighbouring frames). Each is plotted as its
+            <b>rank against the rest of this tape</b> rather than its raw reading, because the five
+            have no common scale &mdash; BRNG can run at tens of percent of pixels where TOUT peaks
+            near two, and SATMAX is a signal level rather than a share. Hover any point for the
+            actual measurement. A measure the QCTools report did not carry is left off the chart
+            entirely rather than drawn flat along zero.
+        </p>
+        {chart_html}
+    </div>
+    """
+
+
+def _render_frame_periods_html(frame_outputs, video_id=None) -> str:
+    """Period selection: why the analysis periods sit where they do.
+
+    Covers four things nothing else in the report shows: what evidence was
+    available in the QCTools sidecar, the per-bin score the periods were placed
+    on (charted, with the raw impulsive measures behind it), which bins earned
+    each period, and which stretches of tape were ruled out as holding no
+    analyzable picture.
+
+    Returns an empty string when none of those inputs are present, so a report
+    from before this was recorded renders exactly as it did.
+    """
+    scoring = frame_outputs.get('bin_scoring') or {}
+    evidence = frame_outputs.get('period_evidence') or []
+    unanalyzable = frame_outputs.get('unanalyzable_regions') or []
+    if not scoring and not evidence and not unanalyzable:
+        return ""
+
+    family_labels = {
+        'legality': 'out-of-range pixels',
+        'impulsive': 'dropouts / concealment',
+        'instability': 'brightness instability',
+    }
+
+    html = ("<h3 id='section-period-selection' style='color: var(--report-gold);'>"
+            "Analysis Period Selection</h3>")
+    html += PERIOD_SELECTION_METHODOLOGY_HTML
+
+    # ── What the QCTools report could measure ──
+    # Sidecars differ in which filters they carry, and a family that was never
+    # measured cannot have steered anything. Saying so is the difference
+    # between "no dropout evidence" and "dropouts were never looked for".
+    metrics = scoring.get('metrics') or []
+    if metrics:
+        html += f"""
+    <p style="margin: 10px 0 4px 0; font-size: 13px;">
+        <strong>Measures available in this QCTools report:</strong> {', '.join(sorted(metrics))}
+    </p>
+    """
+
+    # ── The curve the periods were placed on ──
+    # Ahead of the table, because it is the answer to the question the table
+    # only names: a period reads as arbitrary until you can see that it sits
+    # on the tape's highest-scoring bins.
+    html += _make_period_score_chart_html(scoring, evidence, unanalyzable, video_id)
+
+    # ── What earned each period ──
+    # A period is six bins wide and the evidence is often one of them, so
+    # without this the reader has to scrub a minute of tape to find the
+    # seconds that mattered.
+    if evidence:
+        html += """
+    <p style="font-weight: bold; margin: 14px 0 6px 0; color: var(--report-ink);">
+        What each period was chosen for
+    </p>
+    <table style="border-collapse: collapse; width: 100%; max-width: 860px; font-size: 13px;">
+        <tr style="background-color: #fbe4eb;">
+            <th style="border: 1px solid #4d2b12; padding: 6px 10px; text-align: left;">Period</th>
+            <th style="border: 1px solid #4d2b12; padding: 6px 10px; text-align: left;">Moments that scored highest, in order</th>
+        </tr>
+    """
+        for index, period in enumerate(evidence, start=1):
+            start = period.get('start')
+            duration = period.get('duration') or 0
+            if start is None:
+                continue
+            span = f"{_seconds_to_display(start)} &ndash; {_seconds_to_display(start + duration)}"
+            bins = period.get('evidence') or []
+            if bins:
+                # Listed in full rather than truncated: a period holds one bin
+                # per ten seconds of its length, so the default 30s period can
+                # only ever have three (a 120s one twelve), and a "+2 more" that cannot be expanded
+                # is worse than the two extra rows it saves.
+                parts = []
+                for item in bins:
+                    bin_start = item.get('start')
+                    if bin_start is None:
+                        continue
+                    family = family_labels.get(item.get('dominant_family'),
+                                               item.get('dominant_family') or 'mixed evidence')
+                    parts.append(
+                        f"<div style='margin: 2px 0;'>{_seconds_to_display(bin_start)}"
+                        f"&ndash;{_seconds_to_display(bin_start + 10)} &mdash; {family}</div>")
+                detail = "".join(parts)
+            else:
+                # Not a gap in the data: the period was placed somewhere
+                # nothing stood out, which is the honest description of a
+                # short tape whose content is mostly bars and black.
+                detail = ("<span style='color: #666; font-style: italic;'>Nothing in this period "
+                          "stood out against the rest of the tape &mdash; it was sampled to cover "
+                          "the file, not because of a specific finding.</span>")
+            html += f"""
+        <tr>
+            <td style="border: 1px solid #4d2b12; padding: 6px 10px; white-space: nowrap;">
+                <strong>Period {index}</strong><br>{span}
+            </td>
+            <td style="border: 1px solid #4d2b12; padding: 6px 10px;">{detail}</td>
+        </tr>
+    """
+        html += "</table>"
+
+    # ── Regions ruled out ──
+    if unanalyzable:
+        total = sum((region.get('duration') or 0) for region in unanalyzable)
+        html += f"""
+    <p style="font-weight: bold; margin: 16px 0 6px 0; color: var(--report-ink);">
+        Regions excluded as unanalyzable ({len(unanalyzable)}, {total:.0f}s total)
+    </p>
+    <p style="margin: 0 0 6px 0; font-size: 13px;">
+        Most entries here are the tape's black leader or tail and its color bars, listed at the
+        10-second resolution period placement works in &mdash; black frames are classified from the
+        signalstats <code>YMAX</code>, <code>YHIGH</code> and <code>YLOW</code> tags. The rest are
+        stretches ruled out on their own measurements:
+    </p>
+    <ul style="margin: 0 0 8px 20px; padding: 0; font-size: 13px;">
+        <li style="margin: 2px 0;"><strong>Signal loss</strong> &mdash; average luma below broadcast
+            black (signalstats <code>YAVG</code>): the deck emitting a flat sub-black frame where
+            the tape gave it nothing.</li>
+        <li style="margin: 2px 0;"><strong>Static or hash</strong> &mdash; frames uncorrelated with
+            the one before them (<code>ssim.All</code>, signalstats <code>YDIF</code>).</li>
+        <li style="margin: 2px 0;"><strong>Concealment</strong> &mdash; long runs of repeated fields
+            or repeated lines (<code>idet.repeated.current_frame</code>, signalstats
+            <code>VREP</code>).</li>
+        <li style="margin: 2px 0;"><strong>Flat field</strong> &mdash; almost no picture detail
+            (<code>entropy.normalized_entropy.normal.Y</code>).</li>
+    </ul>
+    <p style="margin: 0 0 6px 0; font-size: 13px;">
+        Signal loss is conclusive on its own; the other three have to agree in pairs before a
+        stretch is excluded, so a cut-heavy passage or a noisy transfer is not thrown away on one
+        measurement. All of them are kept out of period placement because they measure as severely
+        out of range &mdash; a flat sub-black frame reads as almost every pixel illegal &mdash; and
+        would otherwise attract every period on the tape.
+    </p>
+    <table style="border-collapse: collapse; width: 100%; max-width: 860px; font-size: 13px;">
+        <tr style="background-color: #fbe4eb;">
+            <th style="border: 1px solid #4d2b12; padding: 6px 10px; text-align: left;">Span</th>
+            <th style="border: 1px solid #4d2b12; padding: 6px 10px; text-align: left;">Why</th>
+        </tr>
+    """
+        # Also listed in full, for the same reason: contiguous bins are merged
+        # into one span before they get here, so the count stays small.
+        for region in unanalyzable:
+            start, end = region.get('start'), region.get('end')
+            if start is None or end is None:
+                continue
+            reasons = region.get('reasons') or []
+            why = "; ".join(reasons) if reasons else "no analyzable picture"
+            html += f"""
+        <tr>
+            <td style="border: 1px solid #4d2b12; padding: 6px 10px; white-space: nowrap;">
+                {_seconds_to_display(start)} &ndash; {_seconds_to_display(end)}
+            </td>
+            <td style="border: 1px solid #4d2b12; padding: 6px 10px;">{why}</td>
+        </tr>
+    """
+        html += "</table>"
+
+    return html
+
+
 def _render_frame_brng_html(frame_outputs) -> str:
     """BRNG: broadcast-range violation counts per analysis period, with the
     severity assessment and recommendations.
@@ -5127,6 +5893,26 @@ def _render_frame_brng_html(frame_outputs) -> str:
     Returns an empty string when this section has no inputs.
     """
     html = ""
+    if not frame_outputs.get('brng_analysis') and frame_outputs.get('brng_unavailable_reason'):
+        # BRNG ran and measured nothing. Omitting the section entirely (the old
+        # behaviour) is indistinguishable from the check being switched off, and
+        # an absent section is the one thing a reader cannot question. Keep the
+        # anchor identical to the measured case so the TOC entry is the same.
+        reason = frame_outputs['brng_unavailable_reason']
+        html += "<h3 id='section-brng-analysis' style='color: var(--report-gold);'>BRNG Violation Analysis</h3>"
+        html += BRNG_METHODOLOGY_HTML
+        html += f"""
+        <div style="background-color: #fff3cd; padding: 12px 16px; margin: 10px 0;
+                    border-left: 4px solid #bf971b; border-radius: 0 4px 4px 0;">
+            <p style="margin: 0; font-size: 14px;"><strong>&#x26A0; Could not run:</strong> {reason}.</p>
+            <p style="margin: 8px 0 0 0; font-size: 13px;">No frames were examined, so this is
+            <strong>not</strong> a clean result &mdash; no conclusion can be drawn about
+            out-of-range values in this file. Everything else in this report stands;
+            only broadcast-range analysis is missing.</p>
+        </div>
+        """
+        return html
+
     if frame_outputs['brng_analysis']:
         html += "<h3 id='section-brng-analysis' style='color: var(--report-gold);'>BRNG Violation Analysis</h3>"
 
@@ -5670,6 +6456,11 @@ def generate_frame_analysis_html(frame_outputs, video_id):
         frame_outputs.get('border_visualization') or
         frame_outputs.get('border_data') or
         frame_outputs.get('brng_analysis') or
+        frame_outputs.get('period_evidence') or
+        frame_outputs.get('unanalyzable_regions') or
+        # A BRNG run that could not measure anything is a finding, so it keeps
+        # the wrapper alive even when it is the only thing to report.
+        frame_outputs.get('brng_unavailable_reason') or
         frame_outputs.get('signalstats_analysis')
     )
     if not has_content:
@@ -5682,6 +6473,9 @@ def generate_frame_analysis_html(frame_outputs, video_id):
 
     # Border Detection Section
     html += _render_frame_border_html(frame_outputs)
+    # Period selection comes before the two analyses that consume the periods,
+    # so the reader knows what was sampled before reading what it measured.
+    html += _render_frame_periods_html(frame_outputs, video_id)
     html += _render_frame_signalstats_html(frame_outputs)
     html += _render_frame_brng_html(frame_outputs)
     html += _render_frame_thumbs_html(frame_outputs)
@@ -6579,6 +7373,42 @@ def _report_head_html(video_id, logo_image_path, color_strip_store, waveform_sto
                 color: #fcfdff;
                 outline: none;
             }}
+            .bars-ref-switch {{
+                display: flex;
+                flex-wrap: wrap;
+                align-items: center;
+                gap: 6px;
+                margin: 10px 0;
+            }}
+            .bars-ref-switch-label {{
+                color: var(--report-ink);
+                font-weight: bold;
+                margin-right: 4px;
+            }}
+            .bars-ref-btn {{
+                font: inherit;
+                font-size: 14px;
+                padding: 6px 14px;
+                border: 1px solid var(--report-accent);
+                border-radius: 16px;
+                background-color: var(--report-panel);
+                color: var(--report-accent);
+                cursor: pointer;
+            }}
+            .bars-ref-btn:hover {{
+                background-color: var(--report-paper);
+            }}
+            .bars-ref-btn.active {{
+                background-color: var(--report-accent);
+                color: #ffffff;
+            }}
+            .bars-ref-btn:focus-visible {{
+                outline: 2px solid var(--report-ink);
+                outline-offset: 2px;
+            }}
+            .bars-ref-panel[hidden] {{
+                display: none !important;
+            }}
         </style>
         <script>
         function openImage(imgData, caption) {{
@@ -6589,15 +7419,17 @@ def _report_head_html(video_id, logo_image_path, color_strip_store, waveform_sto
             newWindow.document.close();
         }}
 
-        function toggleTable(tagId) {{
+        function toggleTable(tagId, showText, hideText) {{
+            showText = showText || 'Show all failures ▼';
+            hideText = hideText || 'Hide all failures ▲';
             var table = document.getElementById('table_' + tagId);
             var link = document.getElementById('link_' + tagId);
             if (table.style.display === 'none') {{
                 table.style.display = 'block';
-                link.textContent = 'Hide all failures ▲';
+                link.textContent = hideText;
             }} else {{
                 table.style.display = 'none';
-                link.textContent = 'Show all failures ▼';
+                link.textContent = showText;
             }}
         }}
 
@@ -6674,6 +7506,7 @@ class ReportInputs:
     and, for a few paths, by the section list itself."""
     artifacts: Any = None
     colorbars_peaks: Any = None
+    colorbars_smpte_peaks: Any = None
     eval_video_duration: Any = None
     eval_video_fps: Any = None
     exiftool_output_path: Any = None
@@ -6727,6 +7560,7 @@ class ReportPieces:
     mi_file_filename: Any = None
     mkvalidator_html: Any = None
     no_qct_parse_files: Any = None
+    both_bars_references: Any = None
     profile_summary_html: Any = None
     smpte_reference: Any = None
     tags_summary_html: Any = None
@@ -6789,6 +7623,16 @@ def _gather_report_inputs(video_path, report_directory, destination_directory,
         for peak in colorbars_peaks:
             thumbnail_tasks.append((peak['tag'], peak['tagValue'], peak['timestamp'], 'color_bars_evaluation'))
 
+    # SMPTE pass of a "both"-reference evaluation gets its own peaks
+    colorbars_smpte_peaks = []
+    if artifacts.colorbars_eval_smpte_fails_csv and video_path:
+        if eval_video_duration is None:
+            eval_video_duration = _get_video_duration(video_path)
+            eval_video_fps = _get_video_frame_rate(video_path)
+        colorbars_smpte_peaks = select_failure_peaks(artifacts.colorbars_eval_smpte_fails_csv, duration=eval_video_duration)
+        for peak in colorbars_smpte_peaks:
+            thumbnail_tasks.append((peak['tag'], peak['tagValue'], peak['timestamp'], 'color_bars_evaluation_smpte'))
+
     total_thumbs = len(thumbnail_tasks)
     for i, (tag, tagValue, timestamp, profile_name) in enumerate(thumbnail_tasks):
         thumb_path = generate_thumbnail_for_failure(
@@ -6806,7 +7650,7 @@ def _gather_report_inputs(video_path, report_directory, destination_directory,
             signals.report_progress.emit(1 + int(9 * (i + 1) / total_thumbs))
 
     # Attach the generated thumbnail paths to their peaks for the eval-bars timeline
-    for peak in colorbars_peaks:
+    for peak in colorbars_peaks + colorbars_smpte_peaks:
         thumb_key = f"Failed frame \n\n{peak['tag']}:{peak['tagValue']}\n\n{peak['timestamp']}"
         if thumb_key in generated_thumbs:
             peak['thumb_path'] = generated_thumbs[thumb_key][0]
@@ -6847,6 +7691,7 @@ def _gather_report_inputs(video_path, report_directory, destination_directory,
     return ReportInputs(
         artifacts=artifacts,
         colorbars_peaks=colorbars_peaks,
+        colorbars_smpte_peaks=colorbars_smpte_peaks,
         eval_video_duration=eval_video_duration,
         eval_video_fps=eval_video_fps,
         exiftool_output_path=exiftool_output_path,
@@ -6894,12 +7739,6 @@ def _build_section_html(inputs, video_id, video_path, report_directory,
     else:
         failureInfoSummary_tags = None
 
-    if inputs.artifacts.colorbars_eval_fails_csv:
-        colorbars_eval_fails_csv_path = os.path.join(report_directory, inputs.artifacts.colorbars_eval_fails_csv)
-        failureInfoSummary_colorbars = summarize_failures(colorbars_eval_fails_csv_path)
-    else:
-        failureInfoSummary_colorbars = None
-
     if check_cancelled():
         return
 
@@ -6909,34 +7748,41 @@ def _build_section_html(inputs, video_id, video_path, report_directory,
     qct_duration_runs = _parse_bars_durations_csv(inputs.artifacts.qctools_colorbars_duration_output)
     bars_regions = [(bars_start, bars_end) for _, bars_start, bars_end in qct_duration_runs]
 
-    # Create graphs for all existing csv files (existing code...)
-    # The timeline renders as its own titled section below the evaluation pies,
-    # so it stays a separate variable rather than being folded into
-    # colorbars_eval_html.
-    colorbars_timeline_html = None
-    if inputs.artifacts.qctools_bars_eval_check_output and failureInfoSummary_colorbars:
-        # Pies summarize the per-tag failure share; the timeline below them
-        # carries the failure specifics (distribution + peak thumbnails)
-        colorbars_eval_html = make_profile_piecharts(inputs.artifacts.qctools_bars_eval_check_output, thumbs_dict, failureInfoSummary_colorbars, video_id, failure_csv_path=colorbars_eval_fails_csv_path, check_cancelled=check_cancelled, failure_details=False)
-        colorbars_timeline_html = make_eval_bars_timeline_html(
-            colorbars_eval_fails_csv_path, video_id, peaks=inputs.colorbars_peaks,
-            video_duration=inputs.eval_video_duration, frame_rate=inputs.eval_video_fps,
-            analysis_periods=get_frame_analysis_periods(inputs.frame_outputs),
-            black_segments=get_frame_analysis_black_segments(inputs.frame_outputs),
-            bars_regions=bars_regions)
-    elif inputs.artifacts.qctools_bars_eval_check_output and failureInfoSummary_colorbars is None:
-       color_bars_segment = f"""
-        <div style="display: flex; flex-direction: column; align-items: start; background-color: var(--report-paper); padding: 10px;"> 
-            <p><b>All QCTools values of the video file are within the median values of the color bars.</b></p>
-        </div>
-        """
-       colorbars_eval_html = f"""
-        <div style="display:inline-block; margin-right: 10px; padding-bottom: 20px;">  
-            {color_bars_segment}
-        </div>
-        """
-    else:
-        colorbars_eval_html = None
+    # Pies summarize the per-tag failure share; the timeline renders as its
+    # own titled section below them and carries the failure specifics
+    # (distribution + peak thumbnails), so the two stay separate fragments.
+    timeline_context = dict(
+        video_duration=inputs.eval_video_duration, frame_rate=inputs.eval_video_fps,
+        analysis_periods=get_frame_analysis_periods(inputs.frame_outputs),
+        black_segments=get_frame_analysis_black_segments(inputs.frame_outputs),
+        bars_regions=bars_regions,
+    )
+    colorbars_eval_html, colorbars_timeline_html = _render_bars_evaluation_html(
+        inputs.artifacts.qctools_bars_eval_check_output, inputs.artifacts.colorbars_eval_fails_csv,
+        inputs.colorbars_peaks, thumbs_dict, video_id, timeline_context,
+        check_cancelled=check_cancelled,
+        thresholds_csv=inputs.artifacts.colorbars_eval_thresholds_csv)
+
+    # "both" reference: a second, SMPTE-graded result set. Both sets render
+    # into panels behind one detected/SMPTE switch, shared by the evaluation
+    # and timeline sections so they always show the same reference.
+    both_references = bool(inputs.artifacts.colorbars_eval_smpte_summary)
+    if both_references:
+        smpte_eval_html, smpte_timeline_html = _render_bars_evaluation_html(
+            inputs.artifacts.colorbars_eval_smpte_summary, inputs.artifacts.colorbars_eval_smpte_fails_csv,
+            inputs.colorbars_smpte_peaks, thumbs_dict, video_id, timeline_context,
+            check_cancelled=check_cancelled, table_id='evalbars_smpte_all',
+            thresholds_csv=inputs.artifacts.colorbars_eval_smpte_thresholds_csv)
+        if colorbars_eval_html or smpte_eval_html:
+            colorbars_eval_html = _bars_reference_switch_html(colorbars_eval_html, smpte_eval_html)
+        if colorbars_timeline_html or smpte_timeline_html:
+            no_failures = '<p style="background-color: var(--report-paper); padding: 10px;"><b>No frames fell outside the {} thresholds.</b></p>'
+            colorbars_timeline_html = _bars_reference_switch_html(
+                colorbars_timeline_html or no_failures.format("detected color bars"),
+                smpte_timeline_html or no_failures.format("SMPTE color bars"))
+
+    if check_cancelled():
+        return
 
     # How the color-bars evaluation graded content, which drives the section
     # headers and whether an info box accompanies the graph:
@@ -6975,7 +7821,7 @@ def _build_section_html(inputs, video_id, video_path, report_directory,
                 # Real detected-vs-SMPTE comparison CSV -> render the graph.
                 graph_html = make_color_bars_graphs(video_id, inputs.artifacts.qctools_colorbars_duration_output, inputs.artifacts.colorbars_values_output, thumbs_dict)
                 evaluate_reference = config_mgr.get_config('checks', ChecksConfig).tools.qct_parse.evaluateBarsReference
-                if evaluate_reference == 'smpte':
+                if evaluate_reference == 'smpte' and not both_references:
                     # SMPTE was the evaluation reference but bars were detected:
                     # show the informational graph with the "SMPTE selected" box
                     # below it.
@@ -7191,6 +8037,7 @@ def _build_section_html(inputs, video_id, video_path, report_directory,
         mi_file_filename=mi_file_filename,
         mkvalidator_html=mkvalidator_html,
         no_qct_parse_files=no_qct_parse_files,
+        both_bars_references=both_references,
         profile_summary_html=profile_summary_html,
         smpte_reference=smpte_reference,
         tags_summary_html=tags_summary_html,
@@ -7267,6 +8114,7 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
     if pieces.frame_analysis_html:
         frame_subsections = [
             ('section-border-detection', 'Border Detection'),
+            ('section-period-selection', 'Analysis Period Selection'),
             ('section-signalstats', 'Signalstats Analysis'),
             ('section-brng-analysis', 'BRNG Violation Analysis'),
         ]
@@ -7355,7 +8203,9 @@ def write_html_report(video_id, report_directory, destination_directory, html_re
         add_section(block, ('section-clams-detection', 'CLAMS Detection'))
 
     if pieces.colorbars_eval_html:
-        if pieces.smpte_reference:
+        if pieces.both_bars_references:
+            eval_header = "Values relative to colorbar thresholds"
+        elif pieces.smpte_reference:
             eval_header = "Values relative to SMPTE colorbar's thresholds"
         else:
             eval_header = "Values relative to colorbar's thresholds"

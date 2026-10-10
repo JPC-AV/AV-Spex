@@ -283,7 +283,7 @@ jobs:
         body: |
           ## AV-Spex v${{ env.VERSION }}
           
-          **Architecture:** ${{ matrix.arch }}
+          **Supported Macs:** Apple Silicon (arm64) and Intel (x86_64), macOS 13 (Ventura) or later
           
           **Build Information:**
           - Built from commit: ${{ github.event.workflow_run.head_sha }}
@@ -291,12 +291,18 @@ jobs:
           - Signed and notarized: ✅
           
           ### Installation
-          1. Download the appropriate DMG file for your Mac:
-             - **Intel Macs**: `AV-Spex-${{ env.VERSION }}-x86_64.dmg`
+          
+          **DMG**
+          1. Download the DMG that matches your Mac:
              - **Apple Silicon Macs (M1/M2/M3/M4)**: `AV-Spex-${{ env.VERSION }}-arm64.dmg`
+             - **Intel Macs**: `AV-Spex-${{ env.VERSION }}-x86_64.dmg`
           2. Open the DMG and drag AV-Spex.app to your Applications folder
           
-          > **Note:** Intel builds will work on Apple Silicon via Rosetta 2, but native ARM64 builds offer better performance.
+          **Homebrew** (works on both Apple Silicon and Intel)
+          ```
+          brew tap JPC-AV/AV-Spex
+          brew install av-spex
+          ```
 
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -41,6 +41,27 @@ def detect_hash_algorithm(hash_string):
     else:
         return None
 
+def _ffprobe_json(args, video_path):
+    """Run ffprobe with JSON output; return the parsed object, or {} on any failure.
+
+    JSON, not csv: csv output appends a trailing separator when the stream
+    carries side data (e.g. an MP4 rotation display matrix), turning "30" into
+    "30," and breaking a plain int()/float() parse. No timeout here: the
+    packet-count fallback reads the whole file.
+    """
+    command = ['ffprobe', '-v', 'error', *args, '-of', 'json', video_path]
+    result = subprocess.run(command, stdout=subprocess.PIPE, text=True)
+    try:
+        return json.loads(result.stdout) or {}
+    except (ValueError, TypeError):
+        return {}
+
+
+def _first_stream(data):
+    streams = data.get('streams') or []
+    return streams[0] if streams else {}
+
+
 def get_total_frames(video_path):
     """
     Get the total number of video frames using the fastest available method.
@@ -48,52 +69,24 @@ def get_total_frames(video_path):
     and only uses count_packets as a last resort.
     """
     # Method 1: Try to get nb_frames metadata directly
-    metadata_cmd = [
-        'ffprobe',
-        '-v', 'error',
-        '-select_streams', 'v:0',
-        '-show_entries', 'stream=nb_frames',
-        '-of', 'csv=p=0',
-        video_path
-    ]
-    
-    result = subprocess.run(metadata_cmd, stdout=subprocess.PIPE, text=True)
-    frames = result.stdout.strip()
-    
-    # If frames metadata exists and is valid
-    if frames and frames.isdigit() and int(frames) > 0:
+    stream = _first_stream(_ffprobe_json(
+        ['-select_streams', 'v:0', '-show_entries', 'stream=nb_frames'], video_path))
+    frames = str(stream.get('nb_frames', '')).strip()
+    if frames.isdigit() and int(frames) > 0:
         return int(frames)
-    
+
     # Method 2: Calculate using duration and framerate
-    duration_cmd = [
-        'ffprobe',
-        '-v', 'error',
-        '-select_streams', 'v:0',
-        '-show_entries', 'stream=duration,r_frame_rate',
-        '-of', 'json',
-        video_path
-    ]
-    
-    result = subprocess.run(duration_cmd, stdout=subprocess.PIPE, text=True)
+    stream = _first_stream(_ffprobe_json(
+        ['-select_streams', 'v:0', '-show_entries', 'stream=duration,r_frame_rate'], video_path))
     try:
-        data = json.loads(result.stdout)
-        stream = data['streams'][0]
-        
         # Some files might not have duration in the stream info
         if 'duration' in stream:
             duration = float(stream['duration'])
         else:
             # Fallback to format duration
-            format_cmd = [
-                'ffprobe',
-                '-v', 'error',
-                '-show_entries', 'format=duration',
-                '-of', 'csv=p=0',
-                video_path
-            ]
-            format_result = subprocess.run(format_cmd, stdout=subprocess.PIPE, text=True)
-            duration = float(format_result.stdout.strip())
-        
+            format_data = _ffprobe_json(['-show_entries', 'format=duration'], video_path)
+            duration = float((format_data.get('format') or {})['duration'])
+
         # Parse framerate (often in the format "num/den")
         framerate_str = stream['r_frame_rate']
         if '/' in framerate_str:
@@ -101,29 +94,20 @@ def get_total_frames(video_path):
             framerate = num / den
         else:
             framerate = float(framerate_str)
-        
+
         # Calculate frame count
         if duration > 0 and framerate > 0:
             return int(duration * framerate)
-    except (json.JSONDecodeError, KeyError, ValueError, ZeroDivisionError):
+    except (KeyError, ValueError, TypeError, ZeroDivisionError):
         pass  # Fall through to the slow method if calculation fails
-    
+
     # Method 3 (slowest): Fall back to counting packets
-    count_cmd = [
-        'ffprobe',
-        '-v', 'error',
-        '-threads', '0',
-        '-select_streams', 'v:0',
-        '-count_packets',
-        '-show_entries', 'stream=nb_read_packets',
-        '-of', 'csv=p=0',
-        video_path
-    ]
-    result = subprocess.run(count_cmd, stdout=subprocess.PIPE)
+    stream = _first_stream(_ffprobe_json(
+        ['-threads', '0', '-select_streams', 'v:0', '-count_packets',
+         '-show_entries', 'stream=nb_read_packets'], video_path))
     try:
-        total_frames = int(result.stdout.decode().strip())
-        return total_frames
-    except (ValueError, UnicodeDecodeError):
+        return int(stream['nb_read_packets'])
+    except (KeyError, ValueError, TypeError):
         # If all methods fail, return a reasonable default
         return 1000  # A reasonable guess to allow progress to be shown
 

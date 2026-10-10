@@ -14,16 +14,28 @@ JPC_AV_videoQC
     ├── checks
     │   ├── __init__.py
     │   ├── __pycache__
+    │   ├── audio_stream_stats.py
+    │   ├── bars_detection_clams.py
+    │   ├── bin_scoring.py
+    │   ├── bin_suitability.py
+    │   ├── dropped_sample_detection.py
+    │   ├── duplicate_frame_detection.py
     │   ├── embed_fixity.py
     │   ├── exiftool_check.py
     │   ├── ffprobe_check.py
     │   ├── fixity_check.py
     │   ├── frame_analysis.py
+    │   ├── frame_analysis_report.py
+    │   ├── frame_geometry.py
     │   ├── make_access.py
     │   ├── mediaconch_check.py
     │   ├── mediainfo_check.py
     │   ├── mediatrace_check.py
-    │   └── qct_parse.py
+    │   ├── mkvalidator_check.py
+    │   ├── qct_parse.py
+    │   ├── qctools_bin_profile.py
+    │   ├── tone_detection_clams.py
+    │   └── tone_leak_check.py
     ├── config
     │   ├── checks_config.json
     │   ├── exiftool_config.json

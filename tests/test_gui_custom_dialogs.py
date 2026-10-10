@@ -780,3 +780,181 @@ def test_theme_switch_leaves_no_stray_top_level_banner(qapp, silent_dialogs):
             dialog.close()
     finally:
         main_window.close()
+
+
+# ---------------------------------------------------------------------------
+# Checks-profile dialog: analysis period fields
+#
+# The dialog used to build FrameAnalysisConfig with signalstats_duration /
+# signalstats_periods, fields renamed to analysis_period_* — so Save raised
+# TypeError and "Load from Current Config" failed partway through.
+# ---------------------------------------------------------------------------
+
+def test_checks_profile_dialog_saves_analysis_period_fields(qapp, silent_dialogs):
+    from AV_Spex.gui.gui_custom_profiles import CustomProfileDialog
+
+    dialog = CustomProfileDialog()
+    dialog.name_input.setText("Periods Test")
+    dialog.analysis_period_count_input.setText("5")
+    dialog.analysis_period_duration_input.setText("45")
+
+    profile = dialog.get_profile_from_form()
+
+    fa = profile.outputs.frame_analysis
+    assert fa.analysis_period_count == 5
+    assert fa.analysis_period_duration == 45
+
+
+def test_checks_profile_dialog_edit_shows_the_profiles_periods(qapp, silent_dialogs):
+    from AV_Spex.gui.gui_custom_profiles import CustomProfileDialog
+    from AV_Spex.utils.config_setup import ChecksProfile, FrameAnalysisConfig
+
+    profile = ChecksProfile(name="Existing")
+    profile.outputs.frame_analysis = FrameAnalysisConfig(
+        analysis_period_count=4, analysis_period_duration=90)
+
+    dialog = CustomProfileDialog(edit_profile=profile)
+
+    assert dialog.analysis_period_count_input.text() == "4"
+    assert dialog.analysis_period_duration_input.text() == "90"
+
+
+def test_checks_profile_dialog_loads_periods_from_current_config(qapp, silent_dialogs, monkeypatch):
+    from AV_Spex.gui import gui_custom_profiles
+    from AV_Spex.gui.gui_custom_profiles import CustomProfileDialog
+    from AV_Spex.utils.config_setup import ChecksConfig
+
+    current = gui_custom_profiles.config_edit.config_mgr.get_config('checks', ChecksConfig)
+    fa = current.outputs.frame_analysis
+    monkeypatch.setattr(fa, "analysis_period_count", 6)
+    monkeypatch.setattr(fa, "analysis_period_duration", 30)
+
+    critical = []
+    monkeypatch.setattr(gui_custom_profiles.QMessageBox, "critical",
+                        lambda *a, **kw: critical.append(a))
+
+    dialog = CustomProfileDialog()
+    dialog.load_from_current_config()
+
+    assert critical == [], "load_from_current_config raised partway through"
+    assert dialog.analysis_period_count_input.text() == "6"
+    assert dialog.analysis_period_duration_input.text() == "30"
+
+
+def test_checks_profile_dialog_save_button_saves(qapp, silent_dialogs, monkeypatch):
+    """End to end through the Save handler: the profile reaches save_custom_profile."""
+    from AV_Spex.gui import gui_custom_profiles
+    from AV_Spex.gui.gui_custom_profiles import CustomProfileDialog
+
+    saved, critical = [], []
+    monkeypatch.setattr(gui_custom_profiles.config_edit, "save_custom_profile", saved.append)
+    monkeypatch.setattr(gui_custom_profiles.QMessageBox, "critical",
+                        lambda *a, **kw: critical.append(a))
+
+    dialog = CustomProfileDialog()
+    dialog.name_input.setText("Save Test")
+    dialog.on_save_clicked()
+
+    assert critical == []
+    assert [p.name for p in saved] == ["Save Test"]
+
+
+def test_checks_profile_dialog_keeps_mkvalidator_setting_it_has_no_control_for(qapp, silent_dialogs):
+    from AV_Spex.gui.gui_custom_profiles import CustomProfileDialog
+    from AV_Spex.utils.config_setup import ChecksProfile, BasicToolConfig
+
+    profile = ChecksProfile(name="Mkv")
+    profile.tools.mkvalidator = BasicToolConfig(check_tool=True, run_tool=True)
+
+    dialog = CustomProfileDialog(edit_profile=profile)
+    saved = dialog.get_profile_from_form()
+
+    assert saved.tools.mkvalidator == BasicToolConfig(check_tool=True, run_tool=True)
+
+    fresh = CustomProfileDialog()
+    fresh.name_input.setText("Fresh")
+    assert fresh.get_profile_from_form().tools.mkvalidator == BasicToolConfig(
+        check_tool=False, run_tool=False)
+
+
+def _every_value_changed(profile_dict):
+    """Return a copy of an asdict'd ChecksProfile with every setting moved off its default."""
+    alternatives = {
+        "qctools_ext": "qctools.mkv",
+        "border_detection_mode": "sophisticated",
+        "checksum_algorithm": "sha256",
+        "stream_hash_algorithm": "sha256",
+        "evaluateBarsReference": "smpte",
+        "video_file_extension": "mov",
+        "mediaconch_policy": "Some_Policy.xml",
+    }
+
+    def change(key, value):
+        if isinstance(value, dict):
+            return {k: change(k, v) for k, v in value.items()}
+        if isinstance(value, bool):
+            return not value
+        if isinstance(value, int):
+            return value + 7
+        if isinstance(value, float):
+            return value + 0.5
+        if key in alternatives:
+            return alternatives[key]
+        return value
+
+    changed = {k: change(k, v) for k, v in profile_dict.items() if k not in ("name", "description")}
+    changed["name"], changed["description"] = "Round Trip", "every field changed"
+    return changed
+
+
+def test_checks_profile_dialog_round_trips_every_setting(qapp, silent_dialogs):
+    """Load a profile with every setting changed, save it back: nothing may be lost.
+
+    Guards against a new ChecksConfig field being added without a dialog
+    control (or carry-over), which silently resets it whenever a profile is
+    saved from this dialog.
+    """
+    from dataclasses import asdict
+    from AV_Spex.gui.gui_custom_profiles import CustomProfileDialog
+    from AV_Spex.utils.config_manager import ConfigManager
+    from AV_Spex.utils.config_setup import ChecksProfile
+
+    original = ConfigManager()._deserialize_dataclass(
+        ChecksProfile, _every_value_changed(asdict(ChecksProfile(name="x"))))
+
+    dialog = CustomProfileDialog(edit_profile=original)
+    saved = dialog.get_profile_from_form()
+
+    assert asdict(saved) == asdict(original)
+
+
+# ---------------------------------------------------------------------------
+# Checks tab: MKV-only settings are grayed and forced off for non-MKV input
+# ---------------------------------------------------------------------------
+
+def test_checks_tab_non_mkv_extension_grays_and_forces_off_mkvalidator(qapp, silent_dialogs, monkeypatch):
+    from AV_Spex.gui.gui_checks_tab import gui_checks_window
+    from AV_Spex.gui.gui_checks_tab.gui_checks_window import ChecksWindow
+
+    updates = []
+    monkeypatch.setattr(gui_checks_window.config_mgr, "update_config",
+                        lambda name, data: updates.append(data))
+    monkeypatch.setattr(gui_checks_window.config_mgr, "save_config", lambda *a, **kw: None)
+
+    window = ChecksWindow()
+    mkv = window.tool_widgets['mkvalidator']
+    mkv['run'].setChecked(True)
+    mkv['check'].setChecked(True)
+    updates.clear()
+
+    window.on_video_extension_changed('mov')
+
+    for key in ('run', 'check'):
+        assert not mkv[key].isEnabled()
+        assert not mkv[key].isChecked()
+    tools_update = next(u['tools'] for u in updates if 'tools' in u)
+    assert tools_update['mkvalidator'] == {'run_tool': False, 'check_tool': False}
+    assert tools_update['mediatrace'] == {'run_tool': False, 'check_tool': False}
+
+    window.on_video_extension_changed('mkv')
+    assert mkv['run'].isEnabled() and mkv['check'].isEnabled()

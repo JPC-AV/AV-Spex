@@ -291,18 +291,17 @@ class FrameAnalysisConfig:
     max_border_retries: int = 3
     
     # BRNG analysis settings
-    brng_duration_limit: int = 300
     brng_skip_color_bars: bool = True
     
     # Analysis period settings (used by signalstats and BRNG analysis)
-    analysis_period_duration: int = 60
-    analysis_period_count: int = 3
+    analysis_period_duration: int = 30
+    analysis_period_count: int = 6
 
     # Dropped sample detection settings
-    enable_dropped_sample_detection: bool = True
+    enable_dropped_sample_detection: bool = False
 
     # Duplicate frame detection settings
-    enable_duplicate_frame_detection: bool = True
+    enable_duplicate_frame_detection: bool = False
     duplicate_min_run_length: int = 2
 
 # Output configuration
@@ -316,6 +315,14 @@ SUPPORTED_VIDEO_EXTENSIONS = ("mkv", "mov", "mp4", "avi", "mxf")
 def is_mkv_extension(ext: str) -> bool:
     """True if the given extension string refers to a Matroska (.mkv) container."""
     return ext.lower().lstrip('.') == "mkv"
+
+
+# Settings that only work on Matroska input, forced off (and grayed in the GUI)
+# when a non-MKV extension is configured. Stream fixity uses mkvextract/
+# mkvpropedit; mediatrace reads Matroska SimpleTags; mkvalidator validates
+# Matroska conformance.
+MKV_ONLY_FIXITY_FIELDS = ("embed_stream_fixity", "validate_stream_fixity", "overwrite_stream_fixity")
+MKV_ONLY_TOOLS = ("mediatrace", "mkvalidator")
 
 # Output configuration
 @dataclass
@@ -370,7 +377,8 @@ class QCTParseToolConfig:
     thumbExport: bool
     # What Evaluate Bars measures content against: "detected" uses this
     # file's own detected bars, falling back to standard SMPTE values if
-    # none are found; "smpte" always uses standard SMPTE values.
+    # none are found; "smpte" always uses standard SMPTE values; "both" runs
+    # the evaluation against each and the HTML report toggles between them.
     evaluateBarsReference: str = "detected"
     audio_analysis: bool = False
     detect_clamped_levels: bool = False

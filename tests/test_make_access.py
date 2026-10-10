@@ -70,12 +70,12 @@ def _fake_ffprobe(monkeypatch, stdout):
 
 
 def test_get_duration_strips_whitespace(monkeypatch):
-    _fake_ffprobe(monkeypatch, "  60.123\n")
+    _fake_ffprobe(monkeypatch, '{"format": {"duration": "60.123"}}')
     assert ma.get_duration("/v.mkv") == "60.123"
 
 
 def test_get_video_dimensions_parses_wxh(monkeypatch):
-    _fake_ffprobe(monkeypatch, "720,486\n")
+    _fake_ffprobe(monkeypatch, '{"streams": [{"width": 720, "height": 486}]}')
     assert ma.get_video_dimensions("/v.mkv") == (720, 486)
 
 

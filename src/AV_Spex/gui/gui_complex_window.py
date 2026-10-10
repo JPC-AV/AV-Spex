@@ -207,8 +207,10 @@ class ComplexWindow(QWidget, ThemeableMixin):
         self.bars_ref_group = QButtonGroup(self)
         self.bars_ref_detected_radio = QRadioButton("Bars detected in this video")
         self.bars_ref_smpte_radio = QRadioButton("Standard SMPTE values")
+        self.bars_ref_both_radio = QRadioButton("Both")
         self.bars_ref_group.addButton(self.bars_ref_detected_radio)
         self.bars_ref_group.addButton(self.bars_ref_smpte_radio)
+        self.bars_ref_group.addButton(self.bars_ref_both_radio)
         self.bars_ref_detected_radio.setChecked(True)
 
         self._add_option(layout, self._indent_row(self.bars_ref_detected_radio, self.INDENT * 2),
@@ -220,6 +222,11 @@ class ComplexWindow(QWidget, ThemeableMixin):
             self._desc_label(
                 "Always uses standard SMPTE color bar values, ignoring any "
                 "bars in the video.",
+                extra_indent=self.INDENT * 2))
+        self._add_option(layout, self._indent_row(self.bars_ref_both_radio, self.INDENT * 2),
+            self._desc_label(
+                "Runs the evaluation against both references; the report lets "
+                "you toggle between the two sets of results.",
                 extra_indent=self.INDENT * 2))
 
         self.thumb_export_cb = self._make_checkbox("Export Thumbnails")
@@ -315,26 +322,28 @@ class ComplexWindow(QWidget, ThemeableMixin):
         self._add_option(soph_layout, self._param_row(
             "Brightness Threshold:", self.soph_threshold_input),
             self._desc_label(
-                "0 = pure black, 255 = pure white", extra_indent=self.INDENT))
+                "Brightness an edge row or column must exceed to count as picture "
+                "(0 = pure black, 255 = pure white)", extra_indent=self.INDENT))
 
         self.soph_edge_width_input = QLineEdit("100")
         self._add_option(soph_layout, self._param_row(
             "Edge Sample Width:", self.soph_edge_width_input),
             self._desc_label(
-                "Pixels to examine from each edge", extra_indent=self.INDENT))
+                "Pixels to search in from the left and right edges",
+                extra_indent=self.INDENT))
 
         self.soph_sample_frames_input = QLineEdit("30")
         self._add_option(soph_layout, self._param_row(
             "Sample Frames:", self.soph_sample_frames_input),
             self._desc_label(
-                "Number of frames to sample across the video",
+                "Number of well-exposed frames to measure borders on (minimum 5)",
                 extra_indent=self.INDENT))
 
         self.soph_padding_input = QLineEdit("5")
         self._add_option(soph_layout, self._param_row(
             "Padding:", self.soph_padding_input),
             self._desc_label(
-                "Extra margin around detected borders",
+                "Extra pixels trimmed from each side of the detected picture area",
                 extra_indent=self.INDENT))
 
         self.auto_retry_borders_cb = self._make_checkbox(
@@ -344,7 +353,7 @@ class ComplexWindow(QWidget, ThemeableMixin):
                 "Automatically adjusts borders if edge artifacts are found",
                 extra_indent=self.INDENT))
 
-        self.max_border_retries_input = QLineEdit("5")
+        self.max_border_retries_input = QLineEdit("3")
         self._add_option(soph_layout, self._param_row(
             "Max Retries:", self.max_border_retries_input),
             self._desc_label(
@@ -365,17 +374,10 @@ class ComplexWindow(QWidget, ThemeableMixin):
         self._add_option(layout, self.enable_brng_analysis_cb, self._desc_label(
             "Analyze broadcast range violations in the active picture area"))
 
-        self.brng_duration_input = QLineEdit("300")
-        self._add_option(layout, self._param_row(
-            "Duration Limit (s):", self.brng_duration_input),
-            self._desc_label(
-                "Maximum duration to analyze for BRNG violations",
-                extra_indent=self.INDENT))
-
         self.brng_skip_colorbars_cb = self._make_checkbox("Skip Color Bars")
         self._add_option(layout, self._indent_row(self.brng_skip_colorbars_cb),
             self._desc_label(
-                "Exclude color bar sections from BRNG analysis",
+                "Exclude detected color bars from BRNG, signalstats and analysis-period placement (bars are always excluded from duplicate frame detection)",
                 extra_indent=self.INDENT))
 
         # Shared analysis periods (signalstats + BRNG)
@@ -384,10 +386,10 @@ class ComplexWindow(QWidget, ThemeableMixin):
         periods_label = QLabel("Analysis Periods:")
         periods_label.setStyleSheet("font-weight: bold;")
         periods_count_label = QLabel("Count:")
-        self.analysis_period_count_input = QLineEdit("3")
+        self.analysis_period_count_input = QLineEdit("6")
         self.analysis_period_count_input.setMaximumWidth(60)
         periods_duration_label = QLabel("Duration (s):")
-        self.analysis_period_duration_input = QLineEdit("60")
+        self.analysis_period_duration_input = QLineEdit("30")
         self.analysis_period_duration_input.setMaximumWidth(60)
         periods_row.addWidget(periods_label)
         periods_row.addWidget(periods_count_label)
@@ -477,7 +479,7 @@ class ComplexWindow(QWidget, ThemeableMixin):
 
         evaluate_on = bars_on and self.evaluate_bars_cb.isChecked()
         for w in (self.bars_ref_label, self.bars_ref_detected_radio,
-                  self.bars_ref_smpte_radio):
+                  self.bars_ref_smpte_radio, self.bars_ref_both_radio):
             w.setEnabled(evaluate_on)
 
     def on_theme_changed(self, palette):
@@ -518,9 +520,11 @@ class ComplexWindow(QWidget, ThemeableMixin):
                    self.detect_tone_leak_cb):
             cb.stateChanged.connect(self.on_qct_parse_flag_changed)
 
-        # Bars-reference radios: the detected radio's toggled fires exactly
-        # once per user change (exclusive pair), so one connection is enough.
-        self.bars_ref_detected_radio.toggled.connect(self.on_qct_parse_flag_changed)
+        # Bars-reference radios: exclusive group, so connect to the group's
+        # buttonToggled filtered to the newly checked button — one save per
+        # user change regardless of which radio was picked.
+        self.bars_ref_group.buttonToggled.connect(
+            lambda _button, checked: checked and self.on_qct_parse_flag_changed())
 
         # CLAMS detection — single toggle runs both bars and tone detectors.
         # Numeric tuning is JSON-only.
@@ -577,9 +581,6 @@ class ComplexWindow(QWidget, ThemeableMixin):
         )
 
         # BRNG parameters
-        self.brng_duration_input.textChanged.connect(
-            lambda text: self.on_frame_analysis_param_changed('brng_duration_limit', text)
-        )
         self.brng_skip_colorbars_cb.stateChanged.connect(
             lambda state: self.on_boolean_changed(state, ['outputs', 'frame_analysis', 'brng_skip_color_bars'])
         )
@@ -622,7 +623,8 @@ class ComplexWindow(QWidget, ThemeableMixin):
         self.thumb_export_cb.setChecked(run_tool and qct.thumbExport)
         bars_ref = getattr(qct, 'evaluateBarsReference', 'detected')
         self.bars_ref_smpte_radio.setChecked(bars_ref == 'smpte')
-        self.bars_ref_detected_radio.setChecked(bars_ref != 'smpte')
+        self.bars_ref_both_radio.setChecked(bars_ref == 'both')
+        self.bars_ref_detected_radio.setChecked(bars_ref not in ('smpte', 'both'))
         self.audio_analysis_cb.setChecked(run_tool and getattr(qct, 'audio_analysis', False))
         self.detect_clamped_levels_cb.setChecked(run_tool and getattr(qct, 'detect_clamped_levels', False))
         self.detect_chroma_phase_errors_cb.setChecked(run_tool and getattr(qct, 'detect_chroma_phase_errors', False))
@@ -643,7 +645,7 @@ class ComplexWindow(QWidget, ThemeableMixin):
             self.enable_brng_analysis_cb.setChecked(bool(frame_config.enable_brng_analysis))
             self.enable_signalstats_cb.setChecked(bool(frame_config.enable_signalstats))
             self.enable_dropped_sample_cb.setChecked(bool(frame_config.enable_dropped_sample_detection))
-            self.enable_duplicate_frame_cb.setChecked(bool(getattr(frame_config, 'enable_duplicate_frame_detection', True)))
+            self.enable_duplicate_frame_cb.setChecked(bool(getattr(frame_config, 'enable_duplicate_frame_detection', False)))
 
             # Set border detection mode
             mode_index = self.border_mode_combo.findData(frame_config.border_detection_mode)
@@ -657,11 +659,10 @@ class ComplexWindow(QWidget, ThemeableMixin):
             self.soph_sample_frames_input.setText(str(frame_config.sophisticated_sample_frames))
             self.soph_padding_input.setText(str(frame_config.sophisticated_padding))
             self.auto_retry_borders_cb.setChecked(bool(frame_config.auto_retry_borders))
-            self.brng_duration_input.setText(str(frame_config.brng_duration_limit))
             self.brng_skip_colorbars_cb.setChecked(bool(frame_config.brng_skip_color_bars))
             self.max_border_retries_input.setText(str(getattr(frame_config, 'max_border_retries', 3)))
             self.analysis_period_duration_input.setText(str(frame_config.analysis_period_duration))
-            self.analysis_period_count_input.setText(str(getattr(frame_config, 'analysis_period_count', 3)))
+            self.analysis_period_count_input.setText(str(getattr(frame_config, 'analysis_period_count', 6)))
 
             # Update visibility based on loaded state
             self.update_border_detection_visibility()
@@ -723,8 +724,12 @@ class ComplexWindow(QWidget, ThemeableMixin):
         config_mgr.update_config('checks', updates)
 
     def _bars_reference_value(self):
-        """Current Evaluate Color Bars reference: 'smpte' or 'detected'."""
-        return 'smpte' if self.bars_ref_smpte_radio.isChecked() else 'detected'
+        """Current Evaluate Color Bars reference: 'smpte', 'both' or 'detected'."""
+        if self.bars_ref_smpte_radio.isChecked():
+            return 'smpte'
+        if self.bars_ref_both_radio.isChecked():
+            return 'both'
+        return 'detected'
 
     def on_frame_analysis_mode_changed(self, index):
         """Handle border detection mode changes"""
@@ -747,8 +752,7 @@ class ComplexWindow(QWidget, ThemeableMixin):
 
         # Convert to appropriate type
         if param_name in ['simple_border_pixels', 'sophisticated_threshold', 'sophisticated_edge_sample_width',
-                        'sophisticated_sample_frames', 'sophisticated_padding', 'sophisticated_viz_time',
-                        'sophisticated_search_window', 'brng_duration_limit',
+                        'sophisticated_sample_frames', 'sophisticated_padding',
                         'analysis_period_duration', 'analysis_period_count', 'max_border_retries']:
             try:
                 # Handle empty string case

@@ -80,9 +80,18 @@ def generate_summary(results: Dict, video_id: str) -> str:
     if results.get('signalstats'):
         stats = results['signalstats']
         lines.append(f"\nSignalstats (active area analysis):")
-        lines.append(f"  Frames with violations: {stats['violation_percentage']:.1f}%")
-        lines.append(f"  Max BRNG: {stats['max_brng']:.2f}%")
-        lines.append(f"  Avg BRNG: {stats['avg_brng']:.2f}%")
+        # None means the analysis could not run (no duration, or no analyzable
+        # period). Printing 0.0% here would read as a clean measurement of a
+        # file nothing was measured on.
+        if stats.get('violation_percentage') is None:
+            lines.append(f"  {stats.get('diagnosis') or 'Could not run: no frames were examined'}")
+        else:
+            lines.append(f"  Frames with violations: {stats['violation_percentage']:.1f}%")
+            lines.append(f"  Max BRNG: {stats['max_brng']:.2f}%")
+            lines.append(f"  Avg BRNG: {stats['avg_brng']:.2f}%")
+            # The figures above cover only the periods that returned data.
+            if stats.get('coverage_note'):
+                lines.append(f"  Partial coverage: {stats['coverage_note']}")
 
         # Add analysis period info
         periods = stats.get('analysis_periods', [])
@@ -212,8 +221,11 @@ def log_analysis_correlation(signalstats_results: 'SignalstatsResult',
 
     # Signalstats summary
     logger.info("  Signalstats (quantitative full-frame vs active-area comparison):")
-    logger.info(f"    Active area violations: {signalstats_results.violation_percentage:.1f}% of frames")
-    logger.info(f"    Max BRNG in active area: {signalstats_results.max_brng:.2f}%")
+    if signalstats_results.violation_percentage is None:
+        logger.info("    Did not run — no frames were examined")
+    else:
+        logger.info(f"    Active area violations: {signalstats_results.violation_percentage:.1f}% of frames")
+        logger.info(f"    Max BRNG in active area: {signalstats_results.max_brng:.2f}%")
     logger.info(f"    Diagnosis: {signalstats_results.diagnosis}\n")
 
     # BRNG analysis summary

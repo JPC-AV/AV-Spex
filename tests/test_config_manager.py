@@ -625,3 +625,60 @@ def test_real_bundled_checks_config_loads(config_mgr):
     assert cfg.fixity is not None
     assert cfg.tools is not None
     assert isinstance(cfg.validate_filename, bool)
+
+
+def test_saved_frame_analysis_config_with_removed_brng_duration_limit_still_loads(sandbox_mgr):
+    """brng_duration_limit was removed; last-used configs and exports written
+    before then still carry it and must load (the key is simply dropped)."""
+    from pathlib import Path
+    from AV_Spex.utils.config_setup import ChecksConfig
+
+    mgr, bundle_dir, user_dir = sandbox_mgr
+    bundled = json.loads(
+        (Path(__file__).parent.parent / "src" / "AV_Spex" / "config" / "checks_config.json").read_text())
+    _write_bundled_config(bundle_dir, "checks", bundled)
+
+    legacy = json.loads(json.dumps(bundled))
+    legacy["outputs"]["frame_analysis"]["brng_duration_limit"] = 120
+    legacy["outputs"]["frame_analysis"]["analysis_period_count"] = 4
+    _write_last_used_config(user_dir, "checks", legacy)
+
+    cfg = mgr.get_config("checks", ChecksConfig, use_last_used=True)
+
+    assert cfg.outputs.frame_analysis.analysis_period_count == 4
+    assert not hasattr(cfg.outputs.frame_analysis, "brng_duration_limit")
+
+
+def test_migrate_renames_signalstats_fields_in_checks_profiles(config_mgr):
+    """Custom checks profiles saved before the rename carry the old field names."""
+    data = {"custom_profiles": {
+        "Old": {"name": "Old", "outputs": {"frame_analysis": {
+            "signalstats_duration": 45, "signalstats_periods": 5}}},
+        "New": {"name": "New", "outputs": {"frame_analysis": {
+            "analysis_period_duration": 90, "analysis_period_count": 2}}},
+        "NoFrameAnalysis": {"name": "NoFrameAnalysis", "outputs": {}},
+    }}
+
+    result = config_mgr._migrate_config_data(data, "profiles_checks")
+
+    old = result["custom_profiles"]["Old"]["outputs"]["frame_analysis"]
+    assert old == {"analysis_period_duration": 45, "analysis_period_count": 5}
+    new = result["custom_profiles"]["New"]["outputs"]["frame_analysis"]
+    assert new == {"analysis_period_duration": 90, "analysis_period_count": 2}
+
+
+def test_bundled_frame_analysis_keys_are_all_real_config_fields():
+    """A bundled key the dataclass doesn't define is silently dropped on load,
+    so it looks configurable but does nothing (sophisticated_viz_time,
+    sophisticated_search_window and signalstats_start_time sat there unused)."""
+    from dataclasses import fields
+    from pathlib import Path
+    from AV_Spex.utils.config_setup import FrameAnalysisConfig
+
+    bundled = json.loads(
+        (Path(__file__).parent.parent / "src" / "AV_Spex" / "config" / "checks_config.json").read_text())
+    keys = set(bundled["outputs"]["frame_analysis"])
+    real = {f.name for f in fields(FrameAnalysisConfig)}
+
+    assert keys - real == set()
+    assert real - keys == set()

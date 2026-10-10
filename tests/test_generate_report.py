@@ -548,6 +548,10 @@ def test_find_report_csvs_picks_up_known_filenames(tmp_path):
         "qct-parse_colorbars_durations.csv":     "qctools_colorbars_duration_output",
         "qct-parse_colorbars_eval_summary.csv":  "qctools_bars_eval_check_output",
         "qct-parse_colorbars_eval_failures.csv": "colorbars_eval_fails_csv",
+        "qct-parse_colorbars_eval_smpte_summary.csv":  "colorbars_eval_smpte_summary",
+        "qct-parse_colorbars_eval_smpte_failures.csv": "colorbars_eval_smpte_fails_csv",
+        "qct-parse_colorbars_eval_thresholds.csv":       "colorbars_eval_thresholds_csv",
+        "qct-parse_colorbars_eval_smpte_thresholds.csv": "colorbars_eval_smpte_thresholds_csv",
         "qct-parse_colorbars_values.csv":        "colorbars_values_output",
         "qct-parse_profile_summary.csv":         "qctools_profile_check_output",
         "qct-parse_profile_failures.csv":        "profile_fails_csv",
@@ -913,7 +917,7 @@ def test_read_xml_file_missing_raises():
 # ===========================================================================
 
 def test_get_video_duration_returns_float(monkeypatch):
-    fake = MagicMock(returncode=0, stdout="3661.5\n", stderr="")
+    fake = MagicMock(returncode=0, stdout='{"format": {"duration": "3661.500000"}}', stderr="")
     monkeypatch.setattr(gr.subprocess, "run", lambda *a, **kw: fake)
     assert gr._get_video_duration("/v.mkv") == 3661.5
 
@@ -1413,6 +1417,86 @@ def _brng_payload(**extra):
     return payload
 
 
+def _signalstats_payload(**extra):
+    payload = {
+        'violation_percentage': 2.5, 'max_brng': 0.4, 'avg_brng': 0.1,
+        'diagnosis': 'Broadcast-compliant', 'severity': 'ok',
+        'analyzed_region': 'active_area', 'used_qctools': True,
+        'analysis_periods': [[100.0, 60], [300.0, 60], [900.0, 60]],
+        'periods_attempted': 3, 'periods_measured': 3,
+    }
+    payload.update(extra)
+    return payload
+
+
+def test_signalstats_partial_coverage_renders_a_caveat():
+    """Stats from 1 of 3 periods must not read like stats from all 3."""
+    outputs = {**_FRAME_OUTPUTS_BASE, 'signalstats_analysis': _signalstats_payload(
+        periods_measured=1,
+        coverage_note='Only 1 of 3 analysis period(s) returned data.',
+    )}
+    html = gr.generate_frame_analysis_html(outputs, "JPC_AV_02222")
+
+    assert "Partial coverage" in html
+    assert "Only 1 of 3 analysis period(s) returned data." in html
+    assert "not the full intended sample" in html
+
+
+def test_signalstats_full_coverage_renders_no_caveat():
+    outputs = {**_FRAME_OUTPUTS_BASE, 'signalstats_analysis': _signalstats_payload()}
+    assert "Partial coverage" not in gr.generate_frame_analysis_html(outputs, "JPC_AV_02222")
+
+
+def test_signalstats_legacy_results_render_no_caveat():
+    """Results predating the counts must not be guessed at as partial."""
+    payload = _signalstats_payload()
+    del payload['periods_attempted']
+    del payload['periods_measured']
+    outputs = {**_FRAME_OUTPUTS_BASE, 'signalstats_analysis': payload}
+
+    assert "Partial coverage" not in gr.generate_frame_analysis_html(outputs, "JPC_AV_02222")
+
+
+def test_brng_unavailable_renders_an_amber_could_not_run_section():
+    """An absent section reads as 'switched off', not 'ran and measured nothing'."""
+    outputs = {**_FRAME_OUTPUTS_BASE,
+               'brng_unavailable_reason': 'video duration unknown'}
+    html = gr.generate_frame_analysis_html(outputs, "JPC_AV_03569")
+
+    assert "BRNG Violation Analysis" in html
+    assert "Could not run" in html
+    assert "video duration unknown" in html
+    assert "not</strong> a clean result" in html
+    assert "#fff3cd" in html, "the could-not-run banner must be amber, not green"
+
+
+def test_brng_unavailable_keeps_the_toc_anchor():
+    """Same anchor as the measured case, so the TOC entry is picked up."""
+    outputs = {**_FRAME_OUTPUTS_BASE,
+               'brng_unavailable_reason': 'video duration unknown'}
+    html = gr.generate_frame_analysis_html(outputs, "JPC_AV_03569")
+
+    assert "id='section-brng-analysis'" in html
+
+
+def test_brng_unavailable_alone_still_renders_the_frame_analysis_wrapper():
+    """It is the only finding here; has_content must not drop it."""
+    outputs = {**_FRAME_OUTPUTS_BASE,
+               'brng_unavailable_reason': 'video duration unknown'}
+    assert gr.generate_frame_analysis_html(outputs, "JPC_AV_03569") != ""
+
+
+def test_brng_results_win_over_a_stale_unavailable_reason():
+    """Real results must never be replaced by the could-not-run banner."""
+    outputs = {**_FRAME_OUTPUTS_BASE,
+               'brng_analysis': _brng_payload(),
+               'brng_unavailable_reason': 'video duration unknown'}
+    html = gr.generate_frame_analysis_html(outputs, "JPC_AV_03569")
+
+    assert "Could not run" not in html
+    assert "No BRNG violations detected" in html
+
+
 def test_brng_last_resort_periods_render_a_low_confidence_caveat():
     """A mostly-black sample must not read like a normal clean result."""
     outputs = {**_FRAME_OUTPUTS_BASE, 'brng_analysis': _brng_payload(
@@ -1477,3 +1561,223 @@ def test_brng_unknown_confidence_value_still_warns():
     html = gr.generate_frame_analysis_html(outputs, "JPC_AV_02222")
 
     assert "Reduced confidence:" in html
+
+
+# ===========================================================================
+# Analysis Period Selection block
+# ===========================================================================
+
+def _period_outputs(**overrides):
+    """A frame_outputs dict shaped like the collector builds it.
+
+    The sibling renderers index some keys directly rather than using .get(),
+    which is fine by contract — they are only ever handed the full dict.
+    """
+    outputs = {
+        'border_visualization': None, 'border_data': None,
+        'brng_analysis': None, 'brng_unavailable_reason': None,
+        'brng_thumbnails': [], 'signalstats_analysis': None,
+        'enhanced_frame_analysis': None, 'dropped_sample_spectrogram': None,
+        'dropped_sample_detection': None, 'duplicate_frame_detection': None,
+        'bin_scoring': None, 'period_evidence': None, 'unanalyzable_regions': None,
+    }
+    outputs.update(overrides)
+    return outputs
+
+
+def test_period_selection_absent_without_inputs():
+    """A report from before this was recorded renders exactly as it did."""
+    assert gr._render_frame_periods_html(_period_outputs()) == ""
+
+
+def test_period_selection_lists_what_earned_each_period():
+    html = gr._render_frame_periods_html(_period_outputs(period_evidence=[
+        {'start': 985.0, 'duration': 60,
+         'evidence': [{'start': 1010.0, 'score': 0.99, 'dominant_family': 'impulsive'}]},
+    ]))
+    assert "id='section-period-selection'" in html
+    assert "Period 1" in html
+    assert "dropouts / concealment" in html
+
+
+def test_period_selection_says_when_nothing_stood_out():
+    """An empty evidence list is a finding, not a gap in the data."""
+    html = gr._render_frame_periods_html(_period_outputs(period_evidence=[
+        {'start': 27.0, 'duration': 60, 'evidence': []},
+    ]))
+    assert "stood out" in html
+
+
+def test_period_selection_lists_unanalyzable_regions_with_reasons():
+    html = gr._render_frame_periods_html(_period_outputs(unanalyzable_regions=[
+        {'start': 2080.0, 'end': 2100.0, 'duration': 20.0,
+         'reasons': ['average luma below broadcast black (54)']},
+    ]))
+    assert "Regions excluded as unanalyzable" in html
+    assert "below broadcast black" in html
+
+
+def test_period_selection_names_the_tags_behind_each_exclusion():
+    """Black and bars dominate the list, so the copy has to say what the
+    other reasons were measured from — otherwise every row reads the same."""
+    html = gr._render_frame_periods_html(_period_outputs(unanalyzable_regions=[
+        {'start': 0.0, 'end': 10.0, 'duration': 10.0,
+         'reasons': ['no picture frames (all black or excluded)']},
+    ]))
+    assert "black leader or tail" in html
+    for tag in ("YMAX", "YAVG", "ssim.All", "YDIF",
+                "idet.repeated.current_frame", "VREP",
+                "entropy.normalized_entropy.normal.Y"):
+        assert tag in html, tag
+
+
+def test_period_selection_names_the_available_measures():
+    """A family never measured cannot have steered anything."""
+    html = gr._render_frame_periods_html(_period_outputs(
+        bin_scoring={'metrics': ['psnr', 'signalstats']}))
+    assert "signalstats" in html
+    assert "Measures available" in html
+
+
+def test_period_selection_lists_every_region():
+    """Nothing is truncated: a static report has no way to expand a summary."""
+    regions = [{'start': float(i * 100), 'end': float(i * 100 + 10),
+                'duration': 10.0, 'reasons': ['no picture frames']}
+               for i in range(20)]
+    html = gr._render_frame_periods_html(_period_outputs(unanalyzable_regions=regions))
+    assert "more" not in html.split("Regions excluded")[1]
+    assert html.count("no picture frames") == 20
+
+
+def test_period_selection_lists_every_scoring_moment():
+    """A 60s period holds six bins; truncating at four hid rows behind a
+    "+2 more" that nothing could expand."""
+    evidence = [{'start': float(1000 + i * 10), 'score': 0.9 - i * 0.05,
+                 'dominant_family': 'impulsive'} for i in range(6)]
+    html = gr._render_frame_periods_html(_period_outputs(period_evidence=[
+        {'start': 1000.0, 'duration': 60, 'evidence': evidence}]))
+    assert html.count("dropouts / concealment") == 6
+    assert "more</div>" not in html
+
+
+def test_period_selection_renders_inside_the_frame_analysis_section():
+    html = gr.generate_frame_analysis_html(_period_outputs(period_evidence=[
+        {'start': 985.0, 'duration': 60, 'evidence': []}]), "JPC_AV_TEST")
+    assert "id='section-period-selection'" in html
+    assert 'id="section-frame-analysis"' in html
+
+
+def _scoring_bin(start, score, **overrides):
+    """One row of the per-bin series, carrying every metric by default."""
+    row = {
+        'start': start, 'score': score,
+        'dominant_family': ('impulsive' if isinstance(score, (int, float)) and score > 0.5
+                            else 'legality'),
+        'brng_mean': 0.08, 'brng_mean_rank': 0.3,
+        'satmax_max': 340.0, 'satmax_max_rank': 0.1,
+        'tout_mean': 0.021, 'tout_mean_rank': 0.9,
+        'vrep_mean': 0.004, 'vrep_mean_rank': 0.6,
+        'deflicker_absmax': 2.4, 'deflicker_absmax_rank': 0.4,
+    }
+    row.update(overrides)
+    return row
+
+
+def _scoring(bins=None, **overrides):
+    """A bin_scoring dict shaped like frame_analysis writes it."""
+    out = {'metrics': ['signalstats'], 'bit_depth_10': True,
+           'bins': bins if bins is not None else [
+               _scoring_bin(0.0, 0.1), _scoring_bin(10.0, 0.9)]}
+    out.update(overrides)
+    return out
+
+
+def test_period_chart_plots_the_composite_and_all_five_metrics():
+    """Every metric that steers selection, not just the impulsive pair.
+
+    The complaint this pins: a chart showing only TOUT and VREP cannot explain
+    a period won on legality, which is 40% of the score's weight.
+    """
+    html = gr._make_period_score_chart_html(_scoring(), [], [], 'JPC_AV_TEST')
+    assert 'Composite score' in html
+    for label in ('Out-of-range pixels (BRNG)', 'Illegal chroma (SATMAX)',
+                  'Dropouts (TOUT)', 'Concealment (VREP)',
+                  'Brightness instability (deflicker)'):
+        assert label in html
+
+
+def test_period_chart_plots_ranks_not_raw_readings():
+    """The five have no common physical scale, so the axis has to be rank.
+
+    BRNG at 40% of pixels against TOUT at 2% on one axis of physical units
+    would draw the impulsive evidence as a line along zero.
+    """
+    html = gr._make_period_score_chart_html(_scoring(bins=[
+        _scoring_bin(0.0, 0.1, brng_mean=0.40, brng_mean_rank=0.2,
+                     tout_mean=0.02, tout_mean_rank=0.95),
+        _scoring_bin(10.0, 0.9),
+    ]), [], [])
+    assert 'Rank within this file' in html
+    # The raw readings ride along in the hover instead.
+    assert '40.00% of pixels' in html
+    assert '2.00% of pixels' in html
+
+
+def test_period_chart_absent_for_a_report_without_the_series():
+    """Reports written before the series was recorded render as they did."""
+    assert gr._make_period_score_chart_html(None, [], []) == ""
+    assert gr._make_period_score_chart_html({'metrics': ['signalstats']}, [], []) == ""
+
+
+def test_period_chart_omits_a_metric_the_report_never_carried():
+    """Unmeasured must not be drawn flat along zero — that reads as clean."""
+    unmeasured = {'vrep_mean': None, 'vrep_mean_rank': None,
+                  'deflicker_absmax': None, 'deflicker_absmax_rank': None}
+    html = gr._make_period_score_chart_html(_scoring(bins=[
+        _scoring_bin(0.0, 0.1, **unmeasured),
+        _scoring_bin(10.0, 0.9, **unmeasured),
+    ]), [], [])
+    assert 'Out-of-range pixels (BRNG)' in html
+    assert 'Concealment (VREP)' not in html
+    assert 'Brightness instability (deflicker)' not in html
+
+
+def test_period_chart_quotes_the_satmax_limit_in_the_reports_scale():
+    assert '355' in gr._make_period_score_chart_html(_scoring(), [], [])
+    assert '89' in gr._make_period_score_chart_html(
+        _scoring(bit_depth_10=False), [], [])
+
+
+def test_period_chart_marks_the_bins_that_earned_a_period():
+    html = gr._make_period_score_chart_html(
+        _scoring(),
+        [{'start': 10.0, 'duration': 60,
+          'evidence': [{'start': 10.0, 'score': 0.9, 'dominant_family': 'impulsive'}]}],
+        [])
+    assert 'Earned a period' in html
+
+
+def test_period_chart_survives_malformed_rows():
+    """JSON off disk: a bad row costs its own point, not the section."""
+    html = gr._make_period_score_chart_html(_scoring(bins=[
+        {'start': 'not a number', 'score': 0.4},
+        _scoring_bin(10.0, 'nope'),
+        _scoring_bin(20.0, 0.9),
+    ]), [], [{'start': None, 'end': None}])
+    assert 'Composite score' in html
+
+
+def test_period_chart_renders_inside_the_period_selection_section():
+    html = gr._render_frame_periods_html(
+        _period_outputs(bin_scoring=_scoring(), period_evidence=[
+            {'start': 10.0, 'duration': 60, 'evidence': []}]),
+        'JPC_AV_TEST')
+    assert "id='section-period-selection'" in html
+    assert 'Composite score' in html
+
+
+def test_period_selection_anchor_is_a_known_toc_entry():
+    """The TOC reads anchors back out of the markup; the pair must agree."""
+    import inspect
+    source = inspect.getsource(gr.write_html_report)
+    assert "('section-period-selection', 'Analysis Period Selection')" in source
