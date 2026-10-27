@@ -164,6 +164,11 @@ the highest score a bin can have.
 | flat field | `entropy_mean < 0.25` | down to 0.40 | 0.30 |
 | luma uncorrelated frame to frame | `ydif_mean > 0.20 × full scale` | peaks at 0.23 | 0.40+ |
 | line repetition | `vrep_mean > 0.25` | ~0 | ~0.99 on flat-field loss |
+| pixel floor far below black (full-range noise) | `ylow_mean < 40` at 10-bit, 10 at 8-bit | down to 48.7 (sub-black content) | 4–34 |
+| fields of each frame unrelated | `psnr_mean < 17 dB` (QCTools psnr is field to field) | down to 18.9 (strobing content) | 8.7–16.9 |
+
+The last two give signalstats+psnr reports (every AV Spex-generated report) a way to gate
+post-program static, which reads ~0 VREP and often stays under the YDIF threshold.
 
 **Guards:**
 - Soft rules are evaluated only over the measures the report carries. With fewer than two

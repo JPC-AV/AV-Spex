@@ -217,6 +217,16 @@ def test_psnr_infinity_is_clipped():
     assert p.psnr_mean == pytest.approx((qbp.PSNR_CLIP + 30.0) / 2)
 
 
+def test_luma_floor_is_collected():
+    """YLOW feeds the suitability gate's full-range-noise rule."""
+    prof = qbp.BinProfiler()
+    prof.add_frame(1.0, _elem(_signalstats(ylow='4')))
+    prof.add_frame(2.0, _elem(_signalstats(ylow='10')))
+    p = prof.finalize()[0.0]
+    assert p.ylow_mean == pytest.approx(7.0)
+    assert 'signalstats' in p.metrics
+
+
 def test_non_finite_non_psnr_value_is_dropped():
     prof = qbp.BinProfiler()
     prof.add_frame(1.0, _elem(_signalstats(brng='nan')))

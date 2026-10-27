@@ -117,6 +117,44 @@ def test_line_repetition_corroborates():
     assert a.verdicts[0.0].suitable is False
 
 
+def test_noise_floor_and_field_psnr_pair_on_a_signalstats_only_report():
+    """Snow trips neither YDIF nor VREP on its own: the luma floor and field
+    PSNR are what let a signalstats+psnr report corroborate it."""
+    a = bs.assess_bins({0.0: _profile(ylow_mean=4.0, psnr_mean=13.8,
+                                      ydif_mean=179.0, vrep_mean=0.0,
+                                      yavg_mean=139.0)})
+    v = a.verdicts[0.0]
+    assert v.suitable is False
+    assert v.soft_metrics_available == 4
+    assert any('YLOW' in r for r in v.reasons)
+    assert any('field PSNR' in r for r in v.reasons)
+
+
+def test_noise_floor_alone_is_not_enough():
+    """Deep sub-black content can pull the floor down; it needs a second signal."""
+    a = bs.assess_bins({0.0: _profile(ylow_mean=10.0, psnr_mean=30.0,
+                                      ydif_mean=20.0, vrep_mean=0.0,
+                                      yavg_mean=300.0)})
+    assert a.verdicts[0.0].suitable is True
+
+
+def test_low_field_psnr_alone_is_not_enough():
+    """Strobing or cut-heavy content lowers field PSNR without being static."""
+    a = bs.assess_bins({0.0: _profile(ylow_mean=130.0, psnr_mean=12.0,
+                                      ydif_mean=120.0, vrep_mean=0.0,
+                                      yavg_mean=500.0)})
+    assert a.verdicts[0.0].suitable is True
+
+
+def test_noise_floor_uses_report_scale():
+    """YLOW 20 is far below black at 10-bit and above the 8-bit floor (10)."""
+    kwargs = dict(ylow_mean=20.0, psnr_mean=12.0, yavg_mean=120.0)
+    assert bs.assess_bins({0.0: _profile(**kwargs)},
+                          bit_depth_10=True).verdicts[0.0].suitable is False
+    assert bs.assess_bins({0.0: _profile(**kwargs)},
+                          bit_depth_10=False).verdicts[0.0].suitable is True
+
+
 # ===========================================================================
 # Guards
 # ===========================================================================
@@ -254,31 +292,61 @@ def test_describe_assessment_truncates():
 HEALTHY_BINS = {
     # JPC_AV_01581 @ 10s — ordinary content, 10-bit
     '01581 content': dict(ssim_mean=0.952, repeated_frames=0, entropy_mean=0.761,
-                          ydif_mean=5.17, vrep_mean=0.0, yavg_mean=389.0),
+                          ydif_mean=5.17, vrep_mean=0.0, yavg_mean=389.0,
+                          ylow_mean=105.0, psnr_mean=30.36),
     # JPC_AV_01663 @ 1860s — cut-heavy/noisy passage, the lowest-SSIM healthy bin
     '01663 busy': dict(ssim_mean=0.753, repeated_frames=0, entropy_mean=0.849,
-                       ydif_mean=124.5, vrep_mean=0.0, yavg_mean=419.6),
+                       ydif_mean=124.5, vrep_mean=0.0, yavg_mean=419.6,
+                       ylow_mean=114.0, psnr_mean=19.20),
+    # JPC_AV_01663 @ 1870s — strobing music video, the lowest field PSNR of
+    # any program bin in the 27-tape corpus
+    '01663 strobing': dict(ydif_mean=117.7, vrep_mean=0.0, yavg_mean=513.8,
+                           ylow_mean=133.6, psnr_mean=18.91),
     # JPC_AV_01710 @ 1250s — low motion, 28% of frames flagged repeated
     '01710 low motion': dict(ssim_mean=0.820, repeated_frames=83, entropy_mean=0.899,
-                             ydif_mean=51.0, vrep_mean=0.0, yavg_mean=437.2),
+                             ydif_mean=51.0, vrep_mean=0.0, yavg_mean=437.2,
+                             ylow_mean=224.7, psnr_mean=27.07),
     # JPC_AV_01056 @ 90s — noisy analog tape, lowest healthy entropy
     '01056 noisy': dict(ssim_mean=0.930, repeated_frames=0, entropy_mean=0.401,
-                        ydif_mean=8.4, vrep_mean=0.0, yavg_mean=200.0),
+                        ydif_mean=8.4, vrep_mean=0.0, yavg_mean=200.0,
+                        ylow_mean=159.0, psnr_mean=38.01),
     # JPC_AV_02212 @ 1700s — signalstats-only report, no ssim/entropy/idet
-    '02212 sparse': dict(ydif_mean=70.3, vrep_mean=0.0, yavg_mean=396.8),
+    '02212 sparse': dict(ydif_mean=70.3, vrep_mean=0.0, yavg_mean=396.8,
+                         ylow_mean=149.7, psnr_mean=24.70),
+    # JPC_AV_02216 @ 530s — B&W photos with sub blacks (operator-labeled
+    # illegal levels): the lowest luma floor of any program bin in the corpus
+    '02216 sub-black content': dict(ydif_mean=24.3, vrep_mean=0.0, yavg_mean=392.6,
+                                    ylow_mean=48.7, psnr_mean=26.11),
+    # JPC_AV_00011 @ 60s — "Coming Up" graphic with sub blacks
+    '00011 sub-black graphic': dict(ydif_mean=28.3, vrep_mean=0.0, yavg_mean=197.8,
+                                    ylow_mean=55.3, psnr_mean=27.23),
 }
 
 UNANALYZABLE_BINS = {
     # 21459403 @ 80s — lead-in static
     '21459403 static': dict(ssim_mean=0.229, repeated_frames=283, entropy_mean=0.767,
-                            ydif_mean=136.5, vrep_mean=0.004, yavg_mean=226.2),
+                            ydif_mean=136.5, vrep_mean=0.004, yavg_mean=226.2,
+                            ylow_mean=15.8, psnr_mean=10.71),
     # 21459403 @ 2080s — signal loss, whole frame below broadcast black
     '21459403 signal loss': dict(ssim_mean=0.723, repeated_frames=107,
                                  entropy_mean=0.298, ydif_mean=11.0,
                                  vrep_mean=0.02, yavg_mean=53.9),
     # 21459403 @ 2970s — end-of-tape hash
     '21459403 hash': dict(ssim_mean=0.182, repeated_frames=0, entropy_mean=0.905,
-                          ydif_mean=411.8, vrep_mean=0.0, yavg_mean=552.3),
+                          ydif_mean=411.8, vrep_mean=0.0, yavg_mean=552.3,
+                          ylow_mean=11.9, psnr_mean=8.74),
+    # Post-program static on signalstats+psnr reports, operator-labeled
+    # (period-study-2026-10). Before the luma-floor and field-PSNR rules these
+    # scored as the worst picture on the tape.
+    # JPC_AV_02214 @ 1750s — YDIF under its threshold: floor + PSNR pair
+    '02214 tail static': dict(ydif_mean=179.3, vrep_mean=0.0, yavg_mean=138.9,
+                              ylow_mean=4.0, psnr_mean=13.84),
+    # JPC_AV_02219 @ 1740s — the static bin closest to both new thresholds
+    '02219 tail static': dict(ydif_mean=141.3, vrep_mean=0.04, yavg_mean=128.9,
+                              ylow_mean=20.5, psnr_mean=16.91),
+    # JPC_AV_02319 @ 330s — field PSNR above threshold: floor + YDIF pair
+    '02319 tail static': dict(ydif_mean=285.1, vrep_mean=0.0, yavg_mean=238.6,
+                              ylow_mean=13.6, psnr_mean=18.71),
 }
 
 
