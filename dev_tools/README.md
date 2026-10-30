@@ -136,17 +136,30 @@ takes an operator.
    - `key_round1.json`: why each bin was picked. Don't open it while labeling.
 3. Fill in `defect` (`none, dropout, head_switching_tracking, sync_loss_roll, illegal_levels,
    chroma_error, noise, signal_loss_freeze, graphics_slate_only, other`; join several with
-   `+`) and `severity` (0 nothing worth a period, 1 visible, 2 obvious). Leave a row blank to
-   skip it.
-4. `python3 dev_tools/replays/tag_weights.py <run>` reports:
+   `+`), `severity` (0 nothing worth a period, 1 visible, 2 obvious) and `origin` (`tape` for
+   this transfer's playback damage, `content` for the program as made, `source` for damage
+   baked into dubbed or archival material; blank for none). Leave a row blank to skip it.
+   Illegal levels in a graphic are `illegal_levels` (origin `content`), not
+   `graphics_slate_only`: they are still what BRNG analysis measures.
+4. `python3 dev_tools/replays/tag_weights.py <run> --damage MODE` reports:
    - per tag: hit rate of its top bins against the control base rate, and AUC overall and by
      defect type
    - per configuration (`CONFIGS`, which are `bin_scoring` metric and weight variants): damage
      recall, estimated precision of the bins it targets, the ground-truth guard and a hold-out
      across collections and tapes
+   `MODE` decides what counts as damage: `labeled` (any defect at severity >= 1), `severe`
+   (severity 2), `tape` (origin `tape`; for rows without an origin, dropout, sync loss or signal
+   loss) or `illegal` (any `illegal_levels`). Round 1 needs this: on worn VHS 63% of random bins
+   carry some defect at severity 1, so `labeled` leaves nothing for a tag to beat. Outputs are
+   `tag_weights_<MODE>_{tags,configs,per_tape}.csv`.
 5. Bins a configuration targets that nobody has labeled are valued at the control base rate
-   and listed in `tag_weights_per_tape.csv`. A new `label_sheet.py --name round2` skips bins
-   already labeled, so the second round only asks about new ones.
+   and listed in `tag_weights_<MODE>_per_tape.csv`. Any later sheet skips bins already labeled.
+6. Focused rounds: `label_sheet.py <run> --round legality --name round2 --regions FILE` builds a
+   ~6-bin-per-tape sheet for the legal-floor luma measures (`under_black`, `over_white`, added to
+   every bin by `_selection.add_legal_floor_columns`): 1 control, each measure's top bins, the
+   bins the legality `CONFIGS` would target, and bins from `FILE` (`video_id,tc_in,tc_out`
+   regions an operator flagged as missed; a DF tape's timecodes may be typed with `:`).
+   Blind IDs carry an `L` prefix.
 
 `labels/seed_labels.csv` holds earlier operator spot checks (same columns plus `bin_start` in
 seconds). Labels are keyed by `(video_id, bin_start)`, so they carry over to future runs.

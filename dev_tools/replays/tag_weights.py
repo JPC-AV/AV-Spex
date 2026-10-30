@@ -6,9 +6,18 @@ operator labels (label_sheet.py).
     python3 dev_tools/replays/tag_weights.py period-study-2026-10 [--out-dir DIR]
 
 Labels: every labels/sheet_*.csv with its key_*.json, plus labels/seed_labels.csv, keyed by
-(video_id, bin_start), so they carry across runs. A bin is *damaged* at severity >= 1 with a
-defect other than none/graphics_slate_only, *clean* at severity 0 or with either of those.
-Unfilled rows are unlabeled and count for nothing.
+(video_id, bin_start), so they carry across runs. Unfilled rows are unlabeled and count for
+nothing. What counts as *damaged* is --damage (everything else labeled is clean):
+
+  labeled   severity >= 1 with a defect other than none / graphics_slate_only (the default)
+  severe    the same at severity 2
+  tape      severity >= 1 and origin 'tape'. Rows without an origin (round 1) count when they
+            name dropout, sync_loss_roll or signal_loss_freeze
+  illegal   severity >= 1 with illegal_levels, whatever its origin: illegal levels in a graphic
+            or in the content are still what BRNG analysis is there to measure
+
+Round 1 showed why this matters: on worn VHS, 63% of random bins carry some visible defect at
+severity >= 1, so 'labeled' leaves nothing for a tag to beat.
 
 Part 1, per tag (every CANDIDATES column, plus --tags):
   p@1, p@2      share of tapes whose top (top two) bins for the tag are damaged, among labeled ones.
@@ -55,7 +64,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
 from bin_table import find_packages, package_rows, source_group  # noqa: E402
-from label_sheet import CANDIDATES, ranked_bins, selector  # noqa: E402
+from label_sheet import CANDIDATES, LEGALITY_CANDIDATES, ranked_bins, selector  # noqa: E402
 from _selection import NEG_PREFIX, covered, in_spans, load_package, score, scoring, select_periods  # noqa: E402
 import period_grid  # noqa: E402
 
@@ -65,6 +74,9 @@ from AV_Spex.utils.log_setup import logger
 
 LABELS = Path(os.environ.get("AVSPEX_CORPUS", "~/git/JPC_AV/avspex_corpus")).expanduser() / "labels"
 CLEAN_DEFECTS = {"none", "graphics_slate_only"}
+TAPE_DEFECTS = {"dropout", "sync_loss_roll", "signal_loss_freeze"}
+DAMAGE_MODES = ("labeled", "severe", "tape", "illegal")
+DAMAGE = "labeled"      # set from --damage
 MIN_DEFECT_N = 3        # per-defect AUC only with at least this many labeled bins of that type
 
 BASE_METRICS = bin_scoring.METRICS
@@ -91,20 +103,26 @@ CONFIGS = {
     "+satlow_mean(chroma)": _with(MetricSpec("satlow_mean", "chroma"), weights={"chroma": 0.2}),
     "+tout_max(imp)": _with(MetricSpec("tout_max", "impulsive")),
     "+brng_min(leg)": _with(MetricSpec("brng_min", "legality")),
+    # Legal-floor luma (_selection.add_legal_floor_columns): only the part past legal black or
+    # white counts, as bin_scoring already floors SATMAX.
+    "+under_black(leg)": _with(MetricSpec("under_black", "legality")),
+    "+over_white(leg)": _with(MetricSpec("over_white", "legality")),
+    "+legal_floor(leg)": _with(MetricSpec("under_black", "legality"), MetricSpec("over_white", "legality")),
 }
 
 
 # --- labels ----------------------------------------------------------------------------------
 
 def load_labels():
-    """{(video_id, bin_start): {'defects': set, 'severity': int, 'control': bool}}"""
+    """{(video_id, bin_start): {'defects': set, 'severity': int, 'origin': str|None, 'control': bool}}"""
     labels = {}
 
-    def put(vid, b, defect, severity, control=False):
+    def put(vid, b, defect, severity, control=False, origin=None):
         defects = {d.strip() for d in (defect or "").split("+") if d.strip()}
         if not defects or str(severity).strip() == "":
             return
-        labels[(vid, float(b))] = {"defects": defects, "severity": int(float(severity)), "control": control}
+        labels[(vid, float(b))] = {"defects": defects, "severity": int(float(severity)),
+                                   "origin": (origin or "").strip().lower() or None, "control": control}
 
     seed = LABELS / "seed_labels.csv"
     if seed.exists():
@@ -119,12 +137,23 @@ def load_labels():
             k = key.get(row["blind_id"])
             if k:
                 put(k["video_id"], k["bin_start"], row.get("defect"), row.get("severity"),
-                    control="control" in k["selectors"])
+                    control="control" in k["selectors"], origin=row.get("origin"))
     return labels
 
 
-def is_damaged(label):
-    return label["severity"] >= 1 and not label["defects"] <= CLEAN_DEFECTS
+def is_damaged(label, mode=None):
+    mode = mode or DAMAGE
+    defects, severity = label["defects"], label["severity"]
+    if mode == "illegal":
+        return severity >= 1 and "illegal_levels" in defects
+    if mode == "tape":
+        if severity < 1:
+            return False
+        if label.get("origin"):
+            return "tape" in label["origin"].split("+")
+        return bool(defects & TAPE_DEFECTS)
+    floor = 2 if mode == "severe" else 1
+    return severity >= floor and not defects <= CLEAN_DEFECTS
 
 
 # --- part 1: tags ----------------------------------------------------------------------------
@@ -312,12 +341,16 @@ def main():
     ap.add_argument("--duration", type=int, default=30)
     ap.add_argument("--tags", default="", help="extra tag columns to score, e.g. 'ydif_mean+,blur_max+'")
     ap.add_argument("--out-dir", default=".")
+    ap.add_argument("--damage", choices=DAMAGE_MODES, default="labeled",
+                    help="what counts as a damaged bin (see the top of this file)")
     args = ap.parse_args()
     logger.setLevel(logging.ERROR)
+    global DAMAGE
+    DAMAGE = args.damage
 
     labels = load_labels()
     n_dmg = sum(is_damaged(l) for l in labels.values())
-    print(f"{len(labels)} labeled bins ({n_dmg} damaged, {len(labels) - n_dmg} clean, "
+    print(f"damage = {DAMAGE}: {len(labels)} labeled bins ({n_dmg} damaged, {len(labels) - n_dmg} clean, "
           f"{sum(l['control'] for l in labels.values())} controls)")
 
     tapes, groups = {}, {}
@@ -332,7 +365,7 @@ def main():
         groups.setdefault(source_group(ctx.info), []).append(ctx.name)
 
     extra = [(t[:-1], t[-1]) for t in args.tags.split(",") if t and t[-1] in "+-"]
-    tags = tag_report(tapes, labels, list(CANDIDATES) + extra)
+    tags = tag_report(tapes, labels, list(dict.fromkeys(list(CANDIDATES) + list(LEGALITY_CANDIDATES) + extra)))
     print("\n== Tags (labels vs within-file rank) ==")
     print_table(tags)
 
@@ -353,12 +386,12 @@ def main():
 
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    for name, rows in (("tag_weights_tags.csv", tags), ("tag_weights_configs.csv", configs)):
+    for name, rows in ((f"tag_weights_{DAMAGE}_tags.csv", tags), (f"tag_weights_{DAMAGE}_configs.csv", configs)):
         with open(out / name, "w", newline="") as fh:
             w = csv.DictWriter(fh, fieldnames=list(dict.fromkeys(k for r in rows for k in r)))
             w.writeheader()
             w.writerows(rows)
-    with open(out / "tag_weights_per_tape.csv", "w", newline="") as fh:
+    with open(out / f"tag_weights_{DAMAGE}_per_tape.csv", "w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(["config", "tape", "dmg", "dmg_hit", "clean", "clean_hit", "types", "hit_brng",
                     "hit_tout", "moved", "periods", "unlabeled_new_picks"])
@@ -367,7 +400,7 @@ def main():
                         o.get("hit_brng"), o.get("hit_tout"), o["moved"],
                         ";".join(f"{s:.0f}+{d:.0f}" for s, d in o["periods"]),
                         ";".join(f"{b:.0f}" for b in o["unlabeled"])])
-    print(f"\nWrote tag_weights_{{tags,configs,per_tape}}.csv to {out.resolve()}")
+    print(f"\nWrote tag_weights_{DAMAGE}_{{tags,configs,per_tape}}.csv to {out.resolve()}")
 
 
 if __name__ == "__main__":

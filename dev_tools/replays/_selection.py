@@ -45,6 +45,12 @@ TAG_STATS = ("mean", "p95", "max", "min")
 # cumulative over the file (BinProfile already turns repeated.current_frame into a count).
 SKIP_TAG_PARTS = ("BITDEPTH", ".idet.")
 
+# Legal luma range, 10-bit (divided by 4 for an 8-bit report). The derived legality columns
+# measure only the part of a bin past these limits, the way bin_scoring floors SATMAX, so they
+# are zero on a legal bin instead of tracking how bright or dark the picture is.
+LEGAL_BLACK_10BIT = 64.0
+LEGAL_WHITE_10BIT = 940.0
+
 
 def tag_name(key):
     """Short column name for a QCTools tag key: signalstats keys lose their filter prefix."""
@@ -261,7 +267,21 @@ def load_package(pkg, use_cache=True) -> Package:
     ctx.actual = [(round(s), round(d))
                   for s, d in (fa.get("brng_analysis") or {}).get("analysis_periods") or []]
     ctx.gt_rows = Rows(load_ground_truth(pkg / GT_FILE)) if (pkg / GT_FILE).exists() else None
+    add_legal_floor_columns(ctx)
     return ctx
+
+
+def add_legal_floor_columns(ctx):
+    """Add `under_black` (how far the bin's worst 10th-percentile luma, YLOW min, falls below
+    legal black) and `over_white` (how far its worst 90th-percentile luma, YHIGH max, rises
+    above legal white) to every bin of ctx.tag_bins. Both are 0 for a legal bin."""
+    scale = 1.0 if ctx.bit_depth_10 else 0.25
+    black, white = LEGAL_BLACK_10BIT * scale, LEGAL_WHITE_10BIT * scale
+    for row in ctx.tag_bins.values():
+        if row.get("ylow_min") is not None:
+            row["under_black"] = max(0.0, black - row["ylow_min"])
+        if row.get("yhigh_max") is not None:
+            row["over_white"] = max(0.0, row["yhigh_max"] - white)
 
 
 # --- scoring ---------------------------------------------------------------------------------
