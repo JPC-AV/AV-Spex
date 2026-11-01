@@ -14,7 +14,7 @@ picks ~12 bins per tape, each 10 s long:
 and writes them to $AVSPEX_CORPUS/labels/ as
 
   sheet_<name>.csv   video_id, tc_in, tc_out (the file's own NDF/DF timecode, matching the NLE),
-                     blind_id, and empty defect / severity / notes columns to fill in
+                     blind_id, and empty defect / severity / origin / notes columns to fill in
   key_<name>.json    which selector(s) put each bin on the sheet. Don't open it while labeling.
 
 Rows are sorted by tape and timecode so each tape is one pass through the NLE; nothing on the

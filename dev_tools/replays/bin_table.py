@@ -25,7 +25,7 @@ analyzable bins of every package,
   top_cur_rank  median within-file rank, under today's composite score, of the bin where the tag
                 peaks (in that direction). Low = today's scoring ignores where this tag points
   top_covered   share of packages whose peak bin today's periods cover (chance is the coverage
-                share printed above the table, ~10% at 6 x 30)
+                share printed above the table)
 
 and flags CONSTANT, FLAT, REDUNDANT, CONTENT and SCORED (already in bin_scoring.METRICS). Nothing here
 says a tag finds damage. That needs labels (label_sheet.py, then tag_weights.py); the screen

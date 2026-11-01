@@ -19,7 +19,7 @@
 #            currently saved config is used, exactly as the GUI/CLI left it.
 #   -l TEXT  Label for the run, shown by `corpus.py list` (e.g. "6x30 defaults baseline")
 #   -g       Also make a whole-file active-area signalstats pass per package (ground truth
-#            for period replays; roughly 1-2x the tape's real time per package)
+#            for period replays; roughly 5-15% of the tape's real time per package)
 #   -i       Keep images (thumbnails, border/spectrogram pictures) as well
 #
 # Cycle options (passed through): -s DIR, -b GB, -r GB, -n. See cycle_avspex_batches.sh -h.

@@ -23,6 +23,7 @@ Subcommands (collect.sh calls most of these; you will mostly use `list`):
 
     corpus.py list                              runs, labels and package counts
     corpus.py init-run [--label L]              write run.json for the current code + config
+    corpus.py run-id                            print the run ID the current code + config map to
     corpus.py check-run RUN_ID                  fail if code or config drifted from RUN_ID
     corpus.py done RUN_ID                       folder names already collected without error
     corpus.py collect-package RUN_ID PKG ...    copy one package's sidecars into the run
