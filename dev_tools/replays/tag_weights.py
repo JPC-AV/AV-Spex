@@ -5,27 +5,28 @@ operator labels (label_sheet.py).
 
     python3 dev_tools/replays/tag_weights.py period-study-2026-10 [--out-dir DIR]
 
-Labels: every labels/sheet_*.csv with its key_*.json, plus labels/seed_labels.csv, keyed by
-(video_id, bin_start), so they carry across runs. Unfilled rows are unlabeled and count for
-nothing. What counts as *damaged* is --damage (everything else labeled is clean):
+Labels: read and checked by labels.py (every labels/sheet_*.csv through its key, plus
+labels/seed_labels.csv); an error in a sheet stops the run. Unfilled rows are unlabeled and
+count for nothing. A bin is *damaged* when any of its findings is, under --damage (everything
+else labeled is clean):
 
   labeled   severity >= 1 with a defect other than none / graphics_slate_only (the default)
   severe    the same at severity 2
-  tape      severity >= 1 and origin 'tape'. Rows without an origin (round 1) count when they
-            name dropout, sync_loss_roll or signal_loss_freeze
+  tape      severity >= 1 and origin 'tape'. Findings without an origin (round 1) count when
+            they name dropout, sync_loss_roll or signal_loss_freeze
   illegal   severity >= 1 with illegal_levels, whatever its origin: illegal levels in a graphic
             or in the content are still what BRNG analysis is there to measure
 
 Round 1 showed why this matters: on worn VHS, 63% of random bins carry some visible defect at
 severity >= 1, so 'labeled' leaves nothing for a tag to beat.
 
-Part 1, per tag (every CANDIDATES column, plus --tags):
+Part 1, per tag (every study.CANDIDATES and LEGALITY_CANDIDATES column, plus --tags):
   p@1, p@2      share of tapes whose top (top two) bins for the tag are damaged, among labeled ones.
                 Compare to `base`, the damaged share of the random controls.
   auc           pooled over labeled bins: does the tag's within-file rank put damaged above clean?
   auc[<defect>] the same for one defect type against clean, i.e. what kind of damage it finds
 
-Part 2, per configuration (CONFIGS: METRICS/FAMILY_WEIGHTS variants, replayed at --count x
+Part 2, per configuration (study.CONFIGS: METRICS/FAMILY_WEIGHTS variants, replayed at --count x
 --duration through the real selection code):
   dmg_recall    share of damaged labeled bins the periods cover
   prec_est      of the evidence bins the configuration targets (bins in its periods scoring
@@ -51,9 +52,7 @@ The baseline configuration must reproduce the run's own periods at the run's set
 """
 import argparse
 import csv
-import json
 import logging
-import os
 import statistics
 import sys
 from pathlib import Path
@@ -63,97 +62,25 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
-from bin_table import find_packages, package_rows, source_group  # noqa: E402
-from label_sheet import CANDIDATES, LEGALITY_CANDIDATES, ranked_bins, selector  # noqa: E402
-from _selection import NEG_PREFIX, covered, in_spans, load_package, score, scoring, select_periods  # noqa: E402
+from corpus import find_packages  # noqa: E402
+from labels import DAMAGE_MODES, load as load_labels  # noqa: E402
+from bin_table import package_rows, source_group  # noqa: E402
+from study import CANDIDATES, CONFIGS, LEGALITY_CANDIDATES  # noqa: E402
+from _selection import covered, in_spans, load_package, ranked_bins, score, scoring, select_periods, selector  # noqa: E402
 import period_grid  # noqa: E402
 
 from AV_Spex.checks import bin_scoring
-from AV_Spex.checks.bin_scoring import MetricSpec
 from AV_Spex.utils.log_setup import logger
 
-LABELS = Path(os.environ.get("AVSPEX_CORPUS", "~/git/JPC_AV/avspex_corpus")).expanduser() / "labels"
-CLEAN_DEFECTS = {"none", "graphics_slate_only"}
-TAPE_DEFECTS = {"dropout", "sync_loss_roll", "signal_loss_freeze"}
-DAMAGE_MODES = ("labeled", "severe", "tape", "illegal")
 DAMAGE = "labeled"      # set from --damage
 MIN_DEFECT_N = 3        # per-defect AUC only with at least this many labeled bins of that type
 
-BASE_METRICS = bin_scoring.METRICS
-BASE_WEIGHTS = dict(bin_scoring.FAMILY_WEIGHTS)
-
-
-def _with(*extra, weights=None):
-    return (BASE_METRICS + tuple(extra), dict(BASE_WEIGHTS, **(weights or {})))
-
-
-# name -> (metrics, family weights). Edit freely; 'baseline' must stay first and unchanged.
-CONFIGS = {
-    "baseline": (BASE_METRICS, BASE_WEIGHTS),
-    "no_instability": (tuple(m for m in BASE_METRICS if m.family != "instability"),
-                       {"legality": 0.5, "impulsive": 0.5}),
-    "legality_heavy": (BASE_METRICS, {"legality": 0.6, "impulsive": 0.3, "instability": 0.1}),
-    "impulsive_heavy": (BASE_METRICS, {"legality": 0.3, "impulsive": 0.6, "instability": 0.1}),
-    "+udif_max(imp)": _with(MetricSpec("udif_max", "impulsive")),
-    "+vdif_max(imp)": _with(MetricSpec("vdif_max", "impulsive")),
-    "+uvdif_max(chroma)": _with(MetricSpec("udif_max", "chroma"), MetricSpec("vdif_max", "chroma"),
-                                weights={"chroma": 0.2}),
-    "+ydif_max(inst)": _with(MetricSpec("ydif_max", "instability")),
-    "+psnr_y_min-(imp)": _with(MetricSpec(NEG_PREFIX + "psnr_psnr_y_min", "impulsive")),
-    "+satlow_mean(chroma)": _with(MetricSpec("satlow_mean", "chroma"), weights={"chroma": 0.2}),
-    "+tout_max(imp)": _with(MetricSpec("tout_max", "impulsive")),
-    "+brng_min(leg)": _with(MetricSpec("brng_min", "legality")),
-    # Legal-floor luma (_selection.add_legal_floor_columns): only the part past legal black or
-    # white counts, as bin_scoring already floors SATMAX.
-    "+under_black(leg)": _with(MetricSpec("under_black", "legality")),
-    "+over_white(leg)": _with(MetricSpec("over_white", "legality")),
-    "+legal_floor(leg)": _with(MetricSpec("under_black", "legality"), MetricSpec("over_white", "legality")),
-}
-
-
-# --- labels ----------------------------------------------------------------------------------
-
-def load_labels():
-    """{(video_id, bin_start): {'defects': set, 'severity': int, 'origin': str|None, 'control': bool}}"""
-    labels = {}
-
-    def put(vid, b, defect, severity, control=False, origin=None):
-        defects = {d.strip() for d in (defect or "").split("+") if d.strip()}
-        if not defects or str(severity).strip() == "":
-            return
-        labels[(vid, float(b))] = {"defects": defects, "severity": int(float(severity)),
-                                   "origin": (origin or "").strip().lower() or None, "control": control}
-
-    seed = LABELS / "seed_labels.csv"
-    if seed.exists():
-        for row in csv.DictReader(open(seed)):
-            put(row["video_id"], row["bin_start"], row["defect"], row["severity"])
-    for sheet in sorted(LABELS.glob("sheet_*.csv")):
-        key_path = sheet.with_name(sheet.name.replace("sheet_", "key_", 1)).with_suffix(".json")
-        if not key_path.exists():
-            continue
-        key = json.loads(key_path.read_text())
-        for row in csv.DictReader(open(sheet)):
-            k = key.get(row["blind_id"])
-            if k:
-                put(k["video_id"], k["bin_start"], row.get("defect"), row.get("severity"),
-                    control="control" in k["selectors"], origin=row.get("origin"))
-    return labels
-
-
 def is_damaged(label, mode=None):
-    mode = mode or DAMAGE
-    defects, severity = label["defects"], label["severity"]
-    if mode == "illegal":
-        return severity >= 1 and "illegal_levels" in defects
-    if mode == "tape":
-        if severity < 1:
-            return False
-        if label.get("origin"):
-            return "tape" in label["origin"].split("+")
-        return bool(defects & TAPE_DEFECTS)
-    floor = 2 if mode == "severe" else 1
-    return severity >= floor and not defects <= CLEAN_DEFECTS
+    return label.damaged(mode or DAMAGE)
+
+
+def damaged_defects(label):
+    return label.damaged_defects(DAMAGE)
 
 
 # --- part 1: tags ----------------------------------------------------------------------------
@@ -176,9 +103,9 @@ def within_rank(rows, col, direction):
 
 
 def tag_report(tapes, labels, tags):
-    controls = [l for l in labels.values() if l["control"]]
+    controls = [l for l in labels.values() if l.control]
     base = statistics.mean(is_damaged(l) for l in controls) if controls else None
-    defect_types = sorted({d for l in labels.values() if is_damaged(l) for d in l["defects"]} - CLEAN_DEFECTS)
+    defect_types = sorted({d for l in labels.values() for d in damaged_defects(l)})
     out = []
     for col, d in tags:
         p1, p2, scored = [], [], []
@@ -206,7 +133,7 @@ def tag_report(tapes, labels, tags):
                              [r for r, l in scored if not is_damaged(l)]))}
         clean = [r for r, l in scored if not is_damaged(l)]
         for t in defect_types:
-            pos = [r for r, l in scored if is_damaged(l) and t in l["defects"]]
+            pos = [r for r, l in scored if t in damaged_defects(l)]
             row[f"auc[{t}]"] = _r(auc(pos, clean)) if len(pos) >= MIN_DEFECT_N else None
         out.append(row)
     return out
@@ -223,7 +150,7 @@ def tape_outcome(ctx, periods, scores, labels):
     evidence = sorted({e.bin_start for p in periods for e in bin_scoring.evidence_within(p[0], p[1], scores)})
     dmg = [b for b, l in lab.items() if is_damaged(l)]
     clean = [b for b, l in lab.items() if not is_damaged(l)]
-    types = {d for b in dmg if covered(b, periods) for d in lab[b]["defects"]} - CLEAN_DEFECTS
+    types = {d for b in dmg if covered(b, periods) for d in damaged_defects(lab[b])}
     return {"dmg": len(dmg), "dmg_hit": sum(covered(b, periods) for b in dmg),
             "clean": len(clean), "clean_hit": sum(covered(b, periods) for b in clean),
             "types": len(types),
@@ -351,7 +278,7 @@ def main():
     labels = load_labels()
     n_dmg = sum(is_damaged(l) for l in labels.values())
     print(f"damage = {DAMAGE}: {len(labels)} labeled bins ({n_dmg} damaged, {len(labels) - n_dmg} clean, "
-          f"{sum(l['control'] for l in labels.values())} controls)")
+          f"{sum(l.control for l in labels.values())} controls)")
 
     tapes, groups = {}, {}
     for pkg in find_packages(args.runs):
@@ -372,7 +299,7 @@ def main():
     per, harness = run_configs(tapes, labels, args.count, args.duration)
     print(f"\nHarness check: baseline reproduces the run's periods on {sum(harness)}/{len(harness)} tapes")
     names = list(tapes)
-    controls = [l for l in labels.values() if l["control"]]
+    controls = [l for l in labels.values() if l.control]
     base = (statistics.mean(is_damaged(l) for l in controls) if controls
             else (n_dmg / len(labels) if labels else 0.0))
     configs = [summarize(per, c, names, base) for c in CONFIGS]

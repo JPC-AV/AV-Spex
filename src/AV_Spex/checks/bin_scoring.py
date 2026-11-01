@@ -240,6 +240,10 @@ def score_bins(profiles: Dict[float, BinProfile],
             continue                    # report does not carry this metric
         ranks_by_metric[spec.field] = _rank_within_file(excesses)
         families_present.add(spec.family)
+    # In FAMILY_WEIGHTS order, never set order: a set of strings iterates in
+    # an order that follows the per-process hash seed, which changed the
+    # floating-point sum and broke dominant-family ties differently per run.
+    families_present = sorted(families_present, key=list(FAMILY_WEIGHTS).index)
 
     if not families_present:
         return {b: BinScore(bin_start=b, score=0.0) for b in bins}

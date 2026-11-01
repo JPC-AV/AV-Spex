@@ -39,7 +39,6 @@ import re
 import shutil
 import subprocess
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -366,6 +365,27 @@ def resolve_run(arg):
     if len(hits) > 1:
         sys.exit(f"{arg}: ambiguous, matches {', '.join(h.name for h in hits)}")
     return hits[0]
+
+
+def find_packages(args, require=None):
+    """Corpus package directories from run IDs, run directories or package directories. With
+    `require` (a path inside a package, e.g. the ground-truth file), packages without it are
+    skipped, and said so."""
+    pkgs = []
+    for arg in args:
+        p = Path(arg).expanduser()
+        if (p / "package.json").exists():
+            pkgs.append(p)
+            continue
+        run = resolve_run(arg)
+        pkgs.extend(sorted(pj.parent for pj in (run / "packages").glob("*/package.json")))
+    if require:
+        missing = [d.name for d in pkgs if not (d / require).exists()]
+        if missing:
+            print(f"{len(missing)} package(s) without {require} skipped ({', '.join(missing)})",
+                  file=sys.stderr)
+        pkgs = [d for d in pkgs if (d / require).exists()]
+    return pkgs
 
 
 def list_runs():

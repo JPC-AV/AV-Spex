@@ -9,8 +9,9 @@ not score yet can be tried. `select_periods()` then runs stages 1-3 at any count
 optionally under different scoring (`scoring()`), exactly as period_grid.py always did.
 
 Loading walks the QCTools report three times and is most of a replay's cost, so the result is
-cached under $AVSPEX_CORPUS/cache, keyed by the report and by the source of the modules whose
-behaviour it captures. Editing any of those modules invalidates it.
+cached under $AVSPEX_CORPUS/cache, keyed by the report, by the parts of the run's
+frame-analysis JSON that stage 0 reads, and by the source of the modules whose behaviour it
+captures. Changing any of them invalidates it.
 """
 import bisect
 import contextlib
@@ -18,7 +19,6 @@ import gzip
 import hashlib
 import json
 import math
-import os
 import pickle
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -35,8 +35,11 @@ from AV_Spex.checks.frame_analysis import (
 )
 from AV_Spex.checks.qctools_bin_profile import PROFILE_BIN_SIZE, PSNR_CLIP
 
+from corpus import CORPUS
+
+BIN = PROFILE_BIN_SIZE   # seconds per bin, as in the QCTools bin profiles
 GT_FILE = "ground_truth/active_signalstats.txt.gz"
-CACHE_ROOT = Path(os.environ.get("AVSPEX_CORPUS", "~/git/JPC_AV/avspex_corpus")).expanduser() / "cache"
+CACHE_ROOT = CORPUS / "cache"
 CACHE_VERSION = 1   # bump when load_package() changes what it stores
 
 # Per-bin statistics kept for every tag in tag_bins.
@@ -118,7 +121,7 @@ def walk_report(xml_path, parser):
                 tag = elem.find('.//tag[@key="lavfi.signalstats.BRNG"]')
                 if tag is not None and tag.get("value"):
                     ff_brng.append((t, float(tag.get("value"))))
-                b = float(int(t // PROFILE_BIN_SIZE) * PROFILE_BIN_SIZE)
+                b = float(int(t // BIN) * BIN)
                 bucket = samples.setdefault(b, {})
                 counts[b] = counts.get(b, 0) + 1
                 for tag in elem.iter("tag"):
@@ -204,9 +207,12 @@ def _cache_prefix(pkg):
     return f"{pkg.name}-{hashlib.sha256(str(pkg.resolve()).encode()).hexdigest()[:8]}-"
 
 
-def _cache_path(pkg, xml):
+def _cache_path(pkg, xml, stage0_inputs):
+    """`stage0_inputs` is what load_package() takes from the frame-analysis JSON (bars, border
+    hints): the cached stage 0 is built from it, so it is part of the key."""
     st = xml.stat()
-    key = hashlib.sha256(f"{st.st_size}|{st.st_mtime_ns}|{_code_hash()}".encode())
+    inputs = json.dumps(stage0_inputs, sort_keys=True)
+    key = hashlib.sha256(f"{st.st_size}|{st.st_mtime_ns}|{inputs}|{_code_hash()}".encode())
     return CACHE_ROOT / f"{_cache_prefix(pkg)}{key.hexdigest()[:16]}.pkl.gz"
 
 
@@ -219,8 +225,11 @@ def load_package(pkg, use_cache=True) -> Package:
     xml = pkg / info["qctools_report"]
     fa = json.load(open(pkg / f"{name}_qc_metadata" / f"{name}_enhanced_frame_analysis.json"))
     meta = dict(info.get("video") or {}, frame_analysis_seconds=info.get("frame_analysis_seconds"))
+    bars_end = fa.get("color_bars_end_time") or 0
+    bars_regions = [(r["start"], r["end"]) for r in fa.get("bars_regions") or []]
+    hints = [tuple(h) for h in (fa.get("initial_borders") or {}).get("quality_frame_hints") or []]
 
-    cache = _cache_path(pkg, xml) if use_cache else None
+    cache = _cache_path(pkg, xml, (bars_end, bars_regions, hints)) if use_cache else None
     ctx = None
     if cache and cache.exists():
         try:
@@ -229,8 +238,6 @@ def load_package(pkg, use_cache=True) -> Package:
         except Exception:
             ctx = None
     if ctx is None:
-        bars_end = fa.get("color_bars_end_time") or 0
-        bars_regions = [(r["start"], r["end"]) for r in fa.get("bars_regions") or []]
         # Stage 0, exactly as EnhancedFrameAnalysis.analyze() builds it
         black = QCToolsParser(str(xml)).detect_black_segments(min_duration=2.0)
         avoid = merge_avoid_segments(black, bars_regions)
@@ -246,7 +253,7 @@ def load_package(pkg, use_cache=True) -> Package:
         ctx = Package(
             pkg=pkg, name=name, info=info, fa=fa, meta=meta, xml=xml,
             duration=meta["duration"], bars_end=bars_end, bars_regions=bars_regions,
-            hints=[tuple(h) for h in (fa.get("initial_borders") or {}).get("quality_frame_hints") or []],
+            hints=hints,
             black=black, avoid=avoid, violations=violations,
             histogram=getattr(parser, "violation_histogram", None),
             severity=getattr(parser, "violation_severity", None),
@@ -390,7 +397,7 @@ def select_periods(ctx: Package, count, dur, scores=None) -> List[tuple]:
     return sorted(final)
 
 
-def covered(bin_start, periods, bin_size=PROFILE_BIN_SIZE):
+def covered(bin_start, periods, bin_size=BIN):
     """A bin counts as sampled when a period covers at least half of it."""
     return any(min(bin_start + bin_size, s + d) - max(bin_start, s) >= bin_size / 2
                for s, d in periods)
@@ -398,3 +405,17 @@ def covered(bin_start, periods, bin_size=PROFILE_BIN_SIZE):
 
 def in_spans(t, spans):
     return any(s <= t < e for s, e in spans)
+
+
+def selector(col, direction):
+    """A tag column with its suspicious direction, e.g. 'brng_min+'."""
+    return f"{col}{direction}"
+
+
+def ranked_bins(rows, col, direction):
+    """Analyzable bins best-first for one tag; empty when the tag has no spread on this tape."""
+    vals = [(r[col], r["bin_start"]) for r in rows if r.get(col) is not None]
+    if len(vals) < 2 or min(v for v, _ in vals) == max(v for v, _ in vals):
+        return []
+    sign = -1 if direction == "+" else 1
+    return [b for _, b in sorted(vals, key=lambda vb: (sign * vb[0], vb[1]))]

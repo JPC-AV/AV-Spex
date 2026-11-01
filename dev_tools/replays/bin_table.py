@@ -44,14 +44,12 @@ from scipy.stats import spearmanr
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from corpus import resolve_run  # noqa: E402
-from _selection import covered, in_spans, load_package, select_periods, window  # noqa: E402
+from corpus import find_packages  # noqa: E402
+from _selection import BIN, covered, in_spans, load_package, select_periods, window  # noqa: E402
 
 from AV_Spex.checks import bin_scoring
-from AV_Spex.checks.qctools_bin_profile import PROFILE_BIN_SIZE
 from AV_Spex.utils.log_setup import logger
 
-BIN = PROFILE_BIN_SIZE
 FLAT_SPREAD = 1.1        # p90/p50 below this, with few zero bins: no targeting value
 REDUNDANT_RHO = 0.8      # |rho| against a scored metric above this: adds nothing new
 CONTENT_RHO = 0.6        # |rho| against mean luma above this: tracks brightness, not damage
@@ -65,18 +63,6 @@ def source_group(info):
         if f"/{group}" in src:
             return group
     return "other"
-
-
-def find_packages(args):
-    pkgs = []
-    for arg in args:
-        p = Path(arg).expanduser()
-        if (p / "package.json").exists():
-            pkgs.append(p)
-            continue
-        run = resolve_run(arg)
-        pkgs.extend(sorted(pj.parent for pj in (run / "packages").glob("*/package.json")))
-    return pkgs
 
 
 def avoid_reason(ctx, b):

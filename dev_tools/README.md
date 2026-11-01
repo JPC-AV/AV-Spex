@@ -118,9 +118,9 @@ methods.
   grid cell for cell.
 - `replays/bin_table.py <run> [--screen] [--out FILE]` writes one row per 10 s bin with every
   QCTools tag's per-bin statistics, the bin's suitability, score and families, and whether
-  today's selection covers it. `--screen` ranks every tag statistic without labels (availability, spread,
-  redundancy with scored metrics, correlation with luma and with motion, and where today's
-  score puts the tag's peak bin) to decide which tags are worth labeling for.
+  today's selection covers it. `--screen` ranks every tag statistic without labels
+  (availability, spread, redundancy with scored metrics, correlation with luma and with motion,
+  and where today's score puts the tag's peak bin) to decide which tags are worth labeling for.
 - `replays/tag_weights.py <run> [--damage MODE] [--out-dir DIR]` scores tags and scoring
   configurations against operator labels (see below). It needs labels, so run it after a
   labeling round.
@@ -128,11 +128,11 @@ methods.
 All three replays, and `label_sheet.py`, share `replays/_selection.py`, which rebuilds stage 0
 from the corpus and runs stages 1–3. Loading a package walks its QCTools report three times, so
 the result is cached in `$AVSPEX_CORPUS/cache/` (~0.5 MB per package). The cache key covers the
-report (size and modification time) and the source of `bin_scoring`, `bin_suitability`,
-`frame_analysis`, `qctools_bin_profile` and `_selection.py` itself, so editing any of them
-rebuilds it. It does **not** cover the package's `_enhanced_frame_analysis.json` (the bars
-regions stage 0 reads), so delete the package's cache entry if you change that file. Each
-package directory keeps one entry; loading under a new key deletes the old one.
+report (size and modification time), what stage 0 reads from the package's
+`_enhanced_frame_analysis.json` (head-bars end, bars regions, border hints) and the source of
+`bin_scoring`, `bin_suitability`, `frame_analysis`, `qctools_bin_profile` and `_selection.py`
+itself, so changing any of them rebuilds it. Each package directory keeps one entry; loading
+under a new key deletes the old one.
 `bin_table.py --no-cache` bypasses it. With a warm cache, a replay of the whole study run takes
 seconds.
 
@@ -143,9 +143,10 @@ so it can catch a regression but it can't give credit to a tag that isn't scored
 takes an operator.
 
 1. `python3 dev_tools/replays/bin_table.py <run> --screen`: pick candidate tags and update
-   `NEW_CANDIDATES` in `label_sheet.py`. This is a code edit: the candidate list (like
-   `LEGALITY_CANDIDATES` and `tag_weights.CONFIGS`) lives in the committed scripts, not in the
-   corpus, so commit it alongside the sheet's results.
+   `NEW_CANDIDATES` in `replays/study.py`. That module holds everything a round asks: the
+   candidate tags (`NEW_CANDIDATES`, `LEGALITY_CANDIDATES`) and the scoring configurations
+   compared (`CONFIGS`, `LEGALITY_CONFIGS`). It is code, not corpus data, so commit it alongside
+   the round's results.
 2. `python3 dev_tools/label_sheet.py <run> --probe --name round1` (drives mounted the first time,
    for start timecodes) writes to `$AVSPEX_CORPUS/labels/`:
    - `sheet_round1.csv`: ~12 bins per tape (`--per-tape`, `--controls`). Each tape gets 2
@@ -164,6 +165,14 @@ takes an operator.
    baked into dubbed or archival material; blank for none). Leave a row blank to skip it.
    Illegal levels in a graphic are `illegal_levels` (origin `content`), not
    `graphics_slate_only`: they are still what BRNG analysis measures.
+
+   **One row per finding.** When a bin's problems differ in severity or origin, copy the row
+   and keep its `blind_id`, one row each: e.g. `illegal_levels`, 2, `source` and `dropout`, 1,
+   `tape`. A bin counts as damaged when any of its findings does, so the tape dropout counts in
+   `tape` mode at its own severity. Joining origins (`source+tape`) still works, but then one
+   severity covers both.
+
+   Then run `python3 dev_tools/labels.py` to check the sheets (see below).
 4. `python3 dev_tools/replays/tag_weights.py <run> --damage MODE` reports:
    - per tag: hit rate of its top bins against the control base rate, and AUC overall and by
      defect type
@@ -172,32 +181,48 @@ takes an operator.
      across collections and tapes
    `MODE` decides what counts as damage: `labeled` (any defect at severity >= 1), `severe`
    (severity 2), `tape` (origin `tape`; for rows without an origin, i.e. round 1, `dropout`,
-   `sync_loss_roll` or `signal_loss_freeze`, which also counts round 1's still photos logged as
+   `sync_loss_roll` or `signal_loss_freeze`, so a round-1 still photo must not be logged as
    `signal_loss_freeze`) or `illegal` (any `illegal_levels`). Round 1 needs this: on worn VHS
    63% of random bins carry some defect at severity 1, so `labeled` leaves nothing for a tag
-   to beat. Outputs are `tag_weights_<MODE>_{tags,configs,per_tape}.csv`, written to `--out-dir` (default: the
-   current directory). `--tags` scores extra tag columns, e.g. `ydif_mean+,blur_max+`.
+   to beat. Outputs are `tag_weights_<MODE>_{tags,configs,per_tape}.csv`, written to
+   `--out-dir` (default: the current directory). `--tags` scores extra tag columns, e.g.
+   `ydif_mean+,blur_max+`.
 5. Bins a configuration targets that nobody has labeled are valued at the control base rate
    and listed in `tag_weights_<MODE>_per_tape.csv`. Any later sheet skips bins already labeled.
 6. Focused rounds: `label_sheet.py <run> --round legality --name round2 --regions FILE` builds a
    ~6-bin-per-tape sheet for the legal-floor luma measures (`under_black`, `over_white`, added to
    every bin by `_selection.add_legal_floor_columns`): 1 control, each measure's top bins, the
-   bins the legality `CONFIGS` would target, and bins from `FILE` (`video_id,tc_in,tc_out`
+   bins the `LEGALITY_CONFIGS` would target, and bins from `FILE` (`video_id,tc_in,tc_out`
    regions an operator flagged as missed; a DF tape's timecodes may be typed with `:`).
    Blind IDs carry an `L` prefix (`--id-prefix`).
 
 `labels/seed_labels.csv` holds earlier operator spot checks (same columns plus `bin_start` in
 seconds). Labels are keyed by `(video_id, bin_start)`, so they carry over to future runs.
 
-Both `label_sheet.py` and `tag_weights.py` load labels by globbing `labels/sheet_*.csv`, each
-read through the `key_*.json` of the same name (a sheet with no matching key is skipped
-silently), plus `seed_labels.csv`. Things to know:
+### Checking labels
 
-- Sheets are not validated on load. A misspelled defect or origin is read as given, so check
-  the tokens before running.
-- A row counts as labeled for `tag_weights.py` only when both `defect` and `severity` are
-  filled; `label_sheet.py` treats any row with a `defect` as labeled and won't ask about it
-  again.
-- `tape` mode matches `tape` anywhere in a `+`-joined origin, so `source+tape` counts.
-- If a bin appears in more than one file, the last one read wins without a warning: the seed
-  file first, then sheets in name order.
+`labels.py` holds the label schema and the one loader both tools use, so they agree on what is
+labeled: a row with both `defect` and `severity` filled. It reads every `labels/sheet_*.csv`
+through the `key_*.json` of the same name, plus `seed_labels.csv`, and checks them:
+
+```bash
+python3 dev_tools/labels.py     # every problem, then damaged/clean counts and base rate per mode
+```
+
+- **Errors** stop `label_sheet.py` and `tag_weights.py` until fixed:
+  - a defect or origin that isn't on the list (this catches notes typed into `origin`)
+  - a severity other than 0, 1 or 2
+  - a defect without a severity, or the other way round
+  - `none` joined with a defect
+  - a `blind_id` missing from the key, or a `video_id` that disagrees with the key (rows
+    reordered in Excel)
+- **Warnings** are reported and the tools go on:
+  - a sheet with no key (skipped)
+  - `none` at severity 1 or 2
+  - a damage finding with no origin on a sheet that has an origin column
+  - the same finding twice for one bin
+  - a bin labeled differently in two files. The later file wins: the seed file first, then
+    sheets in name order.
+
+Backups only count if they match `sheet_*.csv` and have a matching key, so
+`sheet_round1_blank.csv.bak` and `.xlsx` copies are ignored.

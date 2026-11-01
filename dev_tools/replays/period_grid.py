@@ -26,7 +26,6 @@ mismatch means the selection code moved on and this replay no longer mirrors ana
 """
 import argparse
 import csv
-import json
 import logging
 import statistics
 import sys
@@ -34,38 +33,19 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from corpus import resolve_run  # noqa: E402
-from _selection import GT_FILE, covered, in_spans, load_package, select_periods  # noqa: E402
+from corpus import find_packages  # noqa: E402
+from _selection import BIN, GT_FILE, covered, in_spans, load_package, select_periods  # noqa: E402
 
 from AV_Spex.utils.log_setup import logger
 
 COUNTS = (1, 2, 3, 4, 5, 6, 8)
 DURATIONS = (15, 30, 45, 60, 90, 120, 180)
-BIN = 10.0            # seconds, same as the QCTools bin profiles
 TOP_K = 5             # top-k recall
 # Damage events: runs of ground-truth frames over a threshold, merged across short gaps.
 BRNG_EVENT = 0.01     # fraction of active-area pixels out of range (QCTools violation threshold)
 TOUT_EVENT = 0.03     # fraction of temporal outliers (dropout/head-switching frames)
 EVENT_GAP = 1.0       # seconds; runs closer than this are one event
 EVENT_MIN = 0.5       # seconds; shorter runs are ignored
-
-
-def find_packages(args):
-    """Corpus package directories carrying ground truth, from run IDs or paths."""
-    pkgs = []
-    for arg in args:
-        p = Path(arg).expanduser()
-        if (p / "package.json").exists():
-            pkgs.append(p)
-            continue
-        run = resolve_run(arg)
-        found = sorted(pj.parent for pj in (run / "packages").glob("*/package.json"))
-        missing = [d.name for d in found if not (d / GT_FILE).exists()]
-        if missing:
-            print(f"{run.name}: {len(missing)} package(s) without ground truth skipped "
-                  f"({', '.join(missing)})", file=sys.stderr)
-        pkgs.extend(d for d in found if (d / GT_FILE).exists())
-    return pkgs
 
 
 def content_bins(gt_rows, avoid, effective_start, duration):
@@ -185,7 +165,7 @@ def main():
     logger.setLevel(logging.ERROR)  # selection code logs every placement decision
 
     all_rows, timing = [], []
-    for pkg in find_packages(args.runs):
+    for pkg in find_packages(args.runs, require=GT_FILE):
         try:
             rows, meta = replay_package(pkg, counts, durations)
         except Exception as e:  # keep going; one bad package should not sink the batch

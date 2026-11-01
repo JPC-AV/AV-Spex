@@ -7,7 +7,7 @@ already scores, so it cannot credit a tag that is not scored yet. An operator's 
 picks ~12 bins per tape, each 10 s long:
 
   - random analyzable bins as controls (the base rate each tag's hit rate is compared against)
-  - the bin where each candidate tag peaks (CANDIDATES, below: new tags and today's scored ones)
+  - the bin where each candidate tag peaks (study.CANDIDATES: new tags and today's scored ones)
   - the evidence bins of today's selection (replayed at 6 x 30, the app default)
   - the 2nd-ranked bin of each new candidate, while room remains
 
@@ -15,11 +15,13 @@ and writes them to $AVSPEX_CORPUS/labels/ as
 
   sheet_<name>.csv   video_id, tc_in, tc_out (the file's own NDF/DF timecode, matching the NLE),
                      blind_id, and empty defect / severity / origin / notes columns to fill in
+                     (labels.SHEET_COLUMNS)
   key_<name>.json    which selector(s) put each bin on the sheet. Don't open it while labeling.
 
 Rows are sorted by tape and timecode so each tape is one pass through the NLE; nothing on the
 sheet says why a bin is there. Bins already labeled in an earlier sheet (or seed_labels.csv)
-are skipped, so a second round only asks about new bins.
+are skipped, so a second round only asks about new bins. The sheets must pass labels.py's
+check first.
 
     python3 dev_tools/label_sheet.py period-study-2026-10 --probe          # first time; drives mounted
     python3 dev_tools/label_sheet.py period-study-2026-10 --name round1
@@ -31,7 +33,7 @@ above legal white) be scored? Per tape, up to --per-tape 6:
   - 1 random control
   - the top bin of under_black, over_white and BRNG (for comparison)
   - bins from --regions, a CSV of video_id,tc_in,tc_out an operator flagged as missed
-  - the unlabeled evidence bins of the legality scoring configurations in tag_weights.CONFIGS
+  - the unlabeled evidence bins of the legality scoring configurations (study.LEGALITY_CONFIGS)
   - the 2nd and 3rd bins of under_black and over_white, while room remains
 
     python3 dev_tools/label_sheet.py period-study-2026-10 --round legality --name round2 \
@@ -41,9 +43,11 @@ above legal white) be scored? Per tape, up to --per-tape 6:
 caches it in labels/timecode.json. Without a cached start timecode a tape's rows are written
 from 00:00:00:00 and flagged in the notes column.
 
-Filling in: defect is one of DEFECTS (separate several with '+', e.g. dropout+noise), severity 0
-(nothing worth a period), 1 (visible) or 2 (obvious/serious), and origin one of ORIGINS (where the
-problem comes from; leave it blank for none). A row left blank counts as unlabeled.
+Filling in: see labels.py. In short, defect is one of labels.DEFECTS (several joined with '+',
+e.g. dropout+noise), severity 0 (nothing worth a period), 1 (visible) or 2 (obvious/serious), and
+origin one of labels.ORIGINS (where the problem comes from; blank for none). A bin with findings
+of different severity or origin takes one row each, under the same blind_id. A row left blank
+counts as unlabeled. Check a sheet with `python3 dev_tools/labels.py` after editing it.
 """
 import argparse
 import csv
@@ -57,46 +61,16 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE / "replays"))
-from bin_table import find_packages, package_rows  # noqa: E402
-from _selection import load_package  # noqa: E402
+from corpus import find_packages  # noqa: E402
+from labels import DEFECTS, LABELS, ORIGINS, SHEET_COLUMNS, labeled_bins  # noqa: E402
+from bin_table import package_rows  # noqa: E402
+from study import CANDIDATES, CONFIGS, LEGALITY_CANDIDATES, LEGALITY_CONFIGS, NEW_CANDIDATES  # noqa: E402
+from _selection import BIN, load_package, ranked_bins, score, scoring, select_periods, selector  # noqa: E402
 
+from AV_Spex.checks import bin_scoring
 from AV_Spex.checks.qct_parse import _tc_format_timecode, _tc_parse_start_timecode
 from AV_Spex.utils import ffprobe_probe
 from AV_Spex.utils.log_setup import logger
-
-import os
-LABELS = Path(os.environ.get("AVSPEX_CORPUS", "~/git/JPC_AV/avspex_corpus")).expanduser() / "labels"
-BIN = 10.0
-
-DEFECTS = ("none", "dropout", "head_switching_tracking", "sync_loss_roll", "illegal_levels",
-           "chroma_error", "noise", "signal_loss_freeze", "graphics_slate_only", "other")
-# tape: this transfer/playback (dropout, tracking, sync). content: in the program as made (sub-black
-# clothing, a still photo, a graphic with illegal levels). source: baked into dubbed or archival
-# material (generation loss, head switching recorded in). Join with '+' when a bin has more than one.
-ORIGINS = ("tape", "content", "source")
-
-# (column in bin_table's output, direction): '+' means high is suspicious, '-' low.
-# New tags chosen from the `bin_table.py --screen` of period-study-2026-10 (present in every
-# report, not flat, not redundant with a scored metric, not a luma/motion proxy):
-NEW_CANDIDATES = (
-    ("udif_max", "+"),          # chroma temporal spike, U   (rho vs YDIF 0.44)
-    ("vdif_max", "+"),          # chroma temporal spike, V   (0.45)
-    ("ydif_max", "+"),          # single-frame luma jump: sync loss / roll, but also hard cuts
-    ("psnr_psnr_y_min", "-"),   # worst inter-field PSNR: fields disagreeing
-    ("satlow_mean", "+"),       # raised chroma floor (noise/chroma error); ~independent of luma/motion
-    ("tout_max", "+"),          # TOUT spike, beside the scored mean
-    ("brng_min", "+"),          # illegal levels sustained through the whole bin
-)
-# Today's scored metrics, so their weights can be judged on the same labels.
-SCORED_CANDIDATES = (
-    ("bp_brng_mean", "+"), ("bp_satmax_max", "+"), ("bp_tout_mean", "+"),
-    ("bp_vrep_mean", "+"), ("bp_deflicker_absmax", "+"),
-)
-CANDIDATES = NEW_CANDIDATES + SCORED_CANDIDATES
-
-# Round 2 (--round legality): the legal-floor luma columns, with BRNG as the yardstick.
-LEGALITY_CANDIDATES = (("under_black", "+"), ("over_white", "+"), ("bp_brng_mean", "+"))
-LEGALITY_CONFIGS = ("+under_black(leg)", "+over_white(leg)", "+legal_floor(leg)")
 
 
 def round1_depth(col, d):
@@ -105,19 +79,6 @@ def round1_depth(col, d):
 
 def legality_depth(col, d):
     return 1 if col == "bp_brng_mean" else 3
-
-
-def selector(col, direction):
-    return f"{col}{direction}"
-
-
-def ranked_bins(rows, col, direction):
-    """Analyzable bins best-first for one tag; empty when the tag has no spread on this tape."""
-    vals = [(r[col], r["bin_start"]) for r in rows if r.get(col) is not None]
-    if len(vals) < 2 or min(v for v, _ in vals) == max(v for v, _ in vals):
-        return []
-    sign = -1 if direction == "+" else 1
-    return [b for _, b in sorted(vals, key=lambda vb: (sign * vb[0], vb[1]))]
 
 
 RANK_NAMES = {1: "2nd", 2: "3rd"}
@@ -225,12 +186,9 @@ def region_bins(path, rows_by_tape, timing, candidates, per_region=2):
 def config_picks(ctx, names, skip):
     """[(bin_start, 'pick:<config>')]: evidence bins that each named tag_weights configuration
     targets at 6 x 30 and nobody has labeled."""
-    import tag_weights   # imports this module, so not at the top
-    from _selection import score, scoring, select_periods
-    from AV_Spex.checks import bin_scoring
     picks = []
     for name in names:
-        metrics, weights = tag_weights.CONFIGS[name]
+        metrics, weights = CONFIGS[name]
         with scoring(metrics, weights):
             scores = score(ctx)
             periods = select_periods(ctx, 6, 30, scores=scores)
@@ -239,25 +197,6 @@ def config_picks(ctx, names, skip):
                 if e.bin_start not in skip:
                     picks.append((e.bin_start, f"pick:{name}"))
     return picks
-
-
-def labeled_bins():
-    """(video_id, bin_start) already labeled, in any filled sheet or the seed file."""
-    done = set()
-    for sheet in LABELS.glob("sheet_*.csv"):
-        key_path = sheet.with_name(sheet.name.replace("sheet_", "key_", 1)).with_suffix(".json")
-        if not key_path.exists():
-            continue
-        key = json.loads(key_path.read_text())
-        for row in csv.DictReader(open(sheet)):
-            if (row.get("defect") or "").strip() and row["blind_id"] in key:
-                k = key[row["blind_id"]]
-                done.add((k["video_id"], float(k["bin_start"])))
-    seed = LABELS / "seed_labels.csv"
-    if seed.exists():
-        for row in csv.DictReader(open(seed)):
-            done.add((row["video_id"], float(row["bin_start"])))
-    return done
 
 
 def main():
@@ -326,8 +265,7 @@ def main():
         print(f"{ctx.name}: {len(chosen)} bins", file=sys.stderr)
 
     with open(sheet_path, "w", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=["video_id", "tc_in", "tc_out", "blind_id", "defect", "severity",
-                                           "origin", "notes"])
+        w = csv.DictWriter(fh, fieldnames=SHEET_COLUMNS)
         w.writeheader()
         w.writerows(sheet)
     key_path.write_text(json.dumps(key, indent=1))
