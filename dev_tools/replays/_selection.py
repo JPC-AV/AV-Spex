@@ -8,6 +8,12 @@ statistics of **every** numeric QCTools tag on video frames (`tag_bins`), so tag
 not score yet can be tried. `select_periods()` then runs stages 1-3 at any count x duration,
 optionally under different scoring (`scoring()`), exactly as period_grid.py always did.
 
+The harness check (`harness_replay()`, `harness_status()`) replays a package at the run's own
+settings and compares with the periods the run actually chose. A tape that differs on purpose
+(the code changed since the run, and the change is wanted) is listed in the run's
+expected_drift.json (written by harness.py) with the periods it now gets, so only *unexpected*
+drift, including an expected tape drifting again, reads as a stale replay.
+
 Loading walks the QCTools report three times and is most of a replay's cost, so the result is
 cached under $AVSPEX_CORPUS/cache, keyed by the report, by the parts of the run's
 frame-analysis JSON that stage 0 reads, and by the source of the modules whose behaviour it
@@ -15,6 +21,7 @@ captures. Changing any of them invalidates it.
 """
 import bisect
 import contextlib
+import functools
 import gzip
 import hashlib
 import json
@@ -39,6 +46,7 @@ from corpus import CORPUS
 
 BIN = PROFILE_BIN_SIZE   # seconds per bin, as in the QCTools bin profiles
 GT_FILE = "ground_truth/active_signalstats.txt.gz"
+DRIFT_FILE = "expected_drift.json"     # in the run directory, next to run.json
 CACHE_ROOT = CORPUS / "cache"
 CACHE_VERSION = 1   # bump when load_package() changes what it stores
 
@@ -395,6 +403,61 @@ def select_periods(ctx: Package, count, dur, scores=None) -> List[tuple]:
             stage2, simulate_comparison(stage2, ctx.ff_rows, ctx.gt_rows), cands, ctx.avoid, dur,
             ctx.bars_end)
     return sorted(final)
+
+
+# --- harness check --------------------------------------------------------------------------
+
+def harness_replay(ctx, scores=None):
+    """The periods the replay picks at the run's own count x duration, rounded like
+    ctx.actual; None when the run recorded no periods."""
+    if not ctx.actual:
+        return None
+    run = select_periods(ctx, len(ctx.actual), ctx.actual[0][1], scores=scores)
+    return [(round(s), round(d)) for s, d in run]
+
+
+def run_dir(ctx):
+    return Path(ctx.pkg).parent.parent
+
+
+@functools.lru_cache(maxsize=None)
+def _drift_entries(path):
+    return json.loads(path.read_text()).get("tapes", {}) if path.exists() else {}
+
+
+def expected_drift(ctx):
+    """This tape's expected_drift.json entry ({'periods', 'reason', ...}), or None."""
+    return _drift_entries(run_dir(ctx) / DRIFT_FILE).get(ctx.name)
+
+
+def harness_status(ctx, replayed):
+    """'match' (the run's own periods), 'expected' (the periods its expected_drift.json entry
+    recorded), 'UNEXPECTED' (anything else: the replay is stale, or the code moved on again),
+    or None when the run recorded no periods."""
+    if replayed is None:
+        return None
+    if replayed == ctx.actual:
+        return "match"
+    entry = expected_drift(ctx)
+    if entry and [tuple(p) for p in entry["periods"]] == replayed:
+        return "expected"
+    return "UNEXPECTED"
+
+
+def harness_summary(statuses):
+    """One line from {tape: status}, naming every tape that is not a plain match."""
+    checked = {t: s for t, s in statuses.items() if s is not None}
+    counts = {s: sum(v == s for v in checked.values()) for s in ("match", "expected", "UNEXPECTED")}
+    line = (f"Harness check: {counts['match']}/{len(checked)} tapes reproduce the run's periods, "
+            f"{counts['expected']} drift as expected, {counts['UNEXPECTED']} UNEXPECTED")
+    for status in ("UNEXPECTED", "expected"):
+        names = sorted(t for t, s in checked.items() if s == status)
+        if names:
+            line += f"\n  {status}: {', '.join(names)}"
+    if counts["UNEXPECTED"]:
+        line += ("\n  An UNEXPECTED tape means this replay no longer mirrors the app, or the code "
+                 "changed again: find out which before trusting the numbers (harness.py).")
+    return line
 
 
 def covered(bin_start, periods, bin_size=BIN):

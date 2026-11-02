@@ -20,9 +20,10 @@ plus pivot tables of the cross-package medians printed to stdout.
 
 Stage 3 uses the ground truth as the active-area measurement. That is the same ffprobe
 signalstats over the same crop the real run used, so at the run's own settings the replayed
-periods must equal the run's `brng_analysis.analysis_periods`. The `harness_match` column
-checks exactly that, and the summary reports it. Trust the grid only while it holds: a
-mismatch means the selection code moved on and this replay no longer mirrors analyze().
+periods must equal the run's `brng_analysis.analysis_periods`. The `harness` column checks
+exactly that (match / expected / UNEXPECTED, see harness.py), and the summary reports it.
+Trust the grid only while no tape is UNEXPECTED: that means the selection code moved on and
+this replay no longer mirrors analyze().
 """
 import argparse
 import csv
@@ -34,7 +35,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from corpus import find_packages  # noqa: E402
-from _selection import BIN, GT_FILE, covered, in_spans, load_package, select_periods  # noqa: E402
+from _selection import (BIN, GT_FILE, covered, harness_status, harness_summary, in_spans,  # noqa: E402
+                        load_package, select_periods)
 
 from AV_Spex.utils.log_setup import logger
 
@@ -131,7 +133,8 @@ def replay_package(pkg, counts, durations):
                    "tape_minutes": round(duration / 60, 1), "periods": ";".join(f"{s:.0f}+{d:.0f}" for s, d in final)}
             row.update(score(final, bins, ev_brng, ev_tout, gt_content))
             if count == run_count and dur == run_dur:
-                row["harness_match"] = int([(round(s), round(d)) for s, d in final] == actual)
+                status = harness_status(ctx, [(round(s), round(d)) for s, d in final])
+                row["harness"], row["harness_match"] = status, int(status == "match")
             rows.append(row)
     return rows, meta
 
@@ -173,8 +176,8 @@ def main():
             continue
         all_rows.extend(rows)
         timing.append(meta)
-        match = [r.get("harness_match") for r in rows if "harness_match" in r]
-        print(f"{rows[0]['package']}: {meta['duration'] / 60:.0f} min, harness_match={match[0] if match else 'n/a'}")
+        status = [r["harness"] for r in rows if "harness" in r]
+        print(f"{rows[0]['package']}: {meta['duration'] / 60:.0f} min, harness={status[0] if status else 'n/a'}")
 
     if not all_rows:
         sys.exit("no packages replayed")
@@ -185,8 +188,7 @@ def main():
         w.writeheader()
         w.writerows(all_rows)
 
-    checks = [r["harness_match"] for r in all_rows if "harness_match" in r]
-    print(f"\nHarness check: {sum(checks)}/{len(checks)} packages reproduce the run's periods")
+    print("\n" + harness_summary({r["package"]: r["harness"] for r in all_rows if "harness" in r}))
     for r in all_rows:
         r["hit_mean"] = statistics.mean([r[k] for k in ("hit_brng", "hit_tout", "hit_vrep") if r.get(k) is not None] or [0])
     for field in ("hit_mean", f"top{TOP_K}_tout", f"top{TOP_K}_brng", "event_recall_tout", "event_recall_brng",

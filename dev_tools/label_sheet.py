@@ -39,6 +39,13 @@ above legal white) be scored? Per tape, up to --per-tape 6:
     python3 dev_tools/label_sheet.py period-study-2026-10 --round legality --name round2 \
         --regions ~/git/JPC_AV/avspex_corpus/labels/missed_regions.csv
 
+--bins FILE builds a sheet of exactly the bins in FILE (video_id,bin_start, e.g. the
+tag_weights_<MODE>_stake_bins.csv that `tag_weights.py --stake` writes), plus --controls random
+controls per tape (default 1), so a round asks only about bins that can change a verdict:
+
+    python3 dev_tools/label_sheet.py period-study-2026-10 --bins tag_weights_tape_stake_bins.csv \
+        --name round3
+
 --probe reads each package's start timecode from its source video (package.json "source") and
 caches it in labels/timecode.json. Without a cached start timecode a tape's rows are written
 from 00:00:00:00 and flagged in the notes column.
@@ -85,13 +92,16 @@ RANK_NAMES = {1: "2nd", 2: "3rd"}
 
 
 def choose_bins(rows, per_tape, n_controls, rng, skip, candidates=CANDIDATES, depth=round1_depth,
-                evidence=True, forced=()):
+                evidence=True, forced=(), forced_anywhere=False):
     """{bin_start: [selectors]} for one tape. Every selector a chosen bin qualifies for is
     recorded, so a bin picked as a control that is also a tag's peak counts for both.
 
     Fill order: controls, each candidate's top bin, then `forced` ((bin_start, selector) pairs:
     missed regions, configuration picks), today's evidence bins, and the deeper-ranked bins
-    (`depth(col, d)` of them per candidate) while room remains."""
+    (`depth(col, d)` of them per candidate) while room remains. Forced bins must be analyzable
+    unless `forced_anywhere` (a list someone asked for by name, e.g. a scored evidence bin whose
+    midpoint falls in a short black segment)."""
+    every_bin = {r["bin_start"] for r in rows}
     rows = [r for r in rows if r["analyzable"]]
     pool = [r["bin_start"] for r in rows if r["bin_start"] not in skip]
     qualifies = {}
@@ -107,8 +117,8 @@ def choose_bins(rows, per_tape, n_controls, rng, skip, candidates=CANDIDATES, de
     ev = [r["bin_start"] for r in rows if r["evidence"] and r["bin_start"] not in skip] if evidence else []
     for b in ev:
         qualifies.setdefault(b, []).append("evidence")
-    analyzable = {r["bin_start"] for r in rows}
-    forced = [(b, sel) for b, sel in forced if b in analyzable and b not in skip]
+    allowed = every_bin if forced_anywhere else {r["bin_start"] for r in rows}
+    forced = [(b, sel) for b, sel in forced if b in allowed and b not in skip]
     for b, sel in forced:
         qualifies.setdefault(b, []).append(sel)
 
@@ -199,6 +209,14 @@ def config_picks(ctx, names, skip):
     return picks
 
 
+def read_bins(path):
+    """{video_id: [bin_start]} from a CSV with video_id and bin_start columns."""
+    out = {}
+    for row in csv.DictReader(open(Path(path).expanduser(), newline="")):
+        out.setdefault(row["video_id"].strip(), []).append(float(row["bin_start"]))
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("runs", nargs="+")
@@ -208,15 +226,20 @@ def main():
     ap.add_argument("--per-tape", type=int, default=None, help="default 12 (tags) / 6 (legality)")
     ap.add_argument("--controls", type=int, default=None, help="default 2 (tags) / 1 (legality)")
     ap.add_argument("--regions", default=None, help="CSV of video_id,tc_in,tc_out flagged as missed")
-    ap.add_argument("--id-prefix", default=None, help="prefix for blind IDs (default 'L' for legality)")
+    ap.add_argument("--bins", default=None,
+                    help="CSV of video_id,bin_start: a sheet of exactly these bins (+ --controls); "
+                         "overrides --round")
+    ap.add_argument("--id-prefix", default=None,
+                    help="prefix for blind IDs (default 'L' for legality, 'S' for --bins)")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--probe", action="store_true", help="read start timecodes from the source videos")
     args = ap.parse_args()
-    legality = args.round == "legality"
+    listed = read_bins(args.bins) if args.bins else None
+    legality = args.round == "legality" and listed is None
     per_tape = args.per_tape or (6 if legality else 12)
-    n_controls = args.controls if args.controls is not None else (1 if legality else 2)
-    prefix = args.id_prefix if args.id_prefix is not None else ("L" if legality else "")
-    candidates = LEGALITY_CANDIDATES if legality else CANDIDATES
+    n_controls = args.controls if args.controls is not None else (1 if legality or listed is not None else 2)
+    prefix = args.id_prefix if args.id_prefix is not None else ("L" if legality else "S" if listed is not None else "")
+    candidates = LEGALITY_CANDIDATES if legality else () if listed is not None else CANDIDATES
     depth = legality_depth if legality else round1_depth
     logger.setLevel(logging.ERROR)
     LABELS.mkdir(parents=True, exist_ok=True)
@@ -252,9 +275,15 @@ def main():
         forced = list(regions.get(ctx.name, []))
         if legality:
             forced += config_picks(ctx, LEGALITY_CONFIGS, tape_skip)
+        if listed is not None:
+            forced += [(b, "listed") for b in listed.get(ctx.name, [])]
+            if not forced:
+                continue
         rng = random.Random(f"{args.seed}:{ctx.name}")
-        chosen = choose_bins(rows, per_tape, n_controls, rng, tape_skip, candidates=candidates,
-                             depth=depth, evidence=not legality, forced=forced)
+        chosen = choose_bins(rows, per_tape if listed is None else len(forced) + n_controls, n_controls,
+                             rng, tape_skip, candidates=candidates, depth=depth,
+                             evidence=listed is None and not legality, forced=forced,
+                             forced_anywhere=listed is not None)
         note = "" if ctx.name in tc_cache else "start TC not probed: positions from 00:00:00:00"
         for i, b in enumerate(sorted(chosen), 1):
             blind = f"{prefix}{ctx.name[-5:]}-{i:02d}"

@@ -110,9 +110,26 @@ often it does. That check is what makes its other numbers believable. It is also
 the replay as stale once the code it mirrors changes, since these scripts call private
 methods.
 
+A tape can also differ because the code changed on purpose since the run (a gate fix that
+moves a period). `replays/harness.py` tells the two apart:
+
+```bash
+python3 dev_tools/replays/harness.py <run>                       # status per tape
+python3 dev_tools/replays/harness.py <run> --accept TAPE... --reason "what moved it and why"
+python3 dev_tools/replays/harness.py <run> --forget TAPE...      # drop an entry
+```
+
+`--accept` records the tape's current periods, the reason, the date and the code commit in
+`runs/<run>/expected_drift.json`. Every replay then reports each tape as `match` (the run's own
+periods), `expected` (the recorded periods) or `UNEXPECTED`. Only the last means the replay
+can't be trusted. A recorded tape that moves again is `UNEXPECTED`, and an entry for a tape
+that matches again is flagged as no longer needed. Accept only drift you have looked at and can
+explain. `period-study-2026-10` records four: 01823, 02225 and 02328 (the 2026-10-10
+short-tape overlap fix) and 02211 (the tail-static gate, 22a2c20).
+
 - `replays/period_grid.py <run> [--counts 3,6,8] [--durations 30,60] [--out FILE]` scores
-  every period count × duration against the ground truth. Its harness check (`harness_match`)
-  compares against the run's own periods. It needs a run collected with `-g`. This is the
+  every period count × duration against the ground truth. Its harness check (`harness`, and
+  `harness_match` = 1 for a plain match) compares against the run's own periods. It needs a run collected with `-g`. This is the
   replay behind the October 2026 change to 6 × 30. That study's outputs were imported as the
   run `period-study-2026-10` (`corpus.py import`), and replaying it reproduces the original
   grid cell for cell.
@@ -121,9 +138,9 @@ methods.
   today's selection covers it. `--screen` ranks every tag statistic without labels
   (availability, spread, redundancy with scored metrics, correlation with luma and with motion,
   and where today's score puts the tag's peak bin) to decide which tags are worth labeling for.
-- `replays/tag_weights.py <run> [--damage MODE] [--out-dir DIR]` scores tags and scoring
-  configurations against operator labels (see below). It needs labels, so run it after a
-  labeling round.
+- `replays/tag_weights.py <run> [--damage MODE] [--stake [CONFIG...]] [--out-dir DIR]` scores
+  tags and scoring configurations against operator labels (see below). It needs labels, so
+  run it after a labeling round.
 
 All three replays, and `label_sheet.py`, share `replays/_selection.py`, which rebuilds stage 0
 from the corpus and runs stages 1–3. Loading a package walks its QCTools report three times, so
@@ -187,8 +204,33 @@ takes an operator.
    to beat. Outputs are `tag_weights_<MODE>_{tags,configs,per_tape}.csv`, written to
    `--out-dir` (default: the current directory). `--tags` scores extra tag columns, e.g.
    `ydif_mean+,blur_max+`.
+
+   **Uncertainty.** Every headline number carries a 95 % interval from resampling whole tapes
+   (`--bootstrap N`, default 2000; `0` turns it off). Bins on one tape aren't independent, so
+   tapes are the unit. Tags get `p@1_lo/hi`, the base rate's interval and `P(>base)`.
+   Configurations get `obj_lo/hi`, and `delta` (objective minus the baseline's on the same
+   resample) with `delta_lo/hi` and `P(>0)`. A delta interval that includes 0 hasn't shown the
+   configuration is better, whatever its point estimate. On the October 2026 labels,
+   `impulsive_heavy` in `tape` mode is +0.036 (−0.001 to +0.076, `P(>0)` 0.97).
 5. Bins a configuration targets that nobody has labeled are valued at the control base rate
    and listed in `tag_weights_<MODE>_per_tape.csv`. Any later sheet skips bins already labeled.
+
+   **What another round could change (`--stake`).** Before labeling more, run
+   `tag_weights.py <run> --damage MODE --stake [CONFIG ...]`. For each named configuration
+   (default: all), it sets that configuration's and the baseline's unlabeled targets all
+   damaged or all clean, by group (shared, config only, baseline only), and reports the range
+   of objective delta labeling them could produce:
+   - `settled-worse`: the delta stays below `--margin` (default +0.02) in every case
+   - `settled-better`: it stays above the margin in every case
+   - `open`: labeling could go either way
+
+   Settled questions need no more labels. The open configurations' bins go to
+   `tag_weights_<MODE>_stake_bins.csv`. Build a sheet of just those with
+   `label_sheet.py <run> --bins FILE --name NAME`: the listed bins plus `--controls` (default
+   1) per tape, blind IDs prefixed `S`. The bound is a worst case, so a configuration that moves
+   many tapes onto unlabeled bins is always open: name the configurations the decision is
+   between. On the round-2 labels, the legal-floor configurations come out `settled-worse`,
+   and `--stake impulsive_heavy` in `tape` mode lists 65 bins.
 6. Focused rounds: `label_sheet.py <run> --round legality --name round2 --regions FILE` builds a
    ~6-bin-per-tape sheet for the legal-floor luma measures (`under_black`, `over_white`, added to
    every bin by `_selection.add_legal_floor_columns`): 1 control, each measure's top bins, the
