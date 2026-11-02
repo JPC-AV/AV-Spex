@@ -36,12 +36,15 @@ the soft rules are evaluated only over the measures a report actually carries.
 When fewer than two are available the soft gate is not applied at all: with one
 measure there is nothing to corroborate with, and a single-signal gate on this
 data is exactly the failure mode being avoided. Reports with only signalstats
-still get both hard rules.
+and psnr still get both hard rules, and four soft measures (YDIF, VREP, the
+luma floor and field PSNR).
 
 Thresholds below were measured across nine sample reports (eight healthy JPC
 tapes, one LC tape with known signal loss and static). No soft rule fires on
 any bin of the healthy tapes; on the damaged tape the gate marks the lead-in
-static, the sub-black signal loss, and the end-of-tape hash.
+static, the sub-black signal loss, and the end-of-tape hash. The luma-floor and
+field-PSNR rules were added from the 27-tape corpus (period-study-2026-10),
+where an operator labeled post-program static on nine signalstats-only tapes.
 """
 
 from dataclasses import dataclass, field
@@ -90,6 +93,26 @@ YDIF_DECORRELATED_FRACTION = 0.20
 # Vertical line repetition — the deck repeating lines to conceal dropouts.
 # Flat-field signal loss measures ~0.99.
 VREP_CONCEALMENT = 0.25
+
+# The two below exist for reports that carry only signalstats and psnr (every
+# AV Spex-generated report). Without them such a report has two soft measures,
+# YDIF and VREP, and snow never trips VREP — so post-program static scored as
+# the worst picture on 9 of 27 corpus tapes (period-study-2026-10) and won a
+# period on one. Margins below are from that corpus: 14 operator-labeled static
+# bins against all 2,990 analyzable program bins, on which neither rule fires
+# even alone.
+
+# 10th-percentile luma, 10-bit (scaled for 8-bit). Snow is full-range noise,
+# so a tenth of every frame sits at the bottom of the scale: static measures
+# 4-34. Picture, including deliberately crushed or sub-black content, keeps it
+# near black: lowest program bin 48.7, 0.1th percentile 59.6.
+NOISE_FLOOR_10BIT = 40.0
+
+# QCTools' psnr is measured between the two fields of each frame. Static has
+# no relation between them: 11.6-16.9 dB on the bins that cleared this, up to
+# 23 dB on a bin that is half program. Program bins bottom out at 18.9 dB (a
+# strobing music video, JPC_AV_01663 @ 1870s); 0.1th percentile 21.5.
+FIELD_PSNR_UNCORRELATED = 17.0
 
 # Number of soft reasons that must agree before a bin is gated.
 SOFT_REASONS_REQUIRED = 2
@@ -159,6 +182,10 @@ def _hard_reasons(profile: BinProfile, bit_depth_10: bool) -> List[str]:
     return reasons
 
 
+def _noise_floor(bit_depth_10: bool) -> float:
+    return NOISE_FLOOR_10BIT if bit_depth_10 else NOISE_FLOOR_10BIT / 4.0
+
+
 def _soft_reasons(profile: BinProfile, bit_depth_10: bool) -> Tuple[List[str], int]:
     """Corroborating reasons, plus how many of them could be measured here."""
     reasons = []
@@ -190,6 +217,18 @@ def _soft_reasons(profile: BinProfile, bit_depth_10: bool) -> Tuple[List[str], i
         available += 1
         if profile.vrep_mean > VREP_CONCEALMENT:
             reasons.append(f'sustained line repetition (VREP {profile.vrep_mean:.2f})')
+
+    if profile.ylow_mean is not None:
+        available += 1
+        if profile.ylow_mean < _noise_floor(bit_depth_10):
+            reasons.append(f'pixel floor far below black, as in full-range noise '
+                           f'(YLOW {profile.ylow_mean:.0f})')
+
+    if profile.psnr_mean is not None:
+        available += 1
+        if profile.psnr_mean < FIELD_PSNR_UNCORRELATED:
+            reasons.append(f'the two fields of each frame are unrelated '
+                           f'(field PSNR {profile.psnr_mean:.1f} dB)')
 
     return reasons, available
 

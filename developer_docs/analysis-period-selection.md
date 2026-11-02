@@ -176,6 +176,15 @@ search and reliably outrank real problems:
 | flat field | `entropy_mean < 0.25` | down to 0.40 | 0.30 (and caught by the hard rule anyway) |
 | luma uncorrelated frame to frame | `ydif_mean > 0.20 × full scale` | peaks at 0.23 in end-of-tape bins the tail rule drops | 0.40+ |
 | line repetition | `vrep_mean > 0.25` | ~0 | ~0.99 on flat-field loss |
+| pixel floor far below black (full-range noise) | `ylow_mean < 40` at 10-bit (10 at 8-bit) | down to 48.7 (B&W photos with sub blacks, `JPC_AV_02216` @ 530s) | 4–34 |
+| fields of each frame unrelated | `psnr_mean < 17 dB` (QCTools' psnr is field to field) | down to 18.9 (strobing music video, `JPC_AV_01663` @ 1870s) | 8.7–16.9 |
+
+The last two exist for **reports carrying only signalstats + psnr**, which is every report AV
+Spex generates. With only YDIF and VREP to pair, snow could never be gated: VREP reads ~0 on it and
+YDIF crosses its threshold on only some static bins. Post-program static then scored as the worst
+picture on 9 of 27 corpus tapes (`period-study-2026-10`) and won a 6×30 period on `JPC_AV_02211`.
+Calibrated on 14 operator-labeled static bins against all 2,990 analyzable program bins, on which
+neither rule fires even alone; at 6×30 only `JPC_AV_02211` moves.
 
 Single-signal gating is exactly the failure mode being avoided, so one reason is never enough: a
 cut-heavy passage has low SSIM, a locked-off interview has repeated fields, a noisy transfer has low
@@ -186,7 +195,8 @@ fields) are both healthy content that a single rule would have thrown away.
 
 - **Availability.** Soft rules are evaluated only over the measures the report carries. With fewer
   than two available the soft gate is skipped entirely — there is nothing to corroborate with. A
-  signalstats-only report still gets both hard rules, and can still pair YDIF with VREP.
+  signalstats+psnr report still gets both hard rules, and four soft measures (YDIF, VREP, the
+  luma floor, field PSNR).
 - **Sample size.** A bin needs `MIN_PICTURE_FRAMES` (30) non-black frames before soft rules apply;
   below that its statistics come from a handful of frames (`JPC_AV_01710` @ 220s is 299/300 black).
 - **Whole-tape guard.** If the soft rules would gate more than 60% of the content bins, the tape's

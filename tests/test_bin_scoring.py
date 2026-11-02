@@ -141,6 +141,57 @@ def test_equal_family_weights_give_families_equal_say():
     assert scores[30.0].dominant_family == 'impulsive'
 
 
+def test_dominant_family_tie_goes_to_the_first_family_in_weight_order():
+    """Equal contributions resolve in FAMILY_WEIGHTS order, not set order.
+
+    The families used to be collected in a set, whose order follows the
+    per-process string hash seed, so a tie named a different family (and the
+    weighted sum added up in a different order) from one run to the next.
+    """
+    profiles = _profiles(brng_mean=[0.02, 0.03, 0.09],
+                         tout_mean=[0.0, 0.1, 0.4])
+    scores = sc.score_bins(profiles)
+    assert scores[20.0].family_scores['legality'] == \
+        scores[20.0].family_scores['impulsive']
+    assert scores[20.0].dominant_family == 'legality'
+
+
+def test_family_scores_follow_weight_order():
+    profiles = _profiles(deflicker_absmax=[0.0, 0.5, 0.9],
+                         tout_mean=[0.0, 0.1, 0.4],
+                         brng_mean=[0.02, 0.03, 0.09])
+    scores = sc.score_bins(profiles)
+    assert list(scores[20.0].family_scores) == list(sc.FAMILY_WEIGHTS)
+
+
+_HASH_SEED_PROBE = """
+from AV_Spex.checks import bin_scoring as sc
+from AV_Spex.checks.qctools_bin_profile import BinProfile
+series = dict(brng_mean=[0.02, 0.031, 0.047, 0.09, 0.05, 0.033],
+              tout_mean=[0.0, 0.11, 0.4, 0.13, 0.4, 0.02],
+              deflicker_absmax=[0.1, 0.7, 0.3, 0.9, 0.3, 0.2])
+profiles = {float(i * 10): BinProfile(bin_start=float(i * 10), frames=300,
+                                      **{k: v[i] for k, v in series.items()})
+            for i in range(6)}
+for b, s in sorted(sc.score_bins(profiles).items()):
+    print(b, repr(s.score), s.dominant_family, list(s.family_scores))
+"""
+
+
+def test_scores_do_not_depend_on_the_hash_seed():
+    """The same profiles score bit-for-bit the same in every process."""
+    import os
+    import subprocess
+    import sys
+    outputs = set()
+    for seed in range(8):
+        env = dict(os.environ, PYTHONHASHSEED=str(seed))
+        result = subprocess.run([sys.executable, '-c', _HASH_SEED_PROBE], env=env,
+                                capture_output=True, text=True, check=True)
+        outputs.add(result.stdout)
+    assert len(outputs) == 1
+
+
 def test_weights_renormalize_over_available_families():
     """One measurable family carries the whole 0-1 scale on its own.
 

@@ -48,6 +48,7 @@ NUMERIC_TAG_KEYS: Dict[str, Tuple[str, str]] = {
     'lavfi.signalstats.VREP': ('vrep', 'signalstats'),
     'lavfi.signalstats.YDIF': ('ydif', 'signalstats'),
     'lavfi.signalstats.YAVG': ('yavg', 'signalstats'),
+    'lavfi.signalstats.YLOW': ('ylow', 'signalstats'),
     'lavfi.signalstats.SATMAX': ('satmax', 'signalstats'),
     'lavfi.signalstats.SATAVG': ('satavg', 'signalstats'),
     'lavfi.entropy.normalized_entropy.normal.Y': ('entropy', 'entropy'),
@@ -112,6 +113,9 @@ class BinProfile:
 
     # Exposure / flatness
     yavg_mean: Optional[float] = None
+    # 10th-percentile luma. Picture sits it near or above black; full-range
+    # noise (end-of-tape static) drags it to the bottom of the scale.
+    ylow_mean: Optional[float] = None
     entropy_mean: Optional[float] = None
 
     # Geometry (borders moving = tracking instability)
@@ -358,6 +362,7 @@ def _summarize(acc: _BinAccumulator) -> BinProfile:
         ssim_min=amin('ssim'),
         psnr_mean=mean('psnr'),
         yavg_mean=mean('yavg'),
+        ylow_mean=mean('ylow'),
         entropy_mean=mean('entropy'),
         crop_x1_median=median('crop_x1'),
         crop_x2_median=median('crop_x2'),

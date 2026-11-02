@@ -23,6 +23,7 @@ Subcommands (collect.sh calls most of these; you will mostly use `list`):
 
     corpus.py list                              runs, labels and package counts
     corpus.py init-run [--label L]              write run.json for the current code + config
+    corpus.py run-id                            print the run ID the current code + config map to
     corpus.py check-run RUN_ID                  fail if code or config drifted from RUN_ID
     corpus.py done RUN_ID                       folder names already collected without error
     corpus.py collect-package RUN_ID PKG ...    copy one package's sidecars into the run
@@ -38,7 +39,6 @@ import re
 import shutil
 import subprocess
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -365,6 +365,27 @@ def resolve_run(arg):
     if len(hits) > 1:
         sys.exit(f"{arg}: ambiguous, matches {', '.join(h.name for h in hits)}")
     return hits[0]
+
+
+def find_packages(args, require=None):
+    """Corpus package directories from run IDs, run directories or package directories. With
+    `require` (a path inside a package, e.g. the ground-truth file), packages without it are
+    skipped, and said so."""
+    pkgs = []
+    for arg in args:
+        p = Path(arg).expanduser()
+        if (p / "package.json").exists():
+            pkgs.append(p)
+            continue
+        run = resolve_run(arg)
+        pkgs.extend(sorted(pj.parent for pj in (run / "packages").glob("*/package.json")))
+    if require:
+        missing = [d.name for d in pkgs if not (d / require).exists()]
+        if missing:
+            print(f"{len(missing)} package(s) without {require} skipped ({', '.join(missing)})",
+                  file=sys.stderr)
+        pkgs = [d for d in pkgs if (d / require).exists()]
+    return pkgs
 
 
 def list_runs():

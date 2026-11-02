@@ -20,140 +20,34 @@ plus pivot tables of the cross-package medians printed to stdout.
 
 Stage 3 uses the ground truth as the active-area measurement. That is the same ffprobe
 signalstats over the same crop the real run used, so at the run's own settings the replayed
-periods must equal the run's `brng_analysis.analysis_periods`. The `harness_match` column
-checks exactly that, and the summary reports it. Trust the grid only while it holds: a
-mismatch means the selection code moved on and this replay no longer mirrors analyze().
+periods must equal the run's `brng_analysis.analysis_periods`. The `harness` column checks
+exactly that (match / expected / UNEXPECTED, see harness.py), and the summary reports it.
+Trust the grid only while no tape is UNEXPECTED: that means the selection code moved on and
+this replay no longer mirrors analyze().
 """
 import argparse
-import bisect
 import csv
-import gzip
-import json
 import logging
 import statistics
 import sys
-import xml.etree.ElementTree as ET
 from pathlib import Path
-from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from corpus import resolve_run  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from corpus import find_packages  # noqa: E402
+from _selection import (BIN, GT_FILE, covered, harness_status, harness_summary, in_spans,  # noqa: E402
+                        load_package, select_periods)
 
 from AV_Spex.utils.log_setup import logger
-from AV_Spex.checks import bin_scoring, bin_suitability
-from AV_Spex.checks.frame_analysis import (
-    EnhancedFrameAnalysis, IntegratedSignalstatsAnalyzer, QCToolsParser,
-    content_start_after_bars, merge_avoid_segments,
-)
 
 COUNTS = (1, 2, 3, 4, 5, 6, 8)
 DURATIONS = (15, 30, 45, 60, 90, 120, 180)
-BIN = 10.0            # seconds, same as the QCTools bin profiles
 TOP_K = 5             # top-k recall
 # Damage events: runs of ground-truth frames over a threshold, merged across short gaps.
 BRNG_EVENT = 0.01     # fraction of active-area pixels out of range (QCTools violation threshold)
 TOUT_EVENT = 0.03     # fraction of temporal outliers (dropout/head-switching frames)
 EVENT_GAP = 1.0       # seconds; runs closer than this are one event
 EVENT_MIN = 0.5       # seconds; shorter runs are ignored
-
-
-GT_FILE = "ground_truth/active_signalstats.txt.gz"
-
-
-def find_packages(args):
-    """Corpus package directories carrying ground truth, from run IDs or paths."""
-    pkgs = []
-    for arg in args:
-        p = Path(arg).expanduser()
-        if (p / "package.json").exists():
-            pkgs.append(p)
-            continue
-        run = resolve_run(arg)
-        found = sorted(pj.parent for pj in (run / "packages").glob("*/package.json"))
-        missing = [d.name for d in found if not (d / GT_FILE).exists()]
-        if missing:
-            print(f"{run.name}: {len(missing)} package(s) without ground truth skipped "
-                  f"({', '.join(missing)})", file=sys.stderr)
-        pkgs.extend(d for d in found if (d / GT_FILE).exists())
-    return pkgs
-
-
-def load_ground_truth(path):
-    """Per-frame active-area signalstats, sorted by time."""
-    rows = []
-    with gzip.open(path, "rt") as fh:
-        for line in fh:
-            rec = {}
-            for part in line.strip().split("|"):
-                key, _, val = part.partition("=")
-                rec[key.rsplit(".", 1)[-1]] = val
-            try:
-                rows.append((float(rec["pts_time"]), float(rec.get("BRNG", 0) or 0),
-                             float(rec.get("TOUT", 0) or 0), float(rec.get("VREP", 0) or 0)))
-            except (KeyError, ValueError):
-                continue
-    rows.sort()
-    return rows
-
-
-def full_frame_brng(xml_path, parser):
-    """(time, brng) for every non-black video frame in the QCTools report — what
-    parse_brng_period reads per period, collected in one walk."""
-    out = []
-    opener = gzip.open if str(xml_path).endswith(".gz") else open
-    with opener(xml_path, "rt") as fh:
-        it = iter(ET.iterparse(fh, events=["start", "end"]))
-        _, root = next(it)
-        for event, elem in it:
-            if event != "end" or elem.tag != "frame":
-                continue
-            ts = elem.get("pkt_pts_time")
-            if ts and not parser._is_black_frame(elem):
-                tag = elem.find('.//tag[@key="lavfi.signalstats.BRNG"]')
-                if tag is not None and tag.get("value"):
-                    out.append((float(ts), float(tag.get("value"))))
-            elem.clear()
-            root.clear()
-    out.sort()
-    return out
-
-
-def window(rows, start, end, inclusive_end=False):
-    times = [r[0] for r in rows] if not hasattr(rows, "times") else rows.times
-    lo = bisect.bisect_left(times, start)
-    hi = bisect.bisect_right(times, end) if inclusive_end else bisect.bisect_left(times, end)
-    return rows[lo:hi]
-
-
-class Rows(list):
-    def __init__(self, rows):
-        super().__init__(rows)
-        self.times = [r[0] for r in rows]
-
-
-def simulate_comparison(periods, ff_rows, gt_rows):
-    """comparison_results as analyze_with_signalstats builds them, from the two frame lists."""
-    comps = []
-    for start, dur in periods:
-        comp = {}
-        ff = window(ff_rows, start, start + dur, inclusive_end=True)
-        gt = window(gt_rows, start, start + dur)
-        if ff and gt:
-            full = sum(1 for _, b in ff if b > 0) / len(ff) * 100
-            active = sum(1 for r in gt if r[1] > 0) / len(gt) * 100
-            comp["ffprobe_active_area"] = {"violations_pct": active}
-            if full > active + 5 and active < 30:
-                comp["diagnosis"] = "border_violations"
-            elif active > 10:
-                comp["diagnosis"] = "content_violations"
-            else:
-                comp["diagnosis"] = "minimal_violations"
-        comps.append(comp)
-    return SimpleNamespace(comparison_results=comps)
-
-
-def in_spans(t, spans):
-    return any(s <= t < e for s, e in spans)
 
 
 def content_bins(gt_rows, avoid, effective_start, duration):
@@ -189,11 +83,6 @@ def events(gt_rows, idx, threshold, avoid, effective_start):
     return [(s, e) for s, e in runs if e - s >= EVENT_MIN]
 
 
-def covered(bin_start, periods):
-    """A bin counts as sampled when a period covers at least half of it."""
-    return any(min(bin_start + BIN, s + d) - max(bin_start, s) >= BIN / 2 for s, d in periods)
-
-
 def touches(span, periods):
     return any(span[0] < s + d and span[1] >= s for s, d in periods)
 
@@ -220,77 +109,32 @@ def score(periods, bins, ev_brng, ev_tout, gt_content):
 
 
 def replay_package(pkg, counts, durations):
-    info = json.loads((pkg / "package.json").read_text())
-    name = info["video_id"]
-    qc = pkg / f"{name}_qc_metadata"
-    fa = json.load(open(qc / f"{name}_enhanced_frame_analysis.json"))
-    meta = dict(info.get("video") or {}, frame_analysis_seconds=info.get("frame_analysis_seconds"))
-    if not info.get("qctools_report"):
-        raise FileNotFoundError("no QCTools report")
-    xml = pkg / info["qctools_report"]
-
-    bars_end = fa.get("color_bars_end_time") or 0
-    bars_regions = [(r["start"], r["end"]) for r in fa.get("bars_regions") or []]
-    hints = [tuple(h) for h in (fa.get("initial_borders") or {}).get("quality_frame_hints") or []]
-    duration = meta["duration"]
-
-    # Stage 0 / 1 inputs, exactly as EnhancedFrameAnalysis.analyze() builds them
-    black = QCToolsParser(str(xml)).detect_black_segments(min_duration=2.0)
-    avoid = merge_avoid_segments(black, bars_regions)
-    parser = QCToolsParser(str(xml))
-    violations = parser.parse_for_violations_streaming(
-        max_frames=100, skip_color_bars=True, color_bars_end_time=bars_end,
-        exclude_regions=bars_regions)
-    suitability = bin_suitability.assess_bins(getattr(parser, "bin_profiles", {}),
-                                              bit_depth_10=parser.bit_depth_10)
-    if suitability.unsuitable_regions:
-        avoid = merge_avoid_segments(avoid, suitability.unsuitable_regions)
-    scores = bin_scoring.score_bins(getattr(parser, "bin_profiles", {}), suitability.verdicts,
-                                    bit_depth_10=parser.bit_depth_10)
-
-    ff_rows = Rows(full_frame_brng(xml, parser))
-    gt_rows = Rows(load_ground_truth(pkg / GT_FILE))
-
-    ea = EnhancedFrameAnalysis.__new__(EnhancedFrameAnalysis)
-    ss = IntegratedSignalstatsAnalyzer.__new__(IntegratedSignalstatsAnalyzer)
-    ss.duration, ss.fps, ss.qctools_report = duration, meta.get("fps"), str(xml)
-    ss.last_resort_period_note = None
-    ea.signalstats_analyzer = ss
-
-    effective_start = content_start_after_bars(bars_end)
+    ctx = load_package(pkg)
+    name, duration, avoid = ctx.name, ctx.duration, ctx.avoid
+    meta = dict(ctx.meta)
+    gt_rows = ctx.gt_rows
+    effective_start = ctx.effective_start
     bins = content_bins(gt_rows, avoid, effective_start, duration)
     ev_brng = events(gt_rows, 1, BRNG_EVENT, avoid, effective_start)
     ev_tout = events(gt_rows, 2, TOUT_EVENT, avoid, effective_start)
     gt_content = [r for r in gt_rows if r[0] >= effective_start and not in_spans(r[0], avoid)]
 
-    actual = [(round(s), round(d)) for s, d in (fa.get("brng_analysis") or {}).get("analysis_periods") or []]
+    actual = ctx.actual
     run_count = len(actual)
     run_dur = actual[0][1] if actual else None
     meta["sampled_s"] = sum(d for _, d in actual)
 
+    scores = ctx.scores
     rows = []
     for count in counts:
         for dur in durations:
-            ss.last_resort_period_note = None
-            cands = []
-            if violations or scores:
-                cands = ea._analyze_qctools_violation_distribution(
-                    violations, num_periods=count, period_duration=dur, video_duration=duration,
-                    black_segments=avoid, histogram=getattr(parser, "violation_histogram", None),
-                    severity=getattr(parser, "violation_severity", None), bin_scores=scores,
-                    content_start=content_start_after_bars(bars_end))
-            stage2 = ss._find_analysis_periods(0, bars_end, dur, count, hints or None,
-                                               qctools_periods=cands, black_segments=avoid)
-            final = stage2
-            if stage2 and cands:
-                final = ea._refine_periods_from_signalstats(
-                    stage2, simulate_comparison(stage2, ff_rows, gt_rows), cands, avoid, dur, bars_end)
-            final = sorted(final)
+            final = select_periods(ctx, count, dur, scores=scores)
             row = {"package": name, "count": count, "duration": dur,
                    "tape_minutes": round(duration / 60, 1), "periods": ";".join(f"{s:.0f}+{d:.0f}" for s, d in final)}
             row.update(score(final, bins, ev_brng, ev_tout, gt_content))
             if count == run_count and dur == run_dur:
-                row["harness_match"] = int([(round(s), round(d)) for s, d in final] == actual)
+                status = harness_status(ctx, [(round(s), round(d)) for s, d in final])
+                row["harness"], row["harness_match"] = status, int(status == "match")
             rows.append(row)
     return rows, meta
 
@@ -324,7 +168,7 @@ def main():
     logger.setLevel(logging.ERROR)  # selection code logs every placement decision
 
     all_rows, timing = [], []
-    for pkg in find_packages(args.runs):
+    for pkg in find_packages(args.runs, require=GT_FILE):
         try:
             rows, meta = replay_package(pkg, counts, durations)
         except Exception as e:  # keep going; one bad package should not sink the batch
@@ -332,8 +176,8 @@ def main():
             continue
         all_rows.extend(rows)
         timing.append(meta)
-        match = [r.get("harness_match") for r in rows if "harness_match" in r]
-        print(f"{rows[0]['package']}: {meta['duration'] / 60:.0f} min, harness_match={match[0] if match else 'n/a'}")
+        status = [r["harness"] for r in rows if "harness" in r]
+        print(f"{rows[0]['package']}: {meta['duration'] / 60:.0f} min, harness={status[0] if status else 'n/a'}")
 
     if not all_rows:
         sys.exit("no packages replayed")
@@ -344,8 +188,7 @@ def main():
         w.writeheader()
         w.writerows(all_rows)
 
-    checks = [r["harness_match"] for r in all_rows if "harness_match" in r]
-    print(f"\nHarness check: {sum(checks)}/{len(checks)} packages reproduce the run's periods")
+    print("\n" + harness_summary({r["package"]: r["harness"] for r in all_rows if "harness" in r}))
     for r in all_rows:
         r["hit_mean"] = statistics.mean([r[k] for k in ("hit_brng", "hit_tout", "hit_vrep") if r.get(k) is not None] or [0])
     for field in ("hit_mean", f"top{TOP_K}_tout", f"top{TOP_K}_brng", "event_recall_tout", "event_recall_brng",

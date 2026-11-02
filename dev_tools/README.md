@@ -18,16 +18,19 @@ when a question needs a new measurement from the video.
 
 ## Corpus
 
-`$AVSPEX_CORPUS` (default `~/git/JPC_AV/avspex_corpus`), one directory per run:
+`$AVSPEX_CORPUS` (default `~/git/JPC_AV/avspex_corpus`):
 
 ```
-runs/<run_id>/
+runs/<run_id>/                        one directory per run
     run.json, checks_config.json, spex_config.json, src.diff
     packages/<FOLDER>/
         package.json                  video properties, timings, exit code, file list
         <ID>_qc_metadata/...          the sidecars this run wrote, the QCTools report it read,
         <ID>_report_csvs/...          and the processing log trimmed to this run
         ground_truth/active_signalstats.txt.gz    only with collect.sh -g
+cache/                                replay cache (see Replays)
+labels/                               label sheets and keys, seed labels, timecode.json
+notes/                                study write-ups (by hand; no tool reads or writes it)
 ```
 
 - **Run ID.** It is `<commit>[-d<hash of uncommitted src/ changes>]-c<hash of checks+spex config>`,
@@ -36,7 +39,13 @@ runs/<run_id>/
 - **Excluded files.** Media, HTML reports and images are left out (pass `-i` to keep the
   images). A package costs ~5–40 MB, mostly the QCTools report.
 - **Listing runs.** `python3 dev_tools/corpus.py list` shows each run's ID, date, package
-  count and label.
+  count and label. `corpus.py run-id` prints the ID the current code and config would get,
+  without creating anything. The other subcommands (`init-run`, `check-run`, `done`,
+  `collect-package`) are what `collect.sh` calls; `import` is covered under Replays.
+- **Output location.** `aggregate.py`, `period_grid.py`, `bin_table.py` and `tag_weights.py`
+  write their CSVs to the current directory unless given `--out` / `--out-dir`, so run them
+  from somewhere other than the repo root or pass a path. Only `label_sheet.py` writes into the
+  corpus.
 
 ## Collect
 
@@ -53,7 +62,8 @@ dev_tools/collect.sh -c study_config.json -g -l "period study" /Volumes/EXT2_APF
   first, and AV Spex arguments after `--` are refused, because they would change the config
   behind the run ID.
 - **Ground truth.** `-g` adds a whole-file active-area signalstats pass per package. The
-  period replay needs it. It takes roughly 5–15 % of the tape's length.
+  period replay needs it. It takes roughly 5–15 % of the tape's length (0.08–0.11× measured
+  in the October 2026 run).
 - **Mid-batch edits.** If you edit `src/` or the config mid-batch, the remaining packages fail
   fast (exit 3) instead of being filed under the wrong run ID. Finish the batch or restart it.
 - **Failed packages.** A package whose av-spex run failed is still collected for inspection,
@@ -100,9 +110,161 @@ often it does. That check is what makes its other numbers believable. It is also
 the replay as stale once the code it mirrors changes, since these scripts call private
 methods.
 
-- `replays/period_grid.py <run> [--counts 3,6,8] [--durations 30,60]` scores every period
-  count × duration against the ground truth. Its harness check (`harness_match`) compares
-  against the run's own periods. It needs a run collected with `-g`. This is the replay
-  behind the October 2026 change to 6 × 30. That study's outputs were imported as the run
-  `period-study-2026-10` (`corpus.py import`), and replaying it reproduces the original grid
-  cell for cell.
+A tape can also differ because the code changed on purpose since the run (a gate fix that
+moves a period). `replays/harness.py` tells the two apart:
+
+```bash
+python3 dev_tools/replays/harness.py <run>                       # status per tape
+python3 dev_tools/replays/harness.py <run> --accept TAPE... --reason "what moved it and why"
+python3 dev_tools/replays/harness.py <run> --forget TAPE...      # drop an entry
+```
+
+`--accept` records the tape's current periods, the reason, the date and the code commit in
+`runs/<run>/expected_drift.json`. Every replay then reports each tape as `match` (the run's own
+periods), `expected` (the recorded periods) or `UNEXPECTED`. Only the last means the replay
+can't be trusted. A recorded tape that moves again is `UNEXPECTED`, and an entry for a tape
+that matches again is flagged as no longer needed. Accept only drift you have looked at and can
+explain. `period-study-2026-10` records four: 01823, 02225 and 02328 (the 2026-10-10
+short-tape overlap fix) and 02211 (the tail-static gate, 22a2c20).
+
+- `replays/period_grid.py <run> [--counts 3,6,8] [--durations 30,60] [--out FILE]` scores
+  every period count × duration against the ground truth. Its harness check (`harness`, and
+  `harness_match` = 1 for a plain match) compares against the run's own periods. It needs a run collected with `-g`. This is the
+  replay behind the October 2026 change to 6 × 30. That study's outputs were imported as the
+  run `period-study-2026-10` (`corpus.py import`), and replaying it reproduces the original
+  grid cell for cell.
+- `replays/bin_table.py <run> [--screen] [--out FILE]` writes one row per 10 s bin with every
+  QCTools tag's per-bin statistics, the bin's suitability, score and families, and whether
+  today's selection covers it. `--screen` ranks every tag statistic without labels
+  (availability, spread, redundancy with scored metrics, correlation with luma and with motion,
+  and where today's score puts the tag's peak bin) to decide which tags are worth labeling for.
+- `replays/tag_weights.py <run> [--damage MODE] [--stake [CONFIG...]] [--out-dir DIR]` scores
+  tags and scoring configurations against operator labels (see below). It needs labels, so
+  run it after a labeling round.
+
+All three replays, and `label_sheet.py`, share `replays/_selection.py`, which rebuilds stage 0
+from the corpus and runs stages 1–3. Loading a package walks its QCTools report three times, so
+the result is cached in `$AVSPEX_CORPUS/cache/` (~0.5 MB per package). The cache key covers the
+report (size and modification time), what stage 0 reads from the package's
+`_enhanced_frame_analysis.json` (head-bars end, bars regions, border hints) and the source of
+`bin_scoring`, `bin_suitability`, `frame_analysis`, `qctools_bin_profile` and `_selection.py`
+itself, so changing any of them rebuilds it. Each package directory keeps one entry; loading
+under a new key deletes the old one.
+`bin_table.py --no-cache` bypasses it. With a warm cache, a replay of the whole study run takes
+seconds.
+
+## Weighing tags (labels)
+
+The corpus ground truth (active-area BRNG/TOUT/VREP) is what period selection already scores,
+so it can catch a regression but it can't give credit to a tag that isn't scored yet. That
+takes an operator.
+
+1. `python3 dev_tools/replays/bin_table.py <run> --screen`: pick candidate tags and update
+   `NEW_CANDIDATES` in `replays/study.py`. That module holds everything a round asks: the
+   candidate tags (`NEW_CANDIDATES`, `LEGALITY_CANDIDATES`) and the scoring configurations
+   compared (`CONFIGS`, `LEGALITY_CONFIGS`). It is code, not corpus data, so commit it alongside
+   the round's results.
+2. `python3 dev_tools/label_sheet.py <run> --probe --name round1` (drives mounted the first time,
+   for start timecodes) writes to `$AVSPEX_CORPUS/labels/`:
+   - `sheet_round1.csv`: ~12 bins per tape (`--per-tape`, `--controls`). Each tape gets 2
+     random controls, the peak bin of every candidate tag, today's evidence bins and runner-up
+     bins, sorted by tape and timecode.
+     `tc_in`/`tc_out` are the file's own NDF/DF timecode, as the NLE shows it. The empty
+     columns to fill in are `defect`, `severity`, `origin` and `notes`. `--name` refuses a name
+     whose sheet already exists.
+   - `key_round1.json`: why each bin was picked. Don't open it while labeling.
+   - `timecode.json`: start timecodes cached by `--probe`. Without one, a tape's rows start
+     at 00:00:00:00 and say so in `notes`.
+3. Fill in `defect` (`none, dropout, head_switching_tracking, sync_loss_roll, illegal_levels,
+   chroma_error, noise, signal_loss_freeze, graphics_slate_only, other`; join several with
+   `+`), `severity` (0 nothing worth a period, 1 visible, 2 obvious) and `origin` (`tape` for
+   this transfer's playback damage, `content` for the program as made, `source` for damage
+   baked into dubbed or archival material; blank for none). Leave a row blank to skip it.
+   Illegal levels in a graphic are `illegal_levels` (origin `content`), not
+   `graphics_slate_only`: they are still what BRNG analysis measures.
+
+   **One row per finding.** When a bin's problems differ in severity or origin, copy the row
+   and keep its `blind_id`, one row each: e.g. `illegal_levels`, 2, `source` and `dropout`, 1,
+   `tape`. A bin counts as damaged when any of its findings does, so the tape dropout counts in
+   `tape` mode at its own severity. Joining origins (`source+tape`) still works, but then one
+   severity covers both.
+
+   Then run `python3 dev_tools/labels.py` to check the sheets (see below).
+4. `python3 dev_tools/replays/tag_weights.py <run> --damage MODE` reports:
+   - per tag: hit rate of its top bins against the control base rate, and AUC overall and by
+     defect type
+   - per configuration (`CONFIGS`, which are `bin_scoring` metric and weight variants): damage
+     recall, estimated precision of the bins it targets, the ground-truth guard and a hold-out
+     across collections and tapes
+   `MODE` decides what counts as damage: `labeled` (any defect at severity >= 1), `severe`
+   (severity 2), `tape` (origin `tape`; for rows without an origin, i.e. round 1, `dropout`,
+   `sync_loss_roll` or `signal_loss_freeze`, so a round-1 still photo must not be logged as
+   `signal_loss_freeze`) or `illegal` (any `illegal_levels`). Round 1 needs this: on worn VHS
+   63% of random bins carry some defect at severity 1, so `labeled` leaves nothing for a tag
+   to beat. Outputs are `tag_weights_<MODE>_{tags,configs,per_tape}.csv`, written to
+   `--out-dir` (default: the current directory). `--tags` scores extra tag columns, e.g.
+   `ydif_mean+,blur_max+`.
+
+   **Uncertainty.** Every headline number carries a 95 % interval from resampling whole tapes
+   (`--bootstrap N`, default 2000; `0` turns it off). Bins on one tape aren't independent, so
+   tapes are the unit. Tags get `p@1_lo/hi`, the base rate's interval and `P(>base)`.
+   Configurations get `obj_lo/hi`, and `delta` (objective minus the baseline's on the same
+   resample) with `delta_lo/hi` and `P(>0)`. A delta interval that includes 0 hasn't shown the
+   configuration is better, whatever its point estimate. On the October 2026 labels,
+   `impulsive_heavy` in `tape` mode is +0.036 (−0.001 to +0.076, `P(>0)` 0.97).
+5. Bins a configuration targets that nobody has labeled are valued at the control base rate
+   and listed in `tag_weights_<MODE>_per_tape.csv`. Any later sheet skips bins already labeled.
+
+   **What another round could change (`--stake`).** Before labeling more, run
+   `tag_weights.py <run> --damage MODE --stake [CONFIG ...]`. For each named configuration
+   (default: all), it sets that configuration's and the baseline's unlabeled targets all
+   damaged or all clean, by group (shared, config only, baseline only), and reports the range
+   of objective delta labeling them could produce:
+   - `settled-worse`: the delta stays below `--margin` (default +0.02) in every case
+   - `settled-better`: it stays above the margin in every case
+   - `open`: labeling could go either way
+
+   Settled questions need no more labels. The open configurations' bins go to
+   `tag_weights_<MODE>_stake_bins.csv`. Build a sheet of just those with
+   `label_sheet.py <run> --bins FILE --name NAME`: the listed bins plus `--controls` (default
+   1) per tape, blind IDs prefixed `S`. The bound is a worst case, so a configuration that moves
+   many tapes onto unlabeled bins is always open: name the configurations the decision is
+   between. On the round-2 labels, the legal-floor configurations come out `settled-worse`,
+   and `--stake impulsive_heavy` in `tape` mode lists 65 bins.
+6. Focused rounds: `label_sheet.py <run> --round legality --name round2 --regions FILE` builds a
+   ~6-bin-per-tape sheet for the legal-floor luma measures (`under_black`, `over_white`, added to
+   every bin by `_selection.add_legal_floor_columns`): 1 control, each measure's top bins, the
+   bins the `LEGALITY_CONFIGS` would target, and bins from `FILE` (`video_id,tc_in,tc_out`
+   regions an operator flagged as missed; a DF tape's timecodes may be typed with `:`).
+   Blind IDs carry an `L` prefix (`--id-prefix`).
+
+`labels/seed_labels.csv` holds earlier operator spot checks (same columns plus `bin_start` in
+seconds). Labels are keyed by `(video_id, bin_start)`, so they carry over to future runs.
+
+### Checking labels
+
+`labels.py` holds the label schema and the one loader both tools use, so they agree on what is
+labeled: a row with both `defect` and `severity` filled. It reads every `labels/sheet_*.csv`
+through the `key_*.json` of the same name, plus `seed_labels.csv`, and checks them:
+
+```bash
+python3 dev_tools/labels.py     # every problem, then damaged/clean counts and base rate per mode
+```
+
+- **Errors** stop `label_sheet.py` and `tag_weights.py` until fixed:
+  - a defect or origin that isn't on the list (this catches notes typed into `origin`)
+  - a severity other than 0, 1 or 2
+  - a defect without a severity, or the other way round
+  - `none` joined with a defect
+  - a `blind_id` missing from the key, or a `video_id` that disagrees with the key (rows
+    reordered in Excel)
+- **Warnings** are reported and the tools go on:
+  - a sheet with no key (skipped)
+  - `none` at severity 1 or 2
+  - a damage finding with no origin on a sheet that has an origin column
+  - the same finding twice for one bin
+  - a bin labeled differently in two files. The later file wins: the seed file first, then
+    sheets in name order.
+
+Backups only count if they match `sheet_*.csv` and have a matching key, so
+`sheet_round1_blank.csv.bak` and `.xlsx` copies are ignored.
