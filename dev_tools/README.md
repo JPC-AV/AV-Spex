@@ -268,3 +268,38 @@ python3 dev_tools/labels.py     # every problem, then damaged/clean counts and b
 
 Backups only count if they match `sheet_*.csv` and have a matching key, so
 `sheet_round1_blank.csv.bak` and `.xlsx` copies are ignored.
+
+## Video dropout (detector study, November 2026)
+
+Tape dropout (short white or black horizontal lines from signal loss) can't be found in a
+QCTools report. Within a tape, frame-wide signalstats ranked labeled dropout bins no better than
+chance, and the top TOUT frames were dissolves. So the detector reads the picture
+(`src/AV_Spex/checks/video_dropout_detection.py`), and this study labels **events**, not bins.
+
+1. **Scan.** `dropout_scan.py <run> VIDEO...` scans whole tapes at loose thresholds, about 0.2×
+   real time per tape, run in parallel with `-j`. Every run it finds is cached under
+   `<package>/dropout_scan/` (`scan.json`, `streaks.csv.gz`, `frames.csv.gz`). The scan matches
+   videos to packages by file name, so local copies in `sample_files/jpc` work.
+2. **Sheet.** `dropout_sheet.py <run> --name NAME --tapes ID...` writes
+   `labels/events_<NAME>.xlsx`, `events_key_<NAME>.json` and `events_<NAME>_images/`.
+   - **Rows, `--mode bands`** (pilot1). Candidates are sampled across three score bands and both
+     polarities, plus random controls, and every row looks the same.
+   - **Rows, `--mode filtered`** (pilot2 on). Per tape, `--passed` frames are drawn uniformly
+     from those with a run passing `video_dropout_detection.passes_filter()`. That samples what
+     the detector would report, so the verdicts estimate its real precision. `--rejected` frames
+     are drawn from those whose runs all fail the filter, to see what it throws away. Frames on
+     an earlier `events_key_*.json` aren't asked about again. The key records each run's
+     `symmetry` and `recurrence`, so the filter thresholds can be retuned from the verdicts.
+   - **Image.** Previous, this and next frame, cropped around the box and enlarged without
+     smoothing, above the whole frame.
+   - **Columns.** `verdict`, `polarity`, `visibility`, `location` (new from pilot2), `cause`,
+     `dropout_elsewhere` and `reviewer` are dropdowns. The `instructions` tab defines them.
+   - **Seek check.** The tool re-decodes and re-scans each candidate frame. A candidate it can't
+     find again is reported as a bad seek.
+3. **Tune.** Tuning is offline, from the cached runs against the verdicts.
+   - **Pilot1** (70 candidates, 11 dropout) gave the event filter in `video_dropout_detection.py`:
+     - **Symmetry.** Spatial and temporal contrast within 10% of each other.
+     - **No recurrence.** No run nearby in frames 2–15 either side.
+   - **Pilot2** measures the filter's precision on the frames it would actually report.
+
+`labels.py` reads only `sheet_*.csv` (bin labels), so the `events_*` files don't affect it.
