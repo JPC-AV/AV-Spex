@@ -6512,21 +6512,30 @@ def generate_dropped_sample_html(frame_outputs):
     <div id="dropped_sample_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px;
          margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
         <p style="margin: 0 0 10px 0;">
-            <strong>Dropped sample detection</strong> identifies potential audio sample drops caused by
-            TBC/framesync devices or analog-to-digital converters during digitization. Two indicators are analyzed:
+            <strong>Dropped sample detection</strong> looks for audio lost during digitization &mdash; frames
+            dropped by a TBC, framesync or capture device, or the input signal dropping out. The decoded
+            audio of every stream is scanned for two signatures:
         </p>
         <ul style="margin: 4px 0 10px 20px; padding: 0;">
-            <li style="margin-bottom: 4px;"><strong>Spectrogram spike analysis</strong> &mdash; A spectrogram
-                of the full audio is generated using FFmpeg. Bright vertical lines spanning the entire frequency
-                range indicate audible pops/clicks from dropped samples. The spectrogram image is analyzed
-                programmatically to detect and count these spikes.</li>
-            <li style="margin-bottom: 4px;"><strong>Audio/video duration mismatch</strong> &mdash; Dropped
-                samples cause the audio stream to be slightly shorter than the video stream. Any measurable
-                difference (&gt;0ms) between audio and video stream durations is flagged.</li>
+            <li style="margin-bottom: 4px;"><strong>Splices</strong> &mdash; when audio is lost the two sides
+                of the gap are joined wherever the waveform happens to be, almost never at a zero crossing.
+                The waveform takes a step, heard as a click and seen in the spectrogram as a thin line through
+                every frequency. A splice is flagged only when the step stands out both from the predictable
+                part of the audio and in the band just below the Nyquist frequency (which recorded analog
+                content barely reaches), on every channel that carries signal at that moment.</li>
+            <li style="margin-bottom: 4px;"><strong>Digital-silence gaps</strong> &mdash; stretches where every
+                channel is exactly zero in the middle of the program. Recorded audio never does this on its own;
+                it means the capture chain stopped receiving audio. Gaps within a second of the start or end of
+                the file are ignored.</li>
         </ul>
+        <p style="margin: 0 0 10px 0;">
+            A splice through quiet or slowly-changing audio makes only a small step and cannot be detected
+            (it is also unlikely to be audible). A clean result means no audible splice was found, not that
+            no sample was lost. Listen at the listed timecodes to confirm a finding.
+        </p>
         <p style="margin: 0;">
-            Both signals are combined into a weighted risk score. When both indicators are present,
-            the score is escalated to reflect higher confidence that samples were dropped.
+            The audio and video stream durations are shown for reference only: healthy captures commonly differ
+            by tens to hundreds of milliseconds, so the difference is not used as evidence.
         </p>
     </div>
     """
@@ -6537,10 +6546,13 @@ def generate_dropped_sample_html(frame_outputs):
     duration_diff_ms = dropped_sample_data.get('duration_diff_ms', 0.0)
     audio_duration = dropped_sample_data.get('audio_duration', 0.0)
     video_duration = dropped_sample_data.get('video_duration', 0.0)
-    combined_score = dropped_sample_data.get('combined_score', 0.0)
-    estimated_loss_ms = dropped_sample_data.get('estimated_loss_ms', 0.0)
     sample_rate = dropped_sample_data.get('sample_rate', 0)
-    spike_timestamps = dropped_sample_data.get('spike_timestamps', [])
+    splice_events = dropped_sample_data.get('splice_events') or []
+    silence_gaps = dropped_sample_data.get('silence_gaps') or []
+    # Results written before the audio scan existed carry only the old
+    # spectrogram-spike timestamps; show those as they were.
+    legacy_spikes = [] if 'splice_events' in dropped_sample_data else (
+        dropped_sample_data.get('spike_timestamps') or [])
 
     if status == 'critical':
         status_color = '#cc0000'
@@ -6566,10 +6578,64 @@ def generate_dropped_sample_html(frame_outputs):
     </p>
     """
 
-    # Embed spectrogram image. The on-disk PNG is kept lossless for cv2 spike
-    # analysis in frame_analysis.py; here we transcode to JPEG in memory just
-    # for the report, which cuts the embedded payload ~5–10x with no impact on
-    # the analysis step.
+    cell = 'padding: 6px 12px; border: 1px solid var(--report-border);'
+
+    # A capture losing its input shows the same gap on every audio stream:
+    # one row per gap, listing the streams it hit (positions to the ms).
+    grouped_gaps = []
+    for g in silence_gaps:
+        key = (round(g.get('start_s', 0), 3), round(g.get('end_s', 0), 3))
+        if grouped_gaps and grouped_gaps[-1][0] == key:
+            grouped_gaps[-1][2].append(g.get('stream', 0) + 1)
+        else:
+            grouped_gaps.append((key, g, [g.get('stream', 0) + 1]))
+
+    if silence_gaps:
+        html += f"""
+        <p style="font-size: 13px; font-weight: bold; margin: 16px 0 6px 0;">Digital-silence gaps ({len(grouped_gaps)}):</p>
+        <table style="border-collapse: collapse; margin: 0 0 10px 0; font-size: 13px;">
+            <tr style="background-color: #f0ebe4;">
+                <th style="{cell}">Audio stream(s)</th>
+                <th style="{cell} text-align: right;">Start</th>
+                <th style="{cell} text-align: right;">End</th>
+                <th style="{cell} text-align: right;">Duration</th>
+            </tr>
+        """
+        for _, g, streams in grouped_gaps:
+            html += f"""
+            <tr>
+                <td style="{cell}">{', '.join(str(n) for n in streams)}</td>
+                <td style="{cell} text-align: right;">{g.get('start_timecode') or f"{g.get('start_s', 0):.3f} s"}</td>
+                <td style="{cell} text-align: right;">{g.get('end_timecode') or f"{g.get('end_s', 0):.3f} s"}</td>
+                <td style="{cell} text-align: right;">{g.get('duration_ms', 0):.0f} ms</td>
+            </tr>
+            """
+        html += "</table>"
+
+    if splice_events:
+        html += f"""
+        <p style="font-size: 13px; font-weight: bold; margin: 16px 0 6px 0;">Audio splices ({len(splice_events)}):</p>
+        <table style="border-collapse: collapse; margin: 0 0 10px 0; font-size: 13px;">
+            <tr style="background-color: #f0ebe4;">
+                <th style="{cell}">Audio stream</th>
+                <th style="{cell} text-align: right;">Timecode</th>
+                <th style="{cell} text-align: right;">Step size</th>
+                <th style="{cell} text-align: right;">Score</th>
+            </tr>
+        """
+        for e in splice_events:
+            html += f"""
+            <tr>
+                <td style="{cell}">{e.get('stream', 0) + 1}</td>
+                <td style="{cell} text-align: right;">{e.get('timecode') or f"{e.get('time_s', 0):.3f} s"}</td>
+                <td style="{cell} text-align: right;">{e.get('step_dbfs', 0):.0f} dBFS</td>
+                <td style="{cell} text-align: right;">{e.get('score', 0):.0f}</td>
+            </tr>
+            """
+        html += "</table>"
+
+    # Embed spectrogram image, transcoded to JPEG in memory for the report
+    # (cuts the embedded payload ~5–10x).
     spectrogram_path = frame_outputs.get('dropped_sample_spectrogram')
     if spectrogram_path:
         try:
@@ -6590,84 +6656,58 @@ def generate_dropped_sample_html(frame_outputs):
             logger.warning(f"Could not embed spectrogram image: {e}")
 
     # Results table
-    html += """
+    count_label = "Audio splices detected" if not legacy_spikes else "Spectrogram spikes detected"
+    html += f"""
     <table style="border-collapse: collapse; margin: 10px 0; font-size: 13px;">
         <tr style="background-color: #f0ebe4;">
-            <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: left;">Metric</th>
-            <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">Value</th>
-        </tr>
-    """
-    html += f"""
-        <tr>
-            <td style="padding: 6px 12px; border: 1px solid var(--report-border);">Spectrogram spikes detected</td>
-            <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{spike_count}</td>
+            <th style="{cell} text-align: left;">Metric</th>
+            <th style="{cell} text-align: right;">Value</th>
         </tr>
         <tr>
-            <td style="padding: 6px 12px; border: 1px solid var(--report-border);">Audio/video duration difference</td>
-            <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{duration_diff_ms:.3f} ms</td>
+            <td style="{cell}">{count_label}</td>
+            <td style="{cell} text-align: right;">{spike_count}</td>
         </tr>
         <tr>
-            <td style="padding: 6px 12px; border: 1px solid var(--report-border);">Audio stream duration</td>
-            <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{audio_duration:.6f} s</td>
+            <td style="{cell}">Digital-silence gaps</td>
+            <td style="{cell} text-align: right;">{len(grouped_gaps)}</td>
         </tr>
         <tr>
-            <td style="padding: 6px 12px; border: 1px solid var(--report-border);">Video stream duration</td>
-            <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{video_duration:.6f} s</td>
+            <td style="{cell}">Audio/video duration difference (reference only)</td>
+            <td style="{cell} text-align: right;">{duration_diff_ms:.3f} ms</td>
         </tr>
         <tr>
-            <td style="padding: 6px 12px; border: 1px solid var(--report-border);">Estimated loss from detected spikes</td>
-            <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{estimated_loss_ms:.4f} ms</td>
+            <td style="{cell}">Audio stream duration</td>
+            <td style="{cell} text-align: right;">{audio_duration:.6f} s</td>
         </tr>
         <tr>
-            <td style="padding: 6px 12px; border: 1px solid var(--report-border);">Audio sample rate</td>
-            <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{sample_rate} Hz</td>
+            <td style="{cell}">Video stream duration</td>
+            <td style="{cell} text-align: right;">{video_duration:.6f} s</td>
         </tr>
         <tr>
-            <td style="padding: 6px 12px; border: 1px solid var(--report-border);">Combined risk score</td>
-            <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{combined_score:.3f}</td>
+            <td style="{cell}">Audio sample rate</td>
+            <td style="{cell} text-align: right;">{sample_rate} Hz</td>
         </tr>
     </table>
     """
 
-    # Comparison note: measured duration difference vs estimated loss from spikes
-    if estimated_loss_ms > 0 and duration_diff_ms > 0:
-        ratio = duration_diff_ms / estimated_loss_ms
-        if ratio > 10:
-            html += f"""
-            <p style="font-size: 13px; color: #cc6600; margin: 8px 0;">
-                &#x26A0; The measured duration difference ({duration_diff_ms:.3f}ms) is {ratio:.0f}x larger than
-                the {spike_count} detected spike(s) account for ({estimated_loss_ms:.4f}ms).
-                Additional undetected drops or a systematic offset in the digitization chain is likely.
-            </p>
-            """
-        elif ratio < 0.5:
-            html += f"""
-            <p style="font-size: 13px; color: #cc6600; margin: 8px 0;">
-                &#x26A0; The measured duration difference ({duration_diff_ms:.3f}ms) is smaller than
-                the estimated loss from {spike_count} spike(s) ({estimated_loss_ms:.4f}ms).
-                Some detected spikes may be content transients rather than dropped samples.
-            </p>
-            """
-
-    # Spike timestamps (collapsible, if any)
-    if spike_timestamps:
+    if legacy_spikes:
         html += f"""
         <a id="link_spike_timestamps" href="javascript:void(0);"
-           onclick="toggleContent('spike_timestamps', 'Estimated spike timestamps ({len(spike_timestamps)}) ▼', 'Estimated spike timestamps ▲')"
+           onclick="toggleContent('spike_timestamps', 'Estimated spike timestamps ({len(legacy_spikes)}) ▼', 'Estimated spike timestamps ▲')"
            style="color: var(--report-accent); text-decoration: underline; margin: 10px 0; display: block; font-size: 13px;">
-           Estimated spike timestamps ({len(spike_timestamps)}) ▼</a>
+           Estimated spike timestamps ({len(legacy_spikes)}) ▼</a>
         <div id="spike_timestamps" style="display: none; margin: 0 0 16px 0;">
         <table style="border-collapse: collapse; font-size: 13px;">
             <tr style="background-color: #f0ebe4;">
-                <th style="padding: 6px 12px; border: 1px solid var(--report-border);">#</th>
-                <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">Timestamp (s)</th>
+                <th style="{cell}">#</th>
+                <th style="{cell} text-align: right;">Timestamp (s)</th>
             </tr>
         """
-        for i, ts in enumerate(spike_timestamps, 1):
+        for i, ts in enumerate(legacy_spikes, 1):
             html += f"""
             <tr>
-                <td style="padding: 6px 12px; border: 1px solid var(--report-border);">{i}</td>
-                <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{ts:.2f}</td>
+                <td style="{cell}">{i}</td>
+                <td style="{cell} text-align: right;">{ts:.2f}</td>
             </tr>
             """
         html += "</table></div>"

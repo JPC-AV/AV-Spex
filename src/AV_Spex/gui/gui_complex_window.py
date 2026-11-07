@@ -434,9 +434,9 @@ class ComplexWindow(QWidget, ThemeableMixin):
 
         self.enable_dropped_sample_cb = self._make_checkbox("Dropped Sample Detection")
         self._add_option(layout, self.enable_dropped_sample_cb, self._desc_label(
-            "Detect potential audio sample drops from TBC/framesync or ADC "
-            "devices. Generates a spectrogram to identify audible pops and "
-            "compares audio/video durations."))
+            "Detect audio lost during capture: scans the audio for splice "
+            "clicks (where dropped frames butt the waveform together) and "
+            "for stretches of digital silence mid-program."))
 
         self.audio_group.setLayout(layout)
         main_layout.addWidget(self.audio_group)

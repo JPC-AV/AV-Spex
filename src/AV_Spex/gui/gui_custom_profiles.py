@@ -590,8 +590,8 @@ class CustomProfileDialog(QDialog, ThemeableMixin):
             "QCTools YDIF/UDIF/VDIF to find candidate freezes and OpenCV to verify them")
         self.dropped_sample_check = self._add_sub_option(
             detectors_layout, "Dropped Sample Detection",
-            "Detect potential audio sample drops from TBC/framesync or ADC devices. Generates "
-            "a spectrogram to identify audible pops and compares audio/video durations.")
+            "Detect audio lost during capture: scans the audio for splice clicks (where dropped "
+            "frames butt the waveform together) and for stretches of digital silence mid-program.")
         detectors_group.setLayout(detectors_layout)
         frame_layout.addWidget(detectors_group)
 
