@@ -1781,3 +1781,57 @@ def test_period_selection_anchor_is_a_known_toc_entry():
     import inspect
     source = inspect.getsource(gr.write_html_report)
     assert "('section-period-selection', 'Analysis Period Selection')" in source
+
+
+# ---------------------------------------------------------------------------
+# Dropped-sample spectrogram boxes
+# ---------------------------------------------------------------------------
+
+def _blank_spectrogram():
+    """Black image the size showspectrumpic gives a 1280x480 plot with legend."""
+    import numpy as np
+    return np.zeros((608, 1564, 3), dtype=np.uint8)
+
+
+def _box_columns(img, bgr):
+    import numpy as np
+    return np.where((img == bgr).all(axis=2).any(axis=0))[0]
+
+
+def test_spectrogram_boxes_land_at_the_finding_times():
+    img = _blank_spectrogram()
+    n = gr._annotate_spectrogram(img, 40.0, [("S1", 20.0)], [("G1", 10.0, 14.0)])
+    assert n == 2
+    x0 = (1564 - 1280) // 2  # legend margin
+    splice_cols = _box_columns(img, gr._SPLICE_BOX_BGR)
+    assert abs(splice_cols.mean() - (x0 + 0.5 * 1279)) < 3
+    gap_cols = _box_columns(img, gr._GAP_BOX_BGR)
+    assert abs(gap_cols.min() - (x0 + 0.25 * 1279)) <= 2
+    assert abs(gap_cols.max() - (x0 + 0.35 * 1279)) <= 2
+
+
+def test_spectrogram_with_unexpected_geometry_is_left_unmarked():
+    import numpy as np
+    small = np.zeros((300, 600, 3), dtype=np.uint8)
+    assert gr._annotate_spectrogram(small, 40.0, [("S1", 20.0)], []) == 0
+    assert not small.any()
+    assert gr._annotate_spectrogram(_blank_spectrogram(), 0.0, [("S1", 20.0)], []) == 0
+
+
+def test_dropped_sample_report_labels_findings_and_notes_other_streams(tmp_path):
+    import cv2
+    png = tmp_path / "v_spectrogram.png"
+    cv2.imwrite(str(png), _blank_spectrogram())
+    data = {
+        'status': 'critical', 'message': 'x', 'spike_count': 2, 'audio_duration': 40.0,
+        'splice_events': [{'time_s': 4.0, 'stream': 0, 'timecode': '00:00:04:00', 'score': 90, 'step_dbfs': -20},
+                          {'time_s': 9.0, 'stream': 1, 'timecode': '00:00:09:00', 'score': 90, 'step_dbfs': -20}],
+        'silence_gaps': [{'start_s': 13.0, 'end_s': 14.0, 'stream': 0, 'duration_ms': 1000.0},
+                         {'start_s': 13.0, 'end_s': 14.0, 'stream': 1, 'duration_ms': 1000.0}],
+    }
+    html = gr.generate_dropped_sample_html(
+        {'dropped_sample_detection': data, 'dropped_sample_spectrogram': str(png)})
+    for label in ('>S1<', '>S2<', '>G1<'):
+        assert label in html
+    assert 'Boxes mark findings' in html
+    assert '1 finding(s) on other audio streams' in html  # S2 is on stream 2

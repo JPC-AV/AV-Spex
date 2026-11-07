@@ -51,6 +51,12 @@ from AV_Spex.checks.qct_parse import (
 
 # Progress split between the two passes that read the file.
 _SPECTROGRAM_PROGRESS_END = 30
+
+# Plot area of the spectrogram, in pixels. showspectrumpic centres this
+# rectangle in the PNG with its legend margins around it, and spans the
+# rendered stream's full duration across the width — the report maps finding
+# times onto it to box them (generate_report._annotate_spectrogram).
+SPECTROGRAM_PLOT_SIZE = (1280, 480)
 _SCAN_PROGRESS_END = 95
 
 
@@ -298,7 +304,12 @@ def _generate_spectrogram(video_path, video_id, output_dir, signals=None, check_
         'ffmpeg', '-y',
         '-hide_banner', '-loglevel', 'error',
         '-i', str(video_path),
-        '-vn', '-lavfi', 'showspectrumpic=s=1280x480',
+        # The first audio stream, explicitly (as the filter's input label —
+        # `-map 0:a:0` would route the raw audio to the PNG muxer): left to
+        # itself ffmpeg picks the stream with the most channels, and the
+        # report boxes findings on audio stream 1 onto this picture.
+        '-vn', '-lavfi',
+        '[0:a:0]showspectrumpic=s={}x{}'.format(*SPECTROGRAM_PLOT_SIZE),
         str(output_path)
     ]
 

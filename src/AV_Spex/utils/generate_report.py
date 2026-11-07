@@ -6487,6 +6487,56 @@ def generate_frame_analysis_html(frame_outputs, video_id):
     return html
 
 
+# Box colours on the dropped-sample spectrogram (BGR), chosen to stand off
+# the spectrogram's black-purple-red-yellow palette; the caption names them.
+_SPLICE_BOX_BGR = (255, 255, 0)   # cyan
+_GAP_BOX_BGR = (0, 255, 0)        # green
+_SPLICE_BOX_CSS = '#00ffff'
+_GAP_BOX_CSS = '#00ff00'
+# Narrowest box drawn, in pixels: at 1280 px a one-hour tape is ~2.8 s per
+# column, so a splice or a short gap would otherwise be a hairline.
+_MIN_BOX_PX = 8
+
+
+def _annotate_spectrogram(img, duration_s, splices, gaps):
+    """Draw labelled boxes on a showspectrumpic image, in place.
+
+    `splices` is a list of (label, time_s), `gaps` of (label, start_s, end_s).
+    The plot area is SPECTROGRAM_PLOT_SIZE, centred in the image with the
+    legend margins around it, and spans `duration_s` across its width.
+    Returns the number of boxes drawn — 0 when the image or duration doesn't
+    fit that geometry, so a picture is never marked in the wrong place.
+    """
+    import cv2
+    from AV_Spex.checks.dropped_sample_detection import SPECTROGRAM_PLOT_SIZE
+    plot_w, plot_h = SPECTROGRAM_PLOT_SIZE
+    h, w = img.shape[:2]
+    if not duration_s or duration_s <= 0 or w < plot_w or h < plot_h:
+        return 0
+    x0, y0 = (w - plot_w) // 2, (h - plot_h) // 2
+
+    def col(t):
+        return x0 + min(max(t / duration_s, 0.0), 1.0) * (plot_w - 1)
+
+    drawn = 0
+    boxes = [(lbl, t, t, _SPLICE_BOX_BGR) for lbl, t in splices]
+    boxes += [(lbl, a, b, _GAP_BOX_BGR) for lbl, a, b in gaps]
+    for label, t_start, t_end, colour in boxes:
+        left, right = col(t_start), col(t_end)
+        if right - left < _MIN_BOX_PX:
+            mid = (left + right) / 2
+            left, right = mid - _MIN_BOX_PX / 2, mid + _MIN_BOX_PX / 2
+        left = int(round(max(left, x0)))
+        right = int(round(min(right, x0 + plot_w - 1)))
+        cv2.rectangle(img, (left, y0), (right, y0 + plot_h - 1), colour, 2)
+        # Inside a box wide enough to hold the label, else just right of it.
+        text_x = left + 3 if right - left > 30 else right + 3
+        cv2.putText(img, label, (text_x, y0 + 14 + 14 * (drawn % 3)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, colour, 1, cv2.LINE_AA)
+        drawn += 1
+    return drawn
+
+
 def generate_dropped_sample_html(frame_outputs):
     """
     Generates an HTML section for dropped sample detection results.
@@ -6595,15 +6645,17 @@ def generate_dropped_sample_html(frame_outputs):
         <p style="font-size: 13px; font-weight: bold; margin: 16px 0 6px 0;">Digital-silence gaps ({len(grouped_gaps)}):</p>
         <table style="border-collapse: collapse; margin: 0 0 10px 0; font-size: 13px;">
             <tr style="background-color: #f0ebe4;">
+                <th style="{cell}">#</th>
                 <th style="{cell}">Audio stream(s)</th>
                 <th style="{cell} text-align: right;">Start</th>
                 <th style="{cell} text-align: right;">End</th>
                 <th style="{cell} text-align: right;">Duration</th>
             </tr>
         """
-        for _, g, streams in grouped_gaps:
+        for n, (_, g, streams) in enumerate(grouped_gaps, 1):
             html += f"""
             <tr>
+                <td style="{cell}">G{n}</td>
                 <td style="{cell}">{', '.join(str(n) for n in streams)}</td>
                 <td style="{cell} text-align: right;">{g.get('start_timecode') or f"{g.get('start_s', 0):.3f} s"}</td>
                 <td style="{cell} text-align: right;">{g.get('end_timecode') or f"{g.get('end_s', 0):.3f} s"}</td>
@@ -6617,15 +6669,17 @@ def generate_dropped_sample_html(frame_outputs):
         <p style="font-size: 13px; font-weight: bold; margin: 16px 0 6px 0;">Audio splices ({len(splice_events)}):</p>
         <table style="border-collapse: collapse; margin: 0 0 10px 0; font-size: 13px;">
             <tr style="background-color: #f0ebe4;">
+                <th style="{cell}">#</th>
                 <th style="{cell}">Audio stream</th>
                 <th style="{cell} text-align: right;">Timecode</th>
                 <th style="{cell} text-align: right;">Step size</th>
                 <th style="{cell} text-align: right;">Score</th>
             </tr>
         """
-        for e in splice_events:
+        for n, e in enumerate(splice_events, 1):
             html += f"""
             <tr>
+                <td style="{cell}">S{n}</td>
                 <td style="{cell}">{e.get('stream', 0) + 1}</td>
                 <td style="{cell} text-align: right;">{e.get('timecode') or f"{e.get('time_s', 0):.3f} s"}</td>
                 <td style="{cell} text-align: right;">{e.get('step_dbfs', 0):.0f} dBFS</td>
@@ -6643,6 +6697,17 @@ def generate_dropped_sample_html(frame_outputs):
             img = cv2.imread(str(spectrogram_path))
             if img is None:
                 raise ValueError(f"cv2 could not read spectrogram at {spectrogram_path}")
+            # The picture is audio stream 1; box the findings on that stream.
+            on_pic_splices = [(f"S{n}", e.get('time_s', 0.0))
+                              for n, e in enumerate(splice_events, 1) if e.get('stream', 0) == 0]
+            on_pic_gaps = [(f"G{n}", g.get('start_s', 0.0), g.get('end_s', 0.0))
+                           for n, (_, g, streams) in enumerate(grouped_gaps, 1) if 1 in streams]
+            boxed = 0
+            if on_pic_splices or on_pic_gaps:
+                try:
+                    boxed = _annotate_spectrogram(img, audio_duration, on_pic_splices, on_pic_gaps)
+                except Exception as e:
+                    logger.warning(f"Could not mark findings on the spectrogram: {e}")
             ok, jpeg_bytes = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 80])
             if not ok:
                 raise ValueError("cv2.imencode failed for spectrogram JPEG")
@@ -6650,8 +6715,20 @@ def generate_dropped_sample_html(frame_outputs):
             html += f"""
             <p style="font-size: 13px; font-weight: bold; margin: 16px 0 6px 0;">Audio Spectrogram:</p>
             <img src="data:image/jpeg;base64,{encoded_img}"
-                 style="max-width: 100%; height: auto; margin: 0 0 10px 0; border: 1px solid var(--report-border);" />
+                 style="max-width: 100%; height: auto; margin: 0 0 4px 0; border: 1px solid var(--report-border);" />
             """
+            caption = "Audio stream 1."
+            if boxed:
+                caption += (f" Boxes mark findings on this stream:"
+                            f" <span style=\"color: {_SPLICE_BOX_CSS}; background: #000; padding: 0 4px;\">S</span> splices,"
+                            f" <span style=\"color: {_GAP_BOX_CSS}; background: #000; padding: 0 4px;\">G</span> digital-silence gaps,"
+                            " labelled as in the tables above. Each box is at least a few pixels wide;"
+                            " the timecodes in the tables are exact.")
+            off_pic = (sum(1 for e in splice_events if e.get('stream', 0) != 0)
+                       + sum(1 for _, _, st in grouped_gaps if 1 not in st))
+            if off_pic:
+                caption += f" {off_pic} finding(s) on other audio streams are listed above but not shown here."
+            html += f'<p style="font-size: 12px; margin: 0 0 10px 0;">{caption}</p>'
         except Exception as e:
             logger.warning(f"Could not embed spectrogram image: {e}")
 
