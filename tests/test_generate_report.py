@@ -1811,9 +1811,13 @@ def test_spectrogram_markers_land_at_the_finding_times():
     assert abs(_px(splice['width']) - gr._MIN_MARK_PX) < 0.01  # widened from a hairline
     assert abs(_px(gap['left']) - (x0 + 0.25 * 1279)) < 1
     assert abs(_px(gap['left'] + gap['width']) - (x0 + 0.35 * 1279)) < 1
-    # Vertically the marks cover exactly the plot area.
-    assert abs(gap['top'] / 100 * _SPECTRO_H - (_SPECTRO_H - 480) // 2) < 0.01
-    assert abs(gap['height'] / 100 * _SPECTRO_H - 480) < 0.01
+    # Vertically the marks reach past both plot edges, so their ends never
+    # cover the top or bottom frequency rows.
+    y0 = (_SPECTRO_H - 480) // 2
+    over = gr._MARK_OVERHANG_PX
+    assert abs(gap['top'] / 100 * _SPECTRO_H - (y0 - over)) < 0.01
+    assert abs(gap['height'] / 100 * _SPECTRO_H - (480 + 2 * over)) < 0.01
+    assert abs(gap['over'] / 100 * (480 + 2 * over) - over) < 0.01
 
 
 def test_spectrogram_marker_labels_stagger_when_crowded():
@@ -1847,6 +1851,9 @@ def test_dropped_sample_report_labels_findings_and_notes_other_streams(tmp_path)
     assert 'href="#dropped-sample-G1"' in html and 'id="dropped-sample-G1"' in html
     assert 'href="#dropped-sample-S2"' not in html  # stream 2: table only
     assert 'title="S1 · splice at 00:00:04:00' in html
+    # Pills live in a strip above the image, not on the plot.
+    labels = html.index('class="spectro-labels"')
+    assert labels < html.index('class="spectro-figure"') < html.index('class="spectro-mark')
     assert 'Highlighted:' in html
     assert '1 finding(s) on other audio streams' in html  # S2 is on stream 2
 
@@ -1854,6 +1861,6 @@ def test_dropped_sample_report_labels_findings_and_notes_other_streams(tmp_path)
 def test_spectrogram_marker_classes_are_styled():
     import inspect
     head = inspect.getsource(gr._report_head_html)
-    for cls in ('.spectro-wrap', '.spectro-mark', '.spectro-splice', '.spectro-gap',
-                '.spectro-pill', '.spectro-key', 'tr.spectro-row:target'):
+    for cls in ('.spectro-wrap', '.spectro-labels', '.spectro-figure', '.spectro-mark',
+                '.spectro-splice', '.spectro-gap', '.spectro-pill', '.spectro-key', 'tr.spectro-row:target'):
         assert cls in head
