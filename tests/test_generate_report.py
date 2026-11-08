@@ -1811,13 +1811,15 @@ def test_spectrogram_markers_land_at_the_finding_times():
     assert abs(_px(splice['width']) - gr._MIN_MARK_PX) < 0.01  # widened from a hairline
     assert abs(_px(gap['left']) - (x0 + 0.25 * 1279)) < 1
     assert abs(_px(gap['left'] + gap['width']) - (x0 + 0.35 * 1279)) < 1
-    # Vertically the marks reach past both plot edges, so their ends never
-    # cover the top or bottom frequency rows.
+    # Vertically the marks run from the image top (where the label stem
+    # meets them) to just past the plot's bottom edge, so the end tick never
+    # covers the lowest frequency rows.
     y0 = (_SPECTRO_H - 480) // 2
     over = gr._MARK_OVERHANG_PX
-    assert abs(gap['top'] / 100 * _SPECTRO_H - (y0 - over)) < 0.01
-    assert abs(gap['height'] / 100 * _SPECTRO_H - (480 + 2 * over)) < 0.01
-    assert abs(gap['over'] / 100 * (480 + 2 * over) - over) < 0.01
+    mark_h = y0 + 480 + over
+    assert gap['top'] == 0
+    assert abs(gap['height'] / 100 * _SPECTRO_H - mark_h) < 0.01
+    assert abs(gap['over'] / 100 * mark_h - over) < 0.01
 
 
 def test_spectrogram_marker_labels_stagger_when_crowded():
@@ -1852,8 +1854,10 @@ def test_dropped_sample_report_labels_findings_and_notes_other_streams(tmp_path)
     assert 'href="#dropped-sample-S2"' not in html  # stream 2: table only
     assert 'title="S1 · splice at 00:00:04:00' in html
     # Pills live in a strip above the image, not on the plot.
+    # Each pill sits on a stem of its stripe, which meets the mark below.
     labels = html.index('class="spectro-labels"')
-    assert labels < html.index('class="spectro-figure"') < html.index('class="spectro-mark')
+    assert labels < html.index('class="spectro-band spectro-stem') < html.index('class="spectro-figure"')
+    assert html.index('class="spectro-figure"') < html.index('class="spectro-band spectro-mark')
     assert 'Highlighted:' in html
     assert '1 finding(s) on other audio streams' in html  # S2 is on stream 2
 
@@ -1861,6 +1865,6 @@ def test_dropped_sample_report_labels_findings_and_notes_other_streams(tmp_path)
 def test_spectrogram_marker_classes_are_styled():
     import inspect
     head = inspect.getsource(gr._report_head_html)
-    for cls in ('.spectro-wrap', '.spectro-labels', '.spectro-figure', '.spectro-mark',
+    for cls in ('.spectro-wrap', '.spectro-labels', '.spectro-figure', '.spectro-band', '.spectro-stem', '.spectro-mark',
                 '.spectro-splice', '.spectro-gap', '.spectro-pill', '.spectro-key', 'tr.spectro-row:target'):
         assert cls in head

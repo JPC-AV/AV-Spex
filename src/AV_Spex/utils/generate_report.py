@@ -6491,11 +6491,11 @@ def generate_frame_analysis_html(frame_outputs, video_id):
 # Narrowest marker band, in image pixels: at 1280 px a one-hour tape is
 # ~2.8 s per column, so a splice or a short gap would otherwise be a hairline.
 _MIN_MARK_PX = 10
-# How far markers reach past the top and bottom of the plot, in image pixels.
+# How far markers reach past the bottom of the plot, in image pixels.
 # showspectrumpic draws the axis line one pixel outside the plot and its time
-# labels from 5 px beyond that, so 5 px lands the marker ends in the clear
-# band between them — outside the data, so the top and bottom frequency rows
-# are never covered.
+# labels from 5 px beyond that, so 5 px lands the marker's end tick in the
+# clear band between them — outside the data, so the lowest frequency rows
+# are never covered. (At the top the stripe runs on up to its label.)
 _MARK_OVERHANG_PX = 5
 # Label pills are staggered onto this many rows when neighbours would
 # overlap; the estimate is in native image pixels (11px bold label + padding).
@@ -6516,18 +6516,20 @@ def _spectrogram_markers(img_w, img_h, duration_s, splices, gaps):
 
     Returns a list of dicts — kind ('splice'/'gap'), label, tooltip, left,
     width, centre, top, height (percent of the image), over (the overhang
-    past each plot edge, percent of the marker's own height) and row (label
-    stagger) — in time order. Markers reach `_MARK_OVERHANG_PX` past the top
-    and bottom of the plot. Empty when the image or duration doesn't fit
-    that geometry, so a picture is never marked in the wrong place.
+    past the plot's bottom edge, percent of the marker's own height) and row
+    (label stagger) — in time order. Each marker runs from the top of the
+    image, where it meets the stem down from its label, to
+    `_MARK_OVERHANG_PX` past the bottom of the plot. Empty when the image or
+    duration doesn't fit that geometry, so a picture is never marked in the
+    wrong place.
     """
     from AV_Spex.checks.dropped_sample_detection import SPECTROGRAM_PLOT_SIZE
     plot_w, plot_h = SPECTROGRAM_PLOT_SIZE
     if not duration_s or duration_s <= 0 or img_w < plot_w or img_h < plot_h:
         return []
     x0, y0 = (img_w - plot_w) // 2, (img_h - plot_h) // 2
-    over = min(_MARK_OVERHANG_PX, y0)
-    mark_top, mark_h = y0 - over, plot_h + 2 * over
+    over = min(_MARK_OVERHANG_PX, img_h - y0 - plot_h)
+    mark_top, mark_h = 0, y0 + plot_h + over
 
     def col(t):
         return x0 + min(max(t / duration_s, 0.0), 1.0) * (plot_w - 1)
@@ -6569,15 +6571,24 @@ _MARK_LABEL_ROW_PX = 22
 def _spectrogram_markers_html(markers):
     """Render `_spectrogram_markers()` output as HTML.
 
-    Returns (labels_html, marks_html): the label pills, for a strip above the
-    image so they never sit on the plot, and the marker bands, laid over the
-    image itself. Each pill links to its row in the findings table above.
+    Returns (labels_html, marks_html): the label strip that sits above the
+    image — pills, each on a stem of the marker's stripe that runs down to
+    meet the marker — and the marker bands laid over the image itself, so a
+    finding reads as one unbroken stripe from its label to the plot's bottom.
+    Each pill links to its row in the findings table above.
     """
     labels, marks = [], []
     for m in markers:
         tip = html_module.escape(m['tooltip'], quote=True)
+        pill_bottom = 7 + _MARK_LABEL_ROW_PX * m['row']
+        # The stem stops at the pill's middle, so the pill caps it.
+        labels.append(
+            f'<div class="spectro-band spectro-stem spectro-{m["kind"]}" '
+            f'style="left: {m["left"]:.3f}%; width: {m["width"]:.3f}%; '
+            f'height: {pill_bottom + 9}px;"></div>'
+        )
         marks.append(
-            f'<div class="spectro-mark spectro-{m["kind"]}" title="{tip}" '
+            f'<div class="spectro-band spectro-mark spectro-{m["kind"]}" title="{tip}" '
             f'style="left: {m["left"]:.3f}%; width: {m["width"]:.3f}%; '
             f'top: {m["top"]:.3f}%; height: {m["height"]:.3f}%; '
             f'--spectro-over: {m["over"]:.3f}%;"></div>'
@@ -6585,7 +6596,7 @@ def _spectrogram_markers_html(markers):
         labels.append(
             f'<a class="spectro-pill spectro-{m["kind"]}" title="{tip}" '
             f'href="#dropped-sample-{m["label"]}" '
-            f'style="left: {m["centre"]:.3f}%; bottom: {7 + _MARK_LABEL_ROW_PX * m["row"]}px;">'
+            f'style="left: {m["centre"]:.3f}%; bottom: {pill_bottom}px;">'
             f'{m["label"]}</a>'
         )
     if not markers:
@@ -7607,13 +7618,14 @@ def _report_head_html(video_id, logo_image_path, color_strip_store, waveform_sto
                 display: none !important;
             }}
             /* Dropped-sample spectrogram markers, laid over the image in
-               percentages (generate_report._spectrogram_markers). Soft tints
-               rather than outlines, so the splice line or silent stretch
-               being marked stays visible underneath. Anything solid sits
-               OUTSIDE the plot: label pills in a strip above the image, and
-               end ticks in the overhang the markers reach past the plot's top
-               and bottom edges (--spectro-over), so the highest and lowest
-               frequency rows are never covered. Colours stand off the
+               percentages (generate_report._spectrogram_markers). Each
+               finding is one stripe running from its label pill, in a strip
+               above the image, down through the time axis to just past the
+               plot's bottom edge. Soft tints rather than outlines, so the
+               splice line or silent stretch — and the axis times — read
+               through it. The only solid parts sit outside the plot (the
+               pill, and an end tick in the bottom overhang, --spectro-over),
+               so no frequency row is covered. Colours stand off the
                spectrogram's black-purple-red-yellow palette. */
             .spectro-splice {{ --spectro-c: 103, 216, 239; }}
             .spectro-gap {{ --spectro-c: 134, 227, 160; }}
@@ -7637,50 +7649,51 @@ def _report_head_html(video_id, logo_image_path, color_strip_store, waveform_sto
                 max-width: 100%;
                 height: auto;
             }}
-            .spectro-mark {{
+            .spectro-band {{
                 position: absolute;
                 box-sizing: border-box;
                 transition: background-color 0.15s ease;
             }}
-            .spectro-mark::before,
-            .spectro-mark::after {{
-                content: "";
-                position: absolute;
-                height: var(--spectro-over);
-                background: rgb(var(--spectro-c));
-            }}
-            .spectro-mark::before {{ top: 0; }}
-            .spectro-mark::after {{ bottom: 0; }}
-            .spectro-mark.spectro-splice {{
+            .spectro-band.spectro-splice {{
                 background: linear-gradient(90deg,
                     rgba(var(--spectro-c), 0) 0%,
                     rgba(var(--spectro-c), 0.38) 50%,
                     rgba(var(--spectro-c), 0) 100%);
             }}
+            .spectro-band.spectro-gap {{
+                background-color: rgba(var(--spectro-c), 0.13);
+                border-left: 1px dashed rgba(var(--spectro-c), 0.85);
+                border-right: 1px dashed rgba(var(--spectro-c), 0.85);
+            }}
+            .spectro-stem {{
+                bottom: 0;
+            }}
+            .spectro-mark:hover {{
+                background-color: rgba(var(--spectro-c), 0.26);
+            }}
+            /* End tick just past the plot's bottom edge. */
+            .spectro-mark::after {{
+                content: "";
+                position: absolute;
+                bottom: 0;
+                height: var(--spectro-over);
+                background: rgb(var(--spectro-c));
+            }}
             /* On a long tape a splice is narrower than a pixel column, so a
-               solid tick past each plot edge pins down where it is. */
-            .spectro-mark.spectro-splice::before,
+               solid tick pins down where it is. */
             .spectro-mark.spectro-splice::after {{
                 left: 50%;
                 width: 2px;
                 margin-left: -1px;
             }}
-            .spectro-mark.spectro-gap {{
-                background-color: rgba(var(--spectro-c), 0.13);
-                border-left: 1px dashed rgba(var(--spectro-c), 0.85);
-                border-right: 1px dashed rgba(var(--spectro-c), 0.85);
-            }}
-            /* Gap ends: tabs spanning the gap, just outside the plot. */
-            .spectro-mark.spectro-gap::before,
+            /* Gap end: a tab spanning the gap. */
             .spectro-mark.spectro-gap::after {{
                 left: -1px;
                 right: -1px;
             }}
-            .spectro-mark:hover {{
-                background-color: rgba(var(--spectro-c), 0.26);
-            }}
             .spectro-pill {{
                 position: absolute;
+                z-index: 1;
                 transform: translateX(-50%);
                 padding: 0 7px;
                 border: none;
@@ -7691,15 +7704,6 @@ def _report_head_html(video_id, logo_image_path, color_strip_store, waveform_sto
                 text-decoration: none;
                 white-space: nowrap;
                 box-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
-            }}
-            .spectro-pill::after {{
-                content: "";
-                position: absolute;
-                left: 50%;
-                top: 100%;
-                margin-left: -4px;
-                border: 4px solid transparent;
-                border-top-color: rgb(var(--spectro-c));
             }}
             .spectro-pill:hover,
             .spectro-pill:focus-visible {{
