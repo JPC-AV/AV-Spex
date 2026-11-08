@@ -1784,38 +1784,47 @@ def test_period_selection_anchor_is_a_known_toc_entry():
 
 
 # ---------------------------------------------------------------------------
-# Dropped-sample spectrogram boxes
+# Dropped-sample spectrogram markers
 # ---------------------------------------------------------------------------
+
+# showspectrumpic's image size for a 1280x480 plot with its legend margins.
+_SPECTRO_W, _SPECTRO_H = 1564, 608
+
 
 def _blank_spectrogram():
     """Black image the size showspectrumpic gives a 1280x480 plot with legend."""
     import numpy as np
-    return np.zeros((608, 1564, 3), dtype=np.uint8)
+    return np.zeros((_SPECTRO_H, _SPECTRO_W, 3), dtype=np.uint8)
 
 
-def _box_columns(img, bgr):
-    import numpy as np
-    return np.where((img == bgr).all(axis=2).any(axis=0))[0]
+def _px(pct):
+    return pct / 100.0 * _SPECTRO_W
 
 
-def test_spectrogram_boxes_land_at_the_finding_times():
-    img = _blank_spectrogram()
-    n = gr._annotate_spectrogram(img, 40.0, [("S1", 20.0)], [("G1", 10.0, 14.0)])
-    assert n == 2
-    x0 = (1564 - 1280) // 2  # legend margin
-    splice_cols = _box_columns(img, gr._SPLICE_BOX_BGR)
-    assert abs(splice_cols.mean() - (x0 + 0.5 * 1279)) < 3
-    gap_cols = _box_columns(img, gr._GAP_BOX_BGR)
-    assert abs(gap_cols.min() - (x0 + 0.25 * 1279)) <= 2
-    assert abs(gap_cols.max() - (x0 + 0.35 * 1279)) <= 2
+def test_spectrogram_markers_land_at_the_finding_times():
+    marks = gr._spectrogram_markers(_SPECTRO_W, _SPECTRO_H, 40.0,
+                                    [("S1", 20.0, "tip")], [("G1", 10.0, 14.0, "tip")])
+    assert [m['label'] for m in marks] == ['G1', 'S1']  # time order
+    gap, splice = marks
+    x0 = (_SPECTRO_W - 1280) // 2  # legend margin
+    assert abs(_px(splice['left'] + splice['width'] / 2) - (x0 + 0.5 * 1279)) < 1
+    assert abs(_px(splice['width']) - gr._MIN_MARK_PX) < 0.01  # widened from a hairline
+    assert abs(_px(gap['left']) - (x0 + 0.25 * 1279)) < 1
+    assert abs(_px(gap['left'] + gap['width']) - (x0 + 0.35 * 1279)) < 1
+    # Vertically the marks cover exactly the plot area.
+    assert abs(gap['top'] / 100 * _SPECTRO_H - (_SPECTRO_H - 480) // 2) < 0.01
+    assert abs(gap['height'] / 100 * _SPECTRO_H - 480) < 0.01
+
+
+def test_spectrogram_marker_labels_stagger_when_crowded():
+    marks = gr._spectrogram_markers(_SPECTRO_W, _SPECTRO_H, 3600.0,
+                                    [("S1", 100.0, ""), ("S2", 101.0, ""), ("S3", 2000.0, "")], [])
+    assert [m['row'] for m in marks] == [0, 1, 0]
 
 
 def test_spectrogram_with_unexpected_geometry_is_left_unmarked():
-    import numpy as np
-    small = np.zeros((300, 600, 3), dtype=np.uint8)
-    assert gr._annotate_spectrogram(small, 40.0, [("S1", 20.0)], []) == 0
-    assert not small.any()
-    assert gr._annotate_spectrogram(_blank_spectrogram(), 0.0, [("S1", 20.0)], []) == 0
+    assert gr._spectrogram_markers(600, 300, 40.0, [("S1", 20.0, "")], []) == []
+    assert gr._spectrogram_markers(_SPECTRO_W, _SPECTRO_H, 0.0, [("S1", 20.0, "")], []) == []
 
 
 def test_dropped_sample_report_labels_findings_and_notes_other_streams(tmp_path):
@@ -1833,5 +1842,18 @@ def test_dropped_sample_report_labels_findings_and_notes_other_streams(tmp_path)
         {'dropped_sample_detection': data, 'dropped_sample_spectrogram': str(png)})
     for label in ('>S1<', '>S2<', '>G1<'):
         assert label in html
-    assert 'Boxes mark findings' in html
+    # Stream-1 findings are marked over the picture and link to their rows.
+    assert 'href="#dropped-sample-S1"' in html and 'id="dropped-sample-S1"' in html
+    assert 'href="#dropped-sample-G1"' in html and 'id="dropped-sample-G1"' in html
+    assert 'href="#dropped-sample-S2"' not in html  # stream 2: table only
+    assert 'title="S1 · splice at 00:00:04:00' in html
+    assert 'Highlighted:' in html
     assert '1 finding(s) on other audio streams' in html  # S2 is on stream 2
+
+
+def test_spectrogram_marker_classes_are_styled():
+    import inspect
+    head = inspect.getsource(gr._report_head_html)
+    for cls in ('.spectro-wrap', '.spectro-mark', '.spectro-splice', '.spectro-gap',
+                '.spectro-pill', '.spectro-key', 'tr.spectro-row:target'):
+        assert cls in head

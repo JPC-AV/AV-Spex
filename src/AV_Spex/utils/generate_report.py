@@ -10,6 +10,7 @@ import csv
 from base64 import b64encode
 from dataclasses import dataclass, field
 from typing import Any, List, Optional, Tuple
+import html as html_module  # `html` is the markup accumulator throughout
 import json
 import re
 import subprocess
@@ -6487,54 +6488,84 @@ def generate_frame_analysis_html(frame_outputs, video_id):
     return html
 
 
-# Box colours on the dropped-sample spectrogram (BGR), chosen to stand off
-# the spectrogram's black-purple-red-yellow palette; the caption names them.
-_SPLICE_BOX_BGR = (255, 255, 0)   # cyan
-_GAP_BOX_BGR = (0, 255, 0)        # green
-_SPLICE_BOX_CSS = '#00ffff'
-_GAP_BOX_CSS = '#00ff00'
-# Narrowest box drawn, in pixels: at 1280 px a one-hour tape is ~2.8 s per
-# column, so a splice or a short gap would otherwise be a hairline.
-_MIN_BOX_PX = 8
+# Narrowest marker band, in image pixels: at 1280 px a one-hour tape is
+# ~2.8 s per column, so a splice or a short gap would otherwise be a hairline.
+_MIN_MARK_PX = 10
+# Label pills are staggered onto this many rows when neighbours would
+# overlap; the estimate is in native image pixels (11px bold label + padding).
+_MARK_LABEL_ROWS = 3
+_MARK_LABEL_PX_PER_CHAR = 8
+_MARK_LABEL_PAD_PX = 22
 
 
-def _annotate_spectrogram(img, duration_s, splices, gaps):
-    """Draw labelled boxes on a showspectrumpic image, in place.
+def _spectrogram_markers(img_w, img_h, duration_s, splices, gaps):
+    """Place finding markers over a showspectrumpic image, as CSS percentages.
 
-    `splices` is a list of (label, time_s), `gaps` of (label, start_s, end_s).
-    The plot area is SPECTROGRAM_PLOT_SIZE, centred in the image with the
-    legend margins around it, and spans `duration_s` across its width.
-    Returns the number of boxes drawn — 0 when the image or duration doesn't
-    fit that geometry, so a picture is never marked in the wrong place.
+    `splices` is a list of (label, time_s, tooltip), `gaps` of
+    (label, start_s, end_s, tooltip). The plot area is SPECTROGRAM_PLOT_SIZE,
+    centred in the image with the legend margins around it, and spans
+    `duration_s` across its width. The markers are drawn in HTML over the
+    image (see `.spectro-*` in the report CSS), so the picture itself is
+    never painted on.
+
+    Returns a list of dicts — kind ('splice'/'gap'), label, tooltip, left,
+    width, top, height (percent of the image) and row (label stagger) — in
+    time order. Empty when the image or duration doesn't fit that geometry,
+    so a picture is never marked in the wrong place.
     """
-    import cv2
     from AV_Spex.checks.dropped_sample_detection import SPECTROGRAM_PLOT_SIZE
     plot_w, plot_h = SPECTROGRAM_PLOT_SIZE
-    h, w = img.shape[:2]
-    if not duration_s or duration_s <= 0 or w < plot_w or h < plot_h:
-        return 0
-    x0, y0 = (w - plot_w) // 2, (h - plot_h) // 2
+    if not duration_s or duration_s <= 0 or img_w < plot_w or img_h < plot_h:
+        return []
+    x0, y0 = (img_w - plot_w) // 2, (img_h - plot_h) // 2
 
     def col(t):
         return x0 + min(max(t / duration_s, 0.0), 1.0) * (plot_w - 1)
 
-    drawn = 0
-    boxes = [(lbl, t, t, _SPLICE_BOX_BGR) for lbl, t in splices]
-    boxes += [(lbl, a, b, _GAP_BOX_BGR) for lbl, a, b in gaps]
-    for label, t_start, t_end, colour in boxes:
+    raw = [('splice', lbl, t, t, tip) for lbl, t, tip in splices]
+    raw += [('gap', lbl, a, b, tip) for lbl, a, b, tip in gaps]
+    raw.sort(key=lambda m: m[2])
+
+    markers = []
+    row_ends = [float('-inf')] * _MARK_LABEL_ROWS
+    for kind, label, t_start, t_end, tip in raw:
         left, right = col(t_start), col(t_end)
-        if right - left < _MIN_BOX_PX:
+        if right - left < _MIN_MARK_PX:
             mid = (left + right) / 2
-            left, right = mid - _MIN_BOX_PX / 2, mid + _MIN_BOX_PX / 2
-        left = int(round(max(left, x0)))
-        right = int(round(min(right, x0 + plot_w - 1)))
-        cv2.rectangle(img, (left, y0), (right, y0 + plot_h - 1), colour, 2)
-        # Inside a box wide enough to hold the label, else just right of it.
-        text_x = left + 3 if right - left > 30 else right + 3
-        cv2.putText(img, label, (text_x, y0 + 14 + 14 * (drawn % 3)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, colour, 1, cv2.LINE_AA)
-        drawn += 1
-    return drawn
+            left, right = mid - _MIN_MARK_PX / 2, mid + _MIN_MARK_PX / 2
+        left, right = max(left, x0), min(right, x0 + plot_w - 1)
+        # Pills are centred on the marker; take the first row they fit on.
+        centre = (left + right) / 2
+        half = (len(label) * _MARK_LABEL_PX_PER_CHAR + _MARK_LABEL_PAD_PX) / 2
+        row = next((r for r, end in enumerate(row_ends) if centre - half > end + 4),
+                   len(markers) % _MARK_LABEL_ROWS)
+        row_ends[row] = centre + half
+        markers.append({
+            'kind': kind, 'label': label, 'tooltip': tip, 'row': row,
+            'left': 100.0 * left / img_w,
+            'width': 100.0 * (right - left) / img_w,
+            'top': 100.0 * y0 / img_h,
+            'height': 100.0 * plot_h / img_h,
+        })
+    return markers
+
+
+def _spectrogram_markers_html(markers):
+    """Render `_spectrogram_markers()` output as absolutely-positioned divs.
+
+    Each pill links to its row in the findings table above.
+    """
+    out = []
+    for m in markers:
+        tip = html_module.escape(m['tooltip'], quote=True)
+        out.append(
+            f'<div class="spectro-mark spectro-{m["kind"]}" title="{tip}" '
+            f'style="left: {m["left"]:.3f}%; width: {m["width"]:.3f}%; '
+            f'top: {m["top"]:.3f}%; height: {m["height"]:.3f}%;">'
+            f'<a class="spectro-pill" href="#dropped-sample-{m["label"]}" '
+            f'style="top: {6 + 22 * m["row"]}px;">{m["label"]}</a></div>'
+        )
+    return ''.join(out)
 
 
 def generate_dropped_sample_html(frame_outputs):
@@ -6654,7 +6685,7 @@ def generate_dropped_sample_html(frame_outputs):
         """
         for n, (_, g, streams) in enumerate(grouped_gaps, 1):
             html += f"""
-            <tr>
+            <tr id="dropped-sample-G{n}" class="spectro-row">
                 <td style="{cell}">G{n}</td>
                 <td style="{cell}">{', '.join(str(n) for n in streams)}</td>
                 <td style="{cell} text-align: right;">{g.get('start_timecode') or f"{g.get('start_s', 0):.3f} s"}</td>
@@ -6678,7 +6709,7 @@ def generate_dropped_sample_html(frame_outputs):
         """
         for n, e in enumerate(splice_events, 1):
             html += f"""
-            <tr>
+            <tr id="dropped-sample-S{n}" class="spectro-row">
                 <td style="{cell}">S{n}</td>
                 <td style="{cell}">{e.get('stream', 0) + 1}</td>
                 <td style="{cell} text-align: right;">{e.get('timecode') or f"{e.get('time_s', 0):.3f} s"}</td>
@@ -6697,15 +6728,26 @@ def generate_dropped_sample_html(frame_outputs):
             img = cv2.imread(str(spectrogram_path))
             if img is None:
                 raise ValueError(f"cv2 could not read spectrogram at {spectrogram_path}")
-            # The picture is audio stream 1; box the findings on that stream.
-            on_pic_splices = [(f"S{n}", e.get('time_s', 0.0))
-                              for n, e in enumerate(splice_events, 1) if e.get('stream', 0) == 0]
-            on_pic_gaps = [(f"G{n}", g.get('start_s', 0.0), g.get('end_s', 0.0))
-                           for n, (_, g, streams) in enumerate(grouped_gaps, 1) if 1 in streams]
-            boxed = 0
+            # The picture is audio stream 1; mark the findings on that stream.
+            def _tc(value, seconds):
+                return value or f"{seconds:.3f} s"
+            on_pic_splices = [
+                (f"S{n}", e.get('time_s', 0.0),
+                 f"S{n} · splice at {_tc(e.get('timecode'), e.get('time_s', 0.0))}"
+                 f" · step {e.get('step_dbfs', 0):.0f} dBFS")
+                for n, e in enumerate(splice_events, 1) if e.get('stream', 0) == 0]
+            on_pic_gaps = [
+                (f"G{n}", g.get('start_s', 0.0), g.get('end_s', 0.0),
+                 f"G{n} · digital silence {_tc(g.get('start_timecode'), g.get('start_s', 0.0))}"
+                 f" – {_tc(g.get('end_timecode'), g.get('end_s', 0.0))}"
+                 f" ({g.get('duration_ms', 0):.0f} ms)")
+                for n, (_, g, streams) in enumerate(grouped_gaps, 1) if 1 in streams]
+            markers = []
             if on_pic_splices or on_pic_gaps:
                 try:
-                    boxed = _annotate_spectrogram(img, audio_duration, on_pic_splices, on_pic_gaps)
+                    h_px, w_px = img.shape[:2]
+                    markers = _spectrogram_markers(w_px, h_px, audio_duration,
+                                                   on_pic_splices, on_pic_gaps)
                 except Exception as e:
                     logger.warning(f"Could not mark findings on the spectrogram: {e}")
             ok, jpeg_bytes = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 80])
@@ -6714,21 +6756,27 @@ def generate_dropped_sample_html(frame_outputs):
             encoded_img = b64encode(jpeg_bytes.tobytes()).decode()
             html += f"""
             <p style="font-size: 13px; font-weight: bold; margin: 16px 0 6px 0;">Audio Spectrogram:</p>
-            <img src="data:image/jpeg;base64,{encoded_img}"
-                 style="max-width: 100%; height: auto; margin: 0 0 4px 0; border: 1px solid var(--report-border);" />
+            <div class="spectro-wrap">
+                <img src="data:image/jpeg;base64,{encoded_img}" alt="Audio stream 1 spectrogram" />
+                {_spectrogram_markers_html(markers)}
+            </div>
             """
             caption = "Audio stream 1."
-            if boxed:
-                caption += (f" Boxes mark findings on this stream:"
-                            f" <span style=\"color: {_SPLICE_BOX_CSS}; background: #000; padding: 0 4px;\">S</span> splices,"
-                            f" <span style=\"color: {_GAP_BOX_CSS}; background: #000; padding: 0 4px;\">G</span> digital-silence gaps,"
-                            " labelled as in the tables above. Each box is at least a few pixels wide;"
-                            " the timecodes in the tables are exact.")
+            if markers:
+                kinds = {m['kind'] for m in markers}
+                legend = []
+                if 'splice' in kinds:
+                    legend.append('<span class="spectro-key spectro-splice">S</span> splices')
+                if 'gap' in kinds:
+                    legend.append('<span class="spectro-key spectro-gap">G</span> digital-silence gaps')
+                caption += (" Highlighted: " + ", ".join(legend) + ". Labels match the tables above"
+                            " &mdash; hover a marker for its timecode, or click its label to jump to the row."
+                            " Short findings are widened so they stay visible; the table timecodes are exact.")
             off_pic = (sum(1 for e in splice_events if e.get('stream', 0) != 0)
                        + sum(1 for _, _, st in grouped_gaps if 1 not in st))
             if off_pic:
                 caption += f" {off_pic} finding(s) on other audio streams are listed above but not shown here."
-            html += f'<p style="font-size: 12px; margin: 0 0 10px 0;">{caption}</p>'
+            html += f'<p style="font-size: 12px; margin: 6px 0 10px 0; color: #555;">{caption}</p>'
         except Exception as e:
             logger.warning(f"Could not embed spectrogram image: {e}")
 
@@ -7525,6 +7573,102 @@ def _report_head_html(video_id, logo_image_path, color_strip_store, waveform_sto
             }}
             .bars-ref-panel[hidden] {{
                 display: none !important;
+            }}
+            /* Dropped-sample spectrogram markers, laid over the image in
+               percentages (generate_report._spectrogram_markers). Soft tints
+               rather than outlines, so the splice line or silent stretch
+               being marked stays visible underneath. Colours stand off the
+               spectrogram's black-purple-red-yellow palette. */
+            .spectro-wrap {{
+                position: relative;
+                display: inline-block;
+                max-width: 100%;
+                line-height: 0;
+                border: 1px solid var(--report-border);
+                border-radius: 4px;
+                overflow: hidden;
+                -webkit-print-color-adjust: exact;
+                print-color-adjust: exact;
+            }}
+            .spectro-wrap img {{
+                display: block;
+                max-width: 100%;
+                height: auto;
+            }}
+            .spectro-mark {{
+                position: absolute;
+                box-sizing: border-box;
+                transition: background-color 0.15s ease;
+            }}
+            .spectro-splice {{
+                --spectro-c: 103, 216, 239;
+                background: linear-gradient(90deg,
+                    rgba(var(--spectro-c), 0) 0%,
+                    rgba(var(--spectro-c), 0.38) 50%,
+                    rgba(var(--spectro-c), 0) 100%);
+            }}
+            /* On a long tape a splice is narrower than a pixel column, so
+               bracket it with a caret at the bottom edge too. */
+            .spectro-mark.spectro-splice::after {{
+                content: "";
+                position: absolute;
+                left: 50%;
+                bottom: 0;
+                margin-left: -5px;
+                border: 5px solid transparent;
+                border-bottom-color: rgb(var(--spectro-c));
+            }}
+            .spectro-gap {{
+                --spectro-c: 134, 227, 160;
+                background-color: rgba(var(--spectro-c), 0.13);
+                border-left: 1px dashed rgba(var(--spectro-c), 0.85);
+                border-right: 1px dashed rgba(var(--spectro-c), 0.85);
+            }}
+            .spectro-mark:hover {{
+                background-color: rgba(var(--spectro-c), 0.26);
+            }}
+            .spectro-pill {{
+                position: absolute;
+                left: 50%;
+                transform: translateX(-50%);
+                padding: 0 7px;
+                border-radius: 9px;
+                background: rgb(var(--spectro-c));
+                color: #0d1b22;
+                font: bold 11px/17px Arial, sans-serif;
+                text-decoration: none;
+                white-space: nowrap;
+                box-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+            }}
+            .spectro-pill::after {{
+                content: "";
+                position: absolute;
+                left: 50%;
+                top: 100%;
+                margin-left: -4px;
+                border: 4px solid transparent;
+                border-top-color: rgb(var(--spectro-c));
+            }}
+            .spectro-pill:hover,
+            .spectro-pill:focus-visible {{
+                color: #000000;
+                box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.85);
+                outline: none;
+            }}
+            .spectro-key {{
+                display: inline-block;
+                padding: 0 6px;
+                border: none;
+                border-radius: 8px;
+                background: rgb(var(--spectro-c));
+                color: #0d1b22;
+                font: bold 10px/15px Arial, sans-serif;
+                -webkit-print-color-adjust: exact;
+                print-color-adjust: exact;
+            }}
+            tr.spectro-row:target td {{
+                background-color: var(--report-notice-bg);
+                transition: background-color 0.3s ease;
             }}
         </style>
         <script>

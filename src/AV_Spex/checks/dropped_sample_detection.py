@@ -55,7 +55,7 @@ _SPECTROGRAM_PROGRESS_END = 30
 # Plot area of the spectrogram, in pixels. showspectrumpic centres this
 # rectangle in the PNG with its legend margins around it, and spans the
 # rendered stream's full duration across the width — the report maps finding
-# times onto it to box them (generate_report._annotate_spectrogram).
+# times onto it to mark them (generate_report._spectrogram_markers).
 SPECTROGRAM_PLOT_SIZE = (1280, 480)
 _SCAN_PROGRESS_END = 95
 
