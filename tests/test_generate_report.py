@@ -1781,3 +1781,90 @@ def test_period_selection_anchor_is_a_known_toc_entry():
     import inspect
     source = inspect.getsource(gr.write_html_report)
     assert "('section-period-selection', 'Analysis Period Selection')" in source
+
+
+# ---------------------------------------------------------------------------
+# Dropped-sample spectrogram markers
+# ---------------------------------------------------------------------------
+
+# showspectrumpic's image size for a 1280x480 plot with its legend margins.
+_SPECTRO_W, _SPECTRO_H = 1564, 608
+
+
+def _blank_spectrogram():
+    """Black image the size showspectrumpic gives a 1280x480 plot with legend."""
+    import numpy as np
+    return np.zeros((_SPECTRO_H, _SPECTRO_W, 3), dtype=np.uint8)
+
+
+def _px(pct):
+    return pct / 100.0 * _SPECTRO_W
+
+
+def test_spectrogram_markers_land_at_the_finding_times():
+    marks = gr._spectrogram_markers(_SPECTRO_W, _SPECTRO_H, 40.0,
+                                    [("S1", 20.0, "tip")], [("G1", 10.0, 14.0, "tip")])
+    assert [m['label'] for m in marks] == ['G1', 'S1']  # time order
+    gap, splice = marks
+    x0 = (_SPECTRO_W - 1280) // 2  # legend margin
+    assert abs(_px(splice['left'] + splice['width'] / 2) - (x0 + 0.5 * 1279)) < 1
+    assert abs(_px(splice['width']) - gr._MIN_MARK_PX) < 0.01  # widened from a hairline
+    assert abs(_px(gap['left']) - (x0 + 0.25 * 1279)) < 1
+    assert abs(_px(gap['left'] + gap['width']) - (x0 + 0.35 * 1279)) < 1
+    # Vertically the marks run from the image top (where the label stem
+    # meets them) to just past the plot's bottom edge, so the end tick never
+    # covers the lowest frequency rows.
+    y0 = (_SPECTRO_H - 480) // 2
+    over = gr._MARK_OVERHANG_PX
+    mark_h = y0 + 480 + over
+    assert gap['top'] == 0
+    assert abs(gap['height'] / 100 * _SPECTRO_H - mark_h) < 0.01
+    assert abs(gap['over'] / 100 * mark_h - over) < 0.01
+
+
+def test_spectrogram_marker_labels_stagger_when_crowded():
+    marks = gr._spectrogram_markers(_SPECTRO_W, _SPECTRO_H, 3600.0,
+                                    [("S1", 100.0, ""), ("S2", 101.0, ""), ("S3", 2000.0, "")], [])
+    assert [m['row'] for m in marks] == [0, 1, 0]
+
+
+def test_spectrogram_with_unexpected_geometry_is_left_unmarked():
+    assert gr._spectrogram_markers(600, 300, 40.0, [("S1", 20.0, "")], []) == []
+    assert gr._spectrogram_markers(_SPECTRO_W, _SPECTRO_H, 0.0, [("S1", 20.0, "")], []) == []
+
+
+def test_dropped_sample_report_labels_findings_and_notes_other_streams(tmp_path):
+    import cv2
+    png = tmp_path / "v_spectrogram.png"
+    cv2.imwrite(str(png), _blank_spectrogram())
+    data = {
+        'status': 'critical', 'message': 'x', 'spike_count': 2, 'audio_duration': 40.0,
+        'splice_events': [{'time_s': 4.0, 'stream': 0, 'timecode': '00:00:04:00', 'score': 90, 'step_dbfs': -20},
+                          {'time_s': 9.0, 'stream': 1, 'timecode': '00:00:09:00', 'score': 90, 'step_dbfs': -20}],
+        'silence_gaps': [{'start_s': 13.0, 'end_s': 14.0, 'stream': 0, 'duration_ms': 1000.0},
+                         {'start_s': 13.0, 'end_s': 14.0, 'stream': 1, 'duration_ms': 1000.0}],
+    }
+    html = gr.generate_dropped_sample_html(
+        {'dropped_sample_detection': data, 'dropped_sample_spectrogram': str(png)})
+    for label in ('>S1<', '>S2<', '>G1<'):
+        assert label in html
+    # Stream-1 findings are marked over the picture and link to their rows.
+    assert 'href="#dropped-sample-S1"' in html and 'id="dropped-sample-S1"' in html
+    assert 'href="#dropped-sample-G1"' in html and 'id="dropped-sample-G1"' in html
+    assert 'href="#dropped-sample-S2"' not in html  # stream 2: table only
+    assert 'title="S1 · splice at 00:00:04:00' in html
+    # Pills live in a strip above the image, not on the plot.
+    # Each pill sits on a stem of its stripe, which meets the mark below.
+    labels = html.index('class="spectro-labels"')
+    assert labels < html.index('class="spectro-band spectro-stem') < html.index('class="spectro-figure"')
+    assert html.index('class="spectro-figure"') < html.index('class="spectro-band spectro-mark')
+    assert 'Highlighted:' in html
+    assert '1 finding(s) on other audio streams' in html  # S2 is on stream 2
+
+
+def test_spectrogram_marker_classes_are_styled():
+    import inspect
+    head = inspect.getsource(gr._report_head_html)
+    for cls in ('.spectro-wrap', '.spectro-labels', '.spectro-figure', '.spectro-band', '.spectro-stem', '.spectro-mark',
+                '.spectro-splice', '.spectro-gap', '.spectro-pill', '.spectro-key', 'tr.spectro-row:target'):
+        assert cls in head

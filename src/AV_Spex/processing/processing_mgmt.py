@@ -562,7 +562,10 @@ class ProcessingManager:
                 'estimated_loss_ms': ds.get('estimated_loss_ms', 0.0),
                 'sample_rate': ds.get('sample_rate', 0),
                 'spectrogram_path': ds.get('spectrogram_path'),
-                'spike_timestamps': ds.get('spike_timestamps', [])
+                'spike_timestamps': ds.get('spike_timestamps', []),
+                'splice_events': ds.get('splice_events', []),
+                'silence_gaps': ds.get('silence_gaps', []),
+                'audio_scan_measured': ds.get('audio_scan_measured', True),
             }
 
         # Add any analysis decisions

@@ -413,7 +413,7 @@ The frame analysis sub-system is configured via `checks_config.outputs.frame_ana
 | `--enable-border-detection {on,off}` | `enable_border_detection` | Toggle border detection step |
 | `--enable-brng-analysis {on,off}` | `enable_brng_analysis` | Toggle BRNG out-of-range analysis |
 | `--enable-signalstats {on,off}` | `enable_signalstats` | Toggle FFmpeg signalstats step |
-| `--enable-dropped-sample-detection {on,off}` | `enable_dropped_sample_detection` | Toggle dropped-sample detection (audio spectrogram + audio/video duration delta) |
+| `--enable-dropped-sample-detection {on,off}` | `enable_dropped_sample_detection` | Toggle dropped-sample detection (audio splice + digital-silence gap scan; spectrogram rendered for the report) |
 | `--enable-duplicate-frame-detection {on,off}` | `enable_duplicate_frame_detection` | Toggle duplicate-frame detection |
 | `--frame-borders {simple,sophisticated}` | `border_detection_mode` | Border detection algorithm |
 | `--frame-border-pixels N` | `simple_border_pixels` | Crop width (px) for simple mode |

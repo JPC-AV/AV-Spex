@@ -2925,9 +2925,13 @@ class DifferentialBRNGAnalyzer:
 
         if affected_pct > 30 and residual > edge_width:
             widened = min(residual + 5, 40)
-            logger.debug(f"    Bottom edge width expanded to {widened}px "
-                         f"(head switching reaches {max_height}px, {bottom_crop}px already "
-                         f"cropped, in {affected_pct:.0f}% of frames)")
+            # Called once per analyzed frame with the same inputs every time:
+            # say it once per analyzer (one per file), not once per frame.
+            if not getattr(self, '_hs_widening_logged', False):
+                self._hs_widening_logged = True
+                logger.debug(f"    Bottom edge width expanded to {widened}px "
+                             f"(head switching reaches {max_height}px, {bottom_crop}px already "
+                             f"cropped, in {affected_pct:.0f}% of frames)")
             return widened
         return edge_width
 

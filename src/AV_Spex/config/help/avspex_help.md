@@ -605,12 +605,12 @@ CLI: `av-spex --enable-tone-leak-detection {on,off}`
 
 ### Dropped Sample Detection
 
-Identifies potential audio sample drops caused by TBC/framesync devices or analog-to-digital converters during digitization. Two indicators are analyzed:
+Looks for audio lost during digitization — frames dropped by a TBC, framesync or capture device, or the input signal dropping out. The decoded audio of every stream is scanned for two signatures:
 
-- **Spectrogram spike analysis** — A spectrogram of the full audio is generated with FFmpeg. Bright vertical lines spanning the entire frequency range indicate audible pops/clicks from dropped samples; the image is analyzed programmatically to detect and count these spikes.
-- **Audio/video duration mismatch** — Dropped samples cause the audio stream to be slightly shorter than the video stream, so any measurable difference between the two durations is flagged.
+- **Splices** — when audio is lost, the two sides of the gap are joined wherever the waveform happens to be, almost never at a zero crossing. The waveform takes a step, heard as a click and seen in a spectrogram as a thin line through every frequency. A splice is flagged only when the step stands out both from the predictable part of the audio and in the band just below the Nyquist frequency (which recorded analog content barely reaches), on every channel carrying signal at that moment. Flagged as a warning (critical at three or more).
+- **Digital-silence gaps** — stretches where every channel is exactly zero mid-program. Recorded audio never does this on its own; it means the capture chain stopped receiving audio. Gaps within a second of the start or end of the file are ignored. Flagged as critical.
 
-Both signals are combined into a weighted risk score, escalated when both indicators are present. The spectrogram, spike count, estimated loss, and spike timestamps are included in the HTML report.
+A splice through quiet or slowly-changing audio makes only a small step and cannot be detected (it is also unlikely to be audible), so a clean result means no audible splice was found. Positions are listed in the file's own timecode — listen there to confirm a finding. A spectrogram of the full audio is included in the HTML report as a picture. The audio/video stream duration difference is shown for reference only; healthy captures commonly differ by tens to hundreds of milliseconds.
 
 CLI: `av-spex --enable-dropped-sample-detection {on,off}`
 

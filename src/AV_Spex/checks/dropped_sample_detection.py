@@ -6,9 +6,25 @@ result, and takes no part in the border/BRNG refinement loop that couples the
 other frame-analysis steps together. Keeping it separate makes it testable on
 its own and keeps the orchestrator to orchestration.
 
-Two independent signals are combined into a weighted risk score: vertical
-spikes in an FFmpeg ``showspectrumpic`` spectrogram, and the difference between
-the audio and video stream durations reported by ffprobe.
+The verdict rests on a scan of the decoded audio (checks/audio_discontinuity.py)
+for the two signatures lost samples leave behind:
+
+* **splices** — a step discontinuity where the two sides of a gap were butted
+  together off a zero crossing (heard as a click; seen as a thin full-band
+  line in a spectrogram), and
+* **digital-silence gaps** — runs of exact zeros mid-program, where the capture
+  chain stopped receiving audio (input lost, de-embedder unlocked).
+
+A spectrogram PNG is still rendered for the report, as a picture for the
+operator. It is no longer analyzed: reading spike positions off a rendered
+image missed the splice in the LC SmashEdit test file entirely and mapped the
+DropOut file's edges to the wrong times, because one 1280-px column spans
+tens of milliseconds and the plot-area crop was found heuristically.
+
+The audio/video stream duration difference is reported but does not drive the
+verdict: healthy captures routinely differ by 20–400 ms (capture start/stop
+granularity — 17 of 19 JPC/LC sample files, mostly with the audio *longer*),
+so treating any difference as evidence flagged nearly every file.
 """
 
 import json
@@ -16,36 +32,62 @@ import os
 import subprocess
 import time
 import traceback
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import cv2
 import numpy as np
 
 from AV_Spex.utils.log_setup import logger, report_ffmpeg_stderr
 from AV_Spex.utils import ffprobe_probe
+from AV_Spex.checks import audio_discontinuity
+# Positions are reported as the file's own NDF/DF timecode, not raw
+# wall-clock seconds — see CLAUDE.md on time positions.
+from AV_Spex.checks.qct_parse import (
+    _tc_format_timecode,
+    _tc_parse_start_timecode,
+    _get_video_start_timecode,
+)
+
+# Progress split between the two passes that read the file.
+_SPECTROGRAM_PROGRESS_END = 30
+
+# Plot area of the spectrogram, in pixels. showspectrumpic centres this
+# rectangle in the PNG with its legend margins around it, and spans the
+# rendered stream's full duration across the width — the report maps finding
+# times onto it to mark them (generate_report._spectrogram_markers).
+SPECTROGRAM_PLOT_SIZE = (1280, 480)
+_SCAN_PROGRESS_END = 95
+
 
 @dataclass
 class DroppedSampleResult:
     """Results from dropped sample detection analysis"""
-    # 'clean' / 'warning' / 'critical', or 'unknown' when neither signal could
-    # be measured — a failed detector must not read as a clean file.
+    # 'clean' / 'warning' / 'critical', or 'unknown' when the audio scan could
+    # not run — a failed detector must not read as a clean file.
     status: str
     message: str
+    # Number of splice discontinuities found (kept under its old name, which
+    # the report and older JSON sidecars read).
     spike_count: int
     duration_diff_ms: float
     audio_duration: float
     video_duration: float
     combined_score: float  # weighted risk score 0.0-1.0
-    estimated_loss_ms: float = 0.0  # estimated duration loss from detected spikes
+    estimated_loss_ms: float = 0.0  # total digital-silence gap length (worst stream)
     sample_rate: int = 0  # audio sample rate in Hz
     spectrogram_path: Optional[str] = None
+    # Splice positions in wall-clock seconds (old field name kept).
     spike_timestamps: List[float] = None
-    # Which of the two signals were actually measurable. Both False means the
-    # verdict is 'unknown'; one False means it rests on a single signal.
+    # Splices and silence gaps as dicts, each carrying file-timecode labels.
+    splice_events: List[Dict[str, Any]] = field(default_factory=list)
+    silence_gaps: List[Dict[str, Any]] = field(default_factory=list)
+    # What could actually be measured. The verdict needs the audio scan;
+    # the spectrogram is illustration only and the durations are context.
+    audio_scan_measured: bool = True
     spectrogram_measured: bool = True
     durations_measured: bool = True
+    streams_scanned: int = 0
 
 
 def detect_dropped_samples(video_path, video_id, output_dir,
@@ -53,140 +95,184 @@ def detect_dropped_samples(video_path, video_id, output_dir,
                            color_bars_end_time: float = None) -> Optional[DroppedSampleResult]:
     """
     Detect potential dropped audio samples by:
-    1. Generating a spectrogram image via FFmpeg showspectrumpic and analyzing it for vertical spikes
-    2. Comparing audio and video stream durations from the ffprobe sidecar
-    3. Combining both signals into a weighted risk score
+    1. Rendering a spectrogram PNG for the report (illustration only)
+    2. Scanning the decoded audio for splices and digital-silence gaps
+    3. Comparing audio and video stream durations (context, not scored)
 
     Args:
-        color_bars_end_time: End time of color bars (unused for now, reserved for future filtering)
+        color_bars_end_time: unused. Bars/tone is where a splice is easiest
+            to see, so it is deliberately not excluded.
 
     Returns:
-        DroppedSampleResult or None if detection fails
+        DroppedSampleResult
     """
-    #logger.info("Running dropped sample detection...")
+    video_path = Path(video_path)
+    output_dir = Path(output_dir)
+    check_cancelled = check_cancelled or (lambda: False)
 
-    # Step 1: Generate spectrogram image
-    spectrogram_path = _generate_spectrogram(video_path, video_id, output_dir, signals, check_cancelled)
+    # Step 1: spectrogram picture for the report.
+    spectrogram_path = _generate_spectrogram(
+        video_path, video_id, output_dir, signals, check_cancelled,
+        p_end=_SPECTROGRAM_PROGRESS_END)
+    if check_cancelled():
+        return None
 
-    # Step 2: Analyze spectrogram for vertical spikes
-    spike_count = 0
-    spike_timestamps = []
-    if spectrogram_path:
-        spike_count, spike_timestamps = _analyze_spectrogram_spikes(video_path, spectrogram_path)
-        if spike_count > 0:
-            logger.warning(f"Detected {spike_count} potential dropped sample spike(s) in spectrogram\n")
-        else:
-            logger.info("No dropped sample spikes detected in spectrogram")
+    # Step 2: audio-domain discontinuity scan.
+    scan = _scan_audio(video_path, signals, check_cancelled)
+    if check_cancelled():
+        return None
+    audio_scan_measured = scan is not None and scan.measured
 
-    # Step 3: Compare audio/video durations
+    # Step 3: audio/video durations (context).
     audio_duration, video_duration, sample_rate = _get_av_durations(video_path, video_id, output_dir)
     spectrogram_measured = spectrogram_path is not None
     durations_measured = audio_duration is not None and video_duration is not None
     duration_diff_ms = 0.0
     if durations_measured:
         duration_diff_ms = abs(audio_duration - video_duration) * 1000.0
-        if duration_diff_ms > 0:
-            logger.warning(f"Audio/video duration mismatch: {duration_diff_ms:.3f}ms")
-            logger.debug(f"  Audio duration: {audio_duration:.6f}s")
-            logger.debug(f"  Video duration: {video_duration:.6f}s\n")
-        else:
-            logger.info(f"Audio and video durations match\n")
+        logger.debug(f"  Audio/video duration difference: {duration_diff_ms:.3f}ms "
+                     f"(audio {audio_duration:.6f}s, video {video_duration:.6f}s)")
     else:
-        logger.warning(f"Could not determine audio and/or video duration for comparison\n")
-        audio_duration = audio_duration or 0.0
-        video_duration = video_duration or 0.0
+        logger.debug("Could not determine audio and/or video duration for comparison")
+    audio_duration = audio_duration or 0.0
+    video_duration = video_duration or 0.0
+    if scan is not None and scan.sample_rate:
+        sample_rate = sample_rate or scan.sample_rate
 
-    # Step 4: Estimate duration loss from detected spikes and compare with measured difference
-    # Each spike represents ~1 dropped sample. At the given sample rate,
-    # 1 sample = 1/sample_rate seconds.
-    estimated_loss_ms = 0.0
-    if spike_count > 0 and sample_rate > 0:
-        estimated_loss_ms = (spike_count / sample_rate) * 1000.0
-        logger.info(f"Estimated duration loss from {spike_count} dropped sample(s) at {sample_rate}Hz: {estimated_loss_ms:.4f}ms")
-        if duration_diff_ms > 0:
-            ratio = duration_diff_ms / estimated_loss_ms if estimated_loss_ms > 0 else 0
-            logger.info(f"  Measured duration difference: {duration_diff_ms:.3f}ms")
-            logger.info(f"  Ratio (measured / estimated): {ratio:.1f}x")
-            if ratio > 10:
-                logger.info(f"  Duration difference is {ratio:.0f}x larger than detected spikes account for — "
-                            f"additional undetected drops or systematic offset likely")
-            elif ratio < 0.5:
-                logger.info(f"  Duration difference is smaller than detected spikes — "
-                            f"some spikes may be content transients rather than drops")
-
-    # Step 5: Compute combined score and status.
-    #
-    # Both signals failing is NOT a clean result: a zero spike count and a zero
-    # duration difference are what a healthy file looks like, so reporting
-    # 'clean' here would be indistinguishable from a real pass. Say 'unknown'
-    # instead, and name what could not be measured.
-    if not spectrogram_measured and not durations_measured:
-        combined_score = 0.0
-        status = 'unknown'
+    if not audio_scan_measured:
         message = (
-            "Could not measure dropped samples: spectrogram generation and the "
-            "audio/video duration comparison both failed. This is not a clean "
-            "result — the check did not run."
+            "Could not measure dropped samples: the audio could not be decoded "
+            "for the discontinuity scan. This is not a clean result — the check "
+            "did not run."
         )
-        logger.warning(f"\nDropped sample detection result: {status} — {message}\n")
+        logger.warning(f"\nDropped sample detection result: unknown — {message}\n")
         return DroppedSampleResult(
-            status=status,
+            status='unknown',
             message=message,
             spike_count=0,
-            duration_diff_ms=0.0,
-            audio_duration=audio_duration or 0.0,
-            video_duration=video_duration or 0.0,
-            combined_score=combined_score,
-            estimated_loss_ms=0.0,
+            duration_diff_ms=duration_diff_ms,
+            audio_duration=audio_duration,
+            video_duration=video_duration,
+            combined_score=0.0,
             sample_rate=sample_rate,
-            spectrogram_path=None,
+            spectrogram_path=str(spectrogram_path) if spectrogram_path else None,
             spike_timestamps=[],
-            spectrogram_measured=False,
-            durations_measured=False,
+            audio_scan_measured=False,
+            spectrogram_measured=spectrogram_measured,
+            durations_measured=durations_measured,
         )
 
-    combined_score, status = _compute_dropped_sample_score(spike_count, duration_diff_ms)
+    splice_events, silence_gaps = _label_findings(video_path, scan)
+    splice_count = len(splice_events)
+    gap_count = len(silence_gaps)
+    # Gaps are reported per stream; a multi-stream file losing its input
+    # shows the same gap on every stream, so count the worst stream's total.
+    per_stream_loss: Dict[int, float] = {}
+    for g in silence_gaps:
+        per_stream_loss[g['stream']] = per_stream_loss.get(g['stream'], 0.0) + g['duration_ms']
+    gap_loss_ms = max(per_stream_loss.values(), default=0.0)
+    distinct_gaps = max((sum(1 for g in silence_gaps if g['stream'] == s) for s in per_stream_loss),
+                        default=0)
 
-    # Build message
+    combined_score, status = _compute_dropped_sample_score(splice_count, distinct_gaps)
+
     parts = []
-    if spike_count > 0:
-        parts.append(f"{spike_count} spectrogram spike(s) detected")
-    if duration_diff_ms > 0:
-        parts.append(f"{duration_diff_ms:.3f}ms audio/video duration difference")
-    if estimated_loss_ms > 0:
-        parts.append(f"estimated loss from spikes: {estimated_loss_ms:.4f}ms")
-    if not parts:
-        message = "No indicators of dropped samples detected"
-    else:
-        message = "; ".join(parts)
+    if distinct_gaps:
+        parts.append(f"{distinct_gaps} digital-silence gap(s) mid-program "
+                     f"({gap_loss_ms:.0f}ms of audio missing)")
+    if splice_count:
+        parts.append(f"{splice_count} audio splice discontinuit{'y' if splice_count == 1 else 'ies'}")
+    message = "; ".join(parts) if parts else "No indicators of dropped samples detected"
 
-    # One signal missing still yields a usable verdict, but say so rather than
-    # implying both lines of evidence agreed.
-    if not spectrogram_measured:
-        message += " (spectrogram unavailable — based on the duration comparison alone)"
-    elif not durations_measured:
-        message += " (duration comparison unavailable — based on the spectrogram alone)"
-
-    logger.info(f"\nDropped sample detection result: {status} — {message}\n")
+    for g in silence_gaps:
+        logger.warning(f"  Digital-silence gap (stream {g['stream']}): "
+                       f"{g['start_timecode']} – {g['end_timecode']} ({g['duration_ms']:.0f}ms)")
+    for e in splice_events:
+        logger.warning(f"  Audio splice (stream {e['stream']}): {e['timecode']} "
+                       f"(score {e['score']:.0f}, step {e['step_dbfs']:.0f} dBFS)")
+    log = logger.warning if status != 'clean' else logger.info
+    log(f"\nDropped sample detection result: {status} — {message}\n")
 
     return DroppedSampleResult(
         status=status,
         message=message,
-        spike_count=spike_count,
+        spike_count=splice_count,
         duration_diff_ms=duration_diff_ms,
         audio_duration=audio_duration,
         video_duration=video_duration,
         combined_score=combined_score,
-        estimated_loss_ms=estimated_loss_ms,
+        estimated_loss_ms=round(gap_loss_ms, 1),
         sample_rate=sample_rate,
         spectrogram_path=str(spectrogram_path) if spectrogram_path else None,
-        spike_timestamps=spike_timestamps,
+        spike_timestamps=[e['time_s'] for e in splice_events],
+        splice_events=splice_events,
+        silence_gaps=silence_gaps,
+        audio_scan_measured=True,
         spectrogram_measured=spectrogram_measured,
         durations_measured=durations_measured,
+        streams_scanned=scan.streams_scanned,
     )
 
 
-def _generate_spectrogram(video_path, video_id, output_dir, signals=None, check_cancelled=None) -> Optional[Path]:
+def _scan_audio(video_path, signals, check_cancelled) -> Optional[audio_discontinuity.DiscontinuityScan]:
+    """Run the discontinuity scan, driving the progress bar from the decode."""
+    can_track = signals is not None and hasattr(signals, 'frame_analysis_progress')
+    span = _SCAN_PROGRESS_END - _SPECTROGRAM_PROGRESS_END
+    last = [_SPECTROGRAM_PROGRESS_END]
+
+    def _progress(frac):
+        pct = _SPECTROGRAM_PROGRESS_END + int(span * frac)
+        if can_track and pct > last[0]:
+            signals.frame_analysis_progress.emit(pct)
+            last[0] = pct
+
+    try:
+        scan = audio_discontinuity.scan_audio_discontinuities(
+            video_path, check_cancelled=check_cancelled, progress=_progress,
+            duration_s=ffprobe_probe.duration(str(video_path)))
+        if can_track:
+            signals.frame_analysis_progress.emit(_SCAN_PROGRESS_END)
+        return scan
+    except Exception as e:
+        logger.warning(f"Audio discontinuity scan failed: {e}")
+        logger.debug(traceback.format_exc())
+        return None
+
+
+def _label_findings(video_path, scan) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Scan findings as dicts, with positions labelled in the file's own
+    NDF/DF timecode (offset by the start TC) so they match an NLE."""
+    fps = None
+    start_frames, drop_frame = 0, False
+    if scan.splices or scan.silence_gaps:
+        try:
+            fps = ffprobe_probe.frame_rate(str(video_path))
+            nominal = max(1, int(round(fps))) if fps else 30
+            start_frames, drop_frame = _tc_parse_start_timecode(
+                _get_video_start_timecode(str(video_path)), nominal)
+        except Exception as e:
+            logger.debug(f"Could not read timecode for dropped-sample labels: {e}")
+
+    def tc(t):
+        return _tc_format_timecode(t, fps, start_frames, drop_frame)
+
+    splices = []
+    for e in sorted(scan.splices, key=lambda e: (e.time_s, e.stream)):
+        d = asdict(e)
+        d['timecode'] = tc(e.time_s)
+        splices.append(d)
+    gaps = []
+    for g in sorted(scan.silence_gaps, key=lambda g: (g.start_s, g.stream)):
+        gaps.append({
+            'start_s': g.start_s, 'end_s': g.end_s, 'stream': g.stream,
+            'duration_ms': round(g.duration_ms, 1),
+            'start_timecode': tc(g.start_s), 'end_timecode': tc(g.end_s),
+        })
+    return splices, gaps
+
+
+def _generate_spectrogram(video_path, video_id, output_dir, signals=None, check_cancelled=None,
+                          p_end: int = 95) -> Optional[Path]:
     """Generate a spectrogram image using FFmpeg's showspectrumpic filter.
 
     Drives progress from the Python side using elapsed wall-clock time
@@ -208,7 +294,7 @@ def _generate_spectrogram(video_path, video_id, output_dir, signals=None, check_
     output_path = output_dir / f"{video_id}_spectrogram.png"
 
     audio_duration, _, _ = _get_av_durations(video_path, video_id, output_dir)
-    p_start, p_end = 0, 95
+    p_start = 0
     can_track_progress = (
         signals is not None
         and hasattr(signals, 'frame_analysis_progress')
@@ -218,7 +304,12 @@ def _generate_spectrogram(video_path, video_id, output_dir, signals=None, check_
         'ffmpeg', '-y',
         '-hide_banner', '-loglevel', 'error',
         '-i', str(video_path),
-        '-vn', '-lavfi', 'showspectrumpic=s=1280x480',
+        # The first audio stream, explicitly (as the filter's input label —
+        # `-map 0:a:0` would route the raw audio to the PNG muxer): left to
+        # itself ffmpeg picks the stream with the most channels, and the
+        # report boxes findings on audio stream 1 onto this picture.
+        '-vn', '-lavfi',
+        '[0:a:0]showspectrumpic=s={}x{}'.format(*SPECTROGRAM_PLOT_SIZE),
         str(output_path)
     ]
 
@@ -287,195 +378,6 @@ def _generate_spectrogram(video_path, video_id, output_dir, signals=None, check_
     return None
 
 
-def _analyze_spectrogram_spikes(video_path, spectrogram_path: Path) -> Tuple[int, List[float]]:
-    """
-    Analyze a spectrogram PNG for vertical bright lines (spikes) that indicate
-    dropped audio samples. These appear as bright columns spanning the full
-    frequency range.
-
-    Returns:
-        Tuple of (spike_count, estimated_timestamps)
-    """
-    try:
-        img = cv2.imread(str(spectrogram_path))
-        if img is None:
-            logger.warning("Could not load spectrogram image for analysis")
-            return 0, []
-
-        height, width = img.shape[:2]
-        gray_full = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-        # Dynamically find the actual spectrogram plot area.
-        # showspectrumpic adds: left axis labels, right colorbar + dBFS scale,
-        # and top/bottom time/frequency labels around the plot.
-        #
-        # Strategy: use a narrow horizontal band (40-60% height) to avoid text,
-        # then find gaps of >= 10 dark columns that separate the plot from
-        # the axis labels (left) and colorbar (right).
-
-        band_top = int(height * 0.4)
-        band_bottom = int(height * 0.6)
-        band = gray_full[band_top:band_bottom, :]
-        col_means = np.mean(band, axis=0)
-
-        gap_threshold = 10  # Minimum dark columns to count as a structural gap
-
-        # Find left edge: scan from left, skip dark margin, skip axis labels,
-        # find the first sustained gap, then the plot starts after it
-        plot_left = 0
-        c = 0
-        while c < width and col_means[c] < 2:
-            c += 1
-        # Now in axis labels region — scan for the first gap of >= gap_threshold
-        while c < width // 2:
-            if col_means[c] < 2:
-                gap_start = c
-                while c < width and col_means[c] < 2:
-                    c += 1
-                gap_len = c - gap_start
-                if gap_len >= gap_threshold:
-                    plot_left = c
-                    break
-            else:
-                c += 1
-
-        # Find right edge: scan from right, skip dark margin, skip colorbar/labels,
-        # find the first sustained gap, then the plot ends before it
-        plot_right = width - 1
-        c = width - 1
-        while c > 0 and col_means[c] < 2:
-            c -= 1
-        # Now in colorbar/labels region — scan for the first gap
-        while c > width // 2:
-            if col_means[c] < 2:
-                gap_end = c
-                while c > 0 and col_means[c] < 2:
-                    c -= 1
-                gap_start = c + 1
-                gap_len = gap_end - gap_start + 1
-                if gap_len >= gap_threshold:
-                    plot_right = gap_start - 1
-                    # Skip any bright axis border line at the edge
-                    while plot_right > plot_left and col_means[plot_right] > 150:
-                        plot_right -= 1
-                    break
-            else:
-                c -= 1
-
-        # Find top/bottom edges using the plot column range
-        top_edges = []
-        bottom_edges = []
-        for col in range(plot_left, plot_right, max(1, (plot_right - plot_left) // 20)):
-            col_data = gray_full[:, col]
-            for r in range(height):
-                if col_data[r] > 15:
-                    top_edges.append(r)
-                    break
-            for r in range(height - 1, 0, -1):
-                if col_data[r] > 15:
-                    bottom_edges.append(r)
-                    break
-
-        plot_top = int(np.median(top_edges)) if top_edges else 0
-        plot_bottom = int(np.median(bottom_edges)) if bottom_edges else height
-
-        plot_area = img[plot_top:plot_bottom, plot_left:plot_right]
-
-        if plot_area.size == 0:
-            logger.warning("    Spectrogram plot area is empty after cropping")
-            return 0, []
-
-        # Convert to grayscale and compute mean brightness per column
-        gray = cv2.cvtColor(plot_area, cv2.COLOR_BGR2GRAY)
-        plot_height, plot_width = gray.shape
-
-        logger.debug(f"    Spectrogram plot area: ({plot_left},{plot_top}) to ({plot_right},{plot_bottom}), "
-                     f"size {plot_width}x{plot_height}")
-
-        column_means = np.mean(gray, axis=0)
-
-        # Use a rolling median with a wide window to establish local baseline
-        window_size = max(51, plot_width // 20)
-        if window_size % 2 == 0:
-            window_size += 1
-
-        # Pad for rolling computation
-        padded = np.pad(column_means, window_size // 2, mode='edge')
-        rolling_median = np.array([
-            np.median(padded[i:i + window_size])
-            for i in range(len(column_means))
-        ])
-
-        # Compute deviation from local median
-        deviations = column_means - rolling_median
-
-        # Use MAD (median absolute deviation) for robust threshold
-        mad = np.median(np.abs(deviations))
-        if mad == 0:
-            mad = np.std(deviations)
-        if mad == 0:
-            return 0, []
-
-        threshold = 3.0 * mad  # 3x MAD for spike detection
-
-        # Also require the column to be bright across most of the frequency range
-        # A true dropped sample spike lights up the full spectrum
-        spike_columns = []
-        for col_idx in range(plot_width):
-            if deviations[col_idx] > threshold:
-                # Check that the brightness spans most of the frequency range
-                col_data = gray[:, col_idx]
-                # Count rows above the overall median brightness
-                overall_median = np.median(gray)
-                bright_fraction = np.sum(col_data > overall_median + threshold) / plot_height
-                if bright_fraction > 0.3:  # At least 30% of frequency range is bright
-                    spike_columns.append(col_idx)
-
-        if not spike_columns:
-            return 0, []
-
-        # Group adjacent spike columns into single events
-        groups = []
-        current_group = [spike_columns[0]]
-        for i in range(1, len(spike_columns)):
-            if spike_columns[i] - spike_columns[i-1] <= 2:  # Adjacent within 2px
-                current_group.append(spike_columns[i])
-            else:
-                groups.append(current_group)
-                current_group = [spike_columns[i]]
-        groups.append(current_group)
-
-        # Reject groups wider than 2 columns — a true dropped sample is a
-        # single-sample impulse (~20us at 48kHz) which should appear as at most
-        # 1-2 pixel columns in the spectrogram. Wider bright regions are more
-        # likely loud content transients (music hits, speech plosives, etc.).
-        max_spike_width = 2
-        spikes = [g for g in groups if len(g) <= max_spike_width]
-        rejected = len(groups) - len(spikes)
-        if rejected > 0:
-            logger.debug(f"    Rejected {rejected} spike group(s) wider than {max_spike_width} columns (likely content transients)")
-
-        # Estimate timestamps by mapping column position to video duration
-        video_duration = ffprobe_probe.duration(str(video_path)) or 0
-        spike_timestamps = []
-        for group in spikes:
-            center_col = sum(group) / len(group)
-            timestamp = (center_col / plot_width) * video_duration
-            spike_timestamps.append(round(timestamp, 2))
-
-        logger.debug(f"    Spike detection: {len(spikes)} spike(s) found at columns {[g[0] for g in spikes]}")
-        if spike_timestamps:
-            logger.debug(f"    Estimated timestamps: {spike_timestamps}\n")
-
-        return len(spikes), spike_timestamps
-
-    except Exception as e:
-        logger.warning(f"Error analyzing spectrogram: {e}")
-        import traceback
-        logger.debug(traceback.format_exc())
-        return 0, []
-
-
 def _get_av_durations(video_path, video_id, output_dir) -> Tuple[Optional[float], Optional[float], int]:
     """
     Get audio and video stream durations and audio sample rate from the
@@ -533,40 +435,32 @@ def _get_av_durations(video_path, video_id, output_dir) -> Tuple[Optional[float]
     return audio_duration, video_duration, sample_rate
 
 
-def _compute_dropped_sample_score(spike_count: int, duration_diff_ms: float) -> Tuple[float, str]:
+def _compute_dropped_sample_score(splice_count: int, gap_count: int) -> Tuple[float, str]:
     """
-    Compute a combined risk score from spectrogram spikes and duration mismatch.
+    Risk score and status from the audio scan.
 
-    Scoring:
-    - Spike score: 0 spikes = 0.0, 1-5 = 0.3-0.5, 6+ = 0.6-0.8
-    - Duration score: 0ms = 0.0, >0ms = 0.3
-    - If both present, escalate
+    - A digital-silence gap mid-program is near-certain evidence the capture
+      chain lost audio: critical.
+    - Splices are strong but not certain evidence (a rare content transient
+      can pass both detectors): warning, escalating to critical at 3+.
 
     Returns:
         Tuple of (score 0.0-1.0, status string)
     """
-    spike_score = 0.0
-    if spike_count > 0:
-        spike_score = min(0.8, 0.2 + spike_count * 0.06)
+    if gap_count:
+        score = min(1.0, 0.85 + 0.05 * (gap_count - 1) + 0.02 * splice_count)
+    elif splice_count:
+        score = min(0.8, 0.25 + 0.1 * splice_count)
+    else:
+        score = 0.0
 
-    duration_score = 0.0
-    if duration_diff_ms > 0:
-        duration_score = 0.3
-
-    # Combined score: weighted sum with escalation when both are present
-    combined = spike_score * 0.7 + duration_score * 0.3
-    if spike_count > 0 and duration_diff_ms > 0:
-        combined = min(1.0, combined + 0.15)  # escalation bonus
-
-    # Determine status
-    if combined == 0:
+    if score == 0:
         status = 'clean'
-    elif combined < 0.4:
+    elif gap_count == 0 and splice_count < 3:
         status = 'warning'
     else:
         status = 'critical'
-
-    return round(combined, 3), status
+    return round(score, 3), status
 
 
 def _extract_stream_durations(streams: list) -> Tuple[Optional[float], Optional[float], int]:

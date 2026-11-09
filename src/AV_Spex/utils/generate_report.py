@@ -10,6 +10,7 @@ import csv
 from base64 import b64encode
 from dataclasses import dataclass, field
 from typing import Any, List, Optional, Tuple
+import html as html_module  # `html` is the markup accumulator throughout
 import json
 import re
 import subprocess
@@ -6487,6 +6488,125 @@ def generate_frame_analysis_html(frame_outputs, video_id):
     return html
 
 
+# Narrowest marker band, in image pixels: at 1280 px a one-hour tape is
+# ~2.8 s per column, so a splice or a short gap would otherwise be a hairline.
+_MIN_MARK_PX = 10
+# How far markers reach past the bottom of the plot, in image pixels.
+# showspectrumpic draws the axis line one pixel outside the plot and its time
+# labels from 5 px beyond that, so 5 px lands the marker's end tick in the
+# clear band between them — outside the data, so the lowest frequency rows
+# are never covered. (At the top the stripe runs on up to its label.)
+_MARK_OVERHANG_PX = 5
+# Label pills are staggered onto this many rows when neighbours would
+# overlap; the estimate is in native image pixels (11px bold label + padding).
+_MARK_LABEL_ROWS = 3
+_MARK_LABEL_PX_PER_CHAR = 8
+_MARK_LABEL_PAD_PX = 22
+
+
+def _spectrogram_markers(img_w, img_h, duration_s, splices, gaps):
+    """Place finding markers over a showspectrumpic image, as CSS percentages.
+
+    `splices` is a list of (label, time_s, tooltip), `gaps` of
+    (label, start_s, end_s, tooltip). The plot area is SPECTROGRAM_PLOT_SIZE,
+    centred in the image with the legend margins around it, and spans
+    `duration_s` across its width. The markers are drawn in HTML over the
+    image (see `.spectro-*` in the report CSS), so the picture itself is
+    never painted on.
+
+    Returns a list of dicts — kind ('splice'/'gap'), label, tooltip, left,
+    width, centre, top, height (percent of the image), over (the overhang
+    past the plot's bottom edge, percent of the marker's own height) and row
+    (label stagger) — in time order. Each marker runs from the top of the
+    image, where it meets the stem down from its label, to
+    `_MARK_OVERHANG_PX` past the bottom of the plot. Empty when the image or
+    duration doesn't fit that geometry, so a picture is never marked in the
+    wrong place.
+    """
+    from AV_Spex.checks.dropped_sample_detection import SPECTROGRAM_PLOT_SIZE
+    plot_w, plot_h = SPECTROGRAM_PLOT_SIZE
+    if not duration_s or duration_s <= 0 or img_w < plot_w or img_h < plot_h:
+        return []
+    x0, y0 = (img_w - plot_w) // 2, (img_h - plot_h) // 2
+    over = min(_MARK_OVERHANG_PX, img_h - y0 - plot_h)
+    mark_top, mark_h = 0, y0 + plot_h + over
+
+    def col(t):
+        return x0 + min(max(t / duration_s, 0.0), 1.0) * (plot_w - 1)
+
+    raw = [('splice', lbl, t, t, tip) for lbl, t, tip in splices]
+    raw += [('gap', lbl, a, b, tip) for lbl, a, b, tip in gaps]
+    raw.sort(key=lambda m: m[2])
+
+    markers = []
+    row_ends = [float('-inf')] * _MARK_LABEL_ROWS
+    for kind, label, t_start, t_end, tip in raw:
+        left, right = col(t_start), col(t_end)
+        if right - left < _MIN_MARK_PX:
+            mid = (left + right) / 2
+            left, right = mid - _MIN_MARK_PX / 2, mid + _MIN_MARK_PX / 2
+        left, right = max(left, x0), min(right, x0 + plot_w - 1)
+        # Pills are centred on the marker; take the first row they fit on.
+        centre = (left + right) / 2
+        half = (len(label) * _MARK_LABEL_PX_PER_CHAR + _MARK_LABEL_PAD_PX) / 2
+        row = next((r for r, end in enumerate(row_ends) if centre - half > end + 4),
+                   len(markers) % _MARK_LABEL_ROWS)
+        row_ends[row] = centre + half
+        markers.append({
+            'kind': kind, 'label': label, 'tooltip': tip, 'row': row,
+            'left': 100.0 * left / img_w,
+            'width': 100.0 * (right - left) / img_w,
+            'centre': 100.0 * centre / img_w,
+            'top': 100.0 * mark_top / img_h,
+            'height': 100.0 * mark_h / img_h,
+            'over': 100.0 * over / mark_h,
+        })
+    return markers
+
+
+# Height of one row of label pills in the strip above the spectrogram, px.
+_MARK_LABEL_ROW_PX = 22
+
+
+def _spectrogram_markers_html(markers):
+    """Render `_spectrogram_markers()` output as HTML.
+
+    Returns (labels_html, marks_html): the label strip that sits above the
+    image — pills, each on a stem of the marker's stripe that runs down to
+    meet the marker — and the marker bands laid over the image itself, so a
+    finding reads as one unbroken stripe from its label to the plot's bottom.
+    Each pill links to its row in the findings table above.
+    """
+    labels, marks = [], []
+    for m in markers:
+        tip = html_module.escape(m['tooltip'], quote=True)
+        pill_bottom = 7 + _MARK_LABEL_ROW_PX * m['row']
+        # The stem stops at the pill's middle, so the pill caps it.
+        labels.append(
+            f'<div class="spectro-band spectro-stem spectro-{m["kind"]}" '
+            f'style="left: {m["left"]:.3f}%; width: {m["width"]:.3f}%; '
+            f'height: {pill_bottom + 9}px;"></div>'
+        )
+        marks.append(
+            f'<div class="spectro-band spectro-mark spectro-{m["kind"]}" title="{tip}" '
+            f'style="left: {m["left"]:.3f}%; width: {m["width"]:.3f}%; '
+            f'top: {m["top"]:.3f}%; height: {m["height"]:.3f}%; '
+            f'--spectro-over: {m["over"]:.3f}%;"></div>'
+        )
+        labels.append(
+            f'<a class="spectro-pill spectro-{m["kind"]}" title="{tip}" '
+            f'href="#dropped-sample-{m["label"]}" '
+            f'style="left: {m["centre"]:.3f}%; bottom: {pill_bottom}px;">'
+            f'{m["label"]}</a>'
+        )
+    if not markers:
+        return '', ''
+    strip_h = 7 + _MARK_LABEL_ROW_PX * (max(m['row'] for m in markers) + 1)
+    labels_html = (f'<div class="spectro-labels" style="height: {strip_h}px;">'
+                   + ''.join(labels) + '</div>')
+    return labels_html, ''.join(marks)
+
+
 def generate_dropped_sample_html(frame_outputs):
     """
     Generates an HTML section for dropped sample detection results.
@@ -6512,21 +6632,30 @@ def generate_dropped_sample_html(frame_outputs):
     <div id="dropped_sample_methodology" style="display: none; background-color: var(--report-panel); padding: 14px 16px;
          margin: 0 0 16px 0; border: 1px solid var(--report-border-soft); border-radius: 4px; font-size: 13px; line-height: 1.5;">
         <p style="margin: 0 0 10px 0;">
-            <strong>Dropped sample detection</strong> identifies potential audio sample drops caused by
-            TBC/framesync devices or analog-to-digital converters during digitization. Two indicators are analyzed:
+            <strong>Dropped sample detection</strong> looks for audio lost during digitization &mdash; frames
+            dropped by a TBC, framesync or capture device, or the input signal dropping out. The decoded
+            audio of every stream is scanned for two signatures:
         </p>
         <ul style="margin: 4px 0 10px 20px; padding: 0;">
-            <li style="margin-bottom: 4px;"><strong>Spectrogram spike analysis</strong> &mdash; A spectrogram
-                of the full audio is generated using FFmpeg. Bright vertical lines spanning the entire frequency
-                range indicate audible pops/clicks from dropped samples. The spectrogram image is analyzed
-                programmatically to detect and count these spikes.</li>
-            <li style="margin-bottom: 4px;"><strong>Audio/video duration mismatch</strong> &mdash; Dropped
-                samples cause the audio stream to be slightly shorter than the video stream. Any measurable
-                difference (&gt;0ms) between audio and video stream durations is flagged.</li>
+            <li style="margin-bottom: 4px;"><strong>Splices</strong> &mdash; when audio is lost the two sides
+                of the gap are joined wherever the waveform happens to be, almost never at a zero crossing.
+                The waveform takes a step, heard as a click and seen in the spectrogram as a thin line through
+                every frequency. A splice is flagged only when the step stands out both from the predictable
+                part of the audio and in the band just below the Nyquist frequency (which recorded analog
+                content barely reaches), on every channel that carries signal at that moment.</li>
+            <li style="margin-bottom: 4px;"><strong>Digital-silence gaps</strong> &mdash; stretches where every
+                channel is exactly zero in the middle of the program. Recorded audio never does this on its own;
+                it means the capture chain stopped receiving audio. Gaps within a second of the start or end of
+                the file are ignored.</li>
         </ul>
+        <p style="margin: 0 0 10px 0;">
+            A splice through quiet or slowly-changing audio makes only a small step and cannot be detected
+            (it is also unlikely to be audible). A clean result means no audible splice was found, not that
+            no sample was lost. Listen at the listed timecodes to confirm a finding.
+        </p>
         <p style="margin: 0;">
-            Both signals are combined into a weighted risk score. When both indicators are present,
-            the score is escalated to reflect higher confidence that samples were dropped.
+            The audio and video stream durations are shown for reference only: healthy captures commonly differ
+            by tens to hundreds of milliseconds, so the difference is not used as evidence.
         </p>
     </div>
     """
@@ -6537,10 +6666,13 @@ def generate_dropped_sample_html(frame_outputs):
     duration_diff_ms = dropped_sample_data.get('duration_diff_ms', 0.0)
     audio_duration = dropped_sample_data.get('audio_duration', 0.0)
     video_duration = dropped_sample_data.get('video_duration', 0.0)
-    combined_score = dropped_sample_data.get('combined_score', 0.0)
-    estimated_loss_ms = dropped_sample_data.get('estimated_loss_ms', 0.0)
     sample_rate = dropped_sample_data.get('sample_rate', 0)
-    spike_timestamps = dropped_sample_data.get('spike_timestamps', [])
+    splice_events = dropped_sample_data.get('splice_events') or []
+    silence_gaps = dropped_sample_data.get('silence_gaps') or []
+    # Results written before the audio scan existed carry only the old
+    # spectrogram-spike timestamps; show those as they were.
+    legacy_spikes = [] if 'splice_events' in dropped_sample_data else (
+        dropped_sample_data.get('spike_timestamps') or [])
 
     if status == 'critical':
         status_color = '#cc0000'
@@ -6566,10 +6698,68 @@ def generate_dropped_sample_html(frame_outputs):
     </p>
     """
 
-    # Embed spectrogram image. The on-disk PNG is kept lossless for cv2 spike
-    # analysis in frame_analysis.py; here we transcode to JPEG in memory just
-    # for the report, which cuts the embedded payload ~5–10x with no impact on
-    # the analysis step.
+    cell = 'padding: 6px 12px; border: 1px solid var(--report-border);'
+
+    # A capture losing its input shows the same gap on every audio stream:
+    # one row per gap, listing the streams it hit (positions to the ms).
+    grouped_gaps = []
+    for g in silence_gaps:
+        key = (round(g.get('start_s', 0), 3), round(g.get('end_s', 0), 3))
+        if grouped_gaps and grouped_gaps[-1][0] == key:
+            grouped_gaps[-1][2].append(g.get('stream', 0) + 1)
+        else:
+            grouped_gaps.append((key, g, [g.get('stream', 0) + 1]))
+
+    if silence_gaps:
+        html += f"""
+        <p style="font-size: 13px; font-weight: bold; margin: 16px 0 6px 0;">Digital-silence gaps ({len(grouped_gaps)}):</p>
+        <table style="border-collapse: collapse; margin: 0 0 10px 0; font-size: 13px;">
+            <tr style="background-color: #f0ebe4;">
+                <th style="{cell}">#</th>
+                <th style="{cell}">Audio stream(s)</th>
+                <th style="{cell} text-align: right;">Start</th>
+                <th style="{cell} text-align: right;">End</th>
+                <th style="{cell} text-align: right;">Duration</th>
+            </tr>
+        """
+        for n, (_, g, streams) in enumerate(grouped_gaps, 1):
+            html += f"""
+            <tr id="dropped-sample-G{n}" class="spectro-row">
+                <td style="{cell}">G{n}</td>
+                <td style="{cell}">{', '.join(str(n) for n in streams)}</td>
+                <td style="{cell} text-align: right;">{g.get('start_timecode') or f"{g.get('start_s', 0):.3f} s"}</td>
+                <td style="{cell} text-align: right;">{g.get('end_timecode') or f"{g.get('end_s', 0):.3f} s"}</td>
+                <td style="{cell} text-align: right;">{g.get('duration_ms', 0):.0f} ms</td>
+            </tr>
+            """
+        html += "</table>"
+
+    if splice_events:
+        html += f"""
+        <p style="font-size: 13px; font-weight: bold; margin: 16px 0 6px 0;">Audio splices ({len(splice_events)}):</p>
+        <table style="border-collapse: collapse; margin: 0 0 10px 0; font-size: 13px;">
+            <tr style="background-color: #f0ebe4;">
+                <th style="{cell}">#</th>
+                <th style="{cell}">Audio stream</th>
+                <th style="{cell} text-align: right;">Timecode</th>
+                <th style="{cell} text-align: right;">Step size</th>
+                <th style="{cell} text-align: right;">Score</th>
+            </tr>
+        """
+        for n, e in enumerate(splice_events, 1):
+            html += f"""
+            <tr id="dropped-sample-S{n}" class="spectro-row">
+                <td style="{cell}">S{n}</td>
+                <td style="{cell}">{e.get('stream', 0) + 1}</td>
+                <td style="{cell} text-align: right;">{e.get('timecode') or f"{e.get('time_s', 0):.3f} s"}</td>
+                <td style="{cell} text-align: right;">{e.get('step_dbfs', 0):.0f} dBFS</td>
+                <td style="{cell} text-align: right;">{e.get('score', 0):.0f}</td>
+            </tr>
+            """
+        html += "</table>"
+
+    # Embed spectrogram image, transcoded to JPEG in memory for the report
+    # (cuts the embedded payload ~5–10x).
     spectrogram_path = frame_outputs.get('dropped_sample_spectrogram')
     if spectrogram_path:
         try:
@@ -6577,97 +6767,115 @@ def generate_dropped_sample_html(frame_outputs):
             img = cv2.imread(str(spectrogram_path))
             if img is None:
                 raise ValueError(f"cv2 could not read spectrogram at {spectrogram_path}")
+            # The picture is audio stream 1; mark the findings on that stream.
+            def _tc(value, seconds):
+                return value or f"{seconds:.3f} s"
+            on_pic_splices = [
+                (f"S{n}", e.get('time_s', 0.0),
+                 f"S{n} · splice at {_tc(e.get('timecode'), e.get('time_s', 0.0))}"
+                 f" · step {e.get('step_dbfs', 0):.0f} dBFS")
+                for n, e in enumerate(splice_events, 1) if e.get('stream', 0) == 0]
+            on_pic_gaps = [
+                (f"G{n}", g.get('start_s', 0.0), g.get('end_s', 0.0),
+                 f"G{n} · digital silence {_tc(g.get('start_timecode'), g.get('start_s', 0.0))}"
+                 f" – {_tc(g.get('end_timecode'), g.get('end_s', 0.0))}"
+                 f" ({g.get('duration_ms', 0):.0f} ms)")
+                for n, (_, g, streams) in enumerate(grouped_gaps, 1) if 1 in streams]
+            markers = []
+            if on_pic_splices or on_pic_gaps:
+                try:
+                    h_px, w_px = img.shape[:2]
+                    markers = _spectrogram_markers(w_px, h_px, audio_duration,
+                                                   on_pic_splices, on_pic_gaps)
+                except Exception as e:
+                    logger.warning(f"Could not mark findings on the spectrogram: {e}")
             ok, jpeg_bytes = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 80])
             if not ok:
                 raise ValueError("cv2.imencode failed for spectrogram JPEG")
             encoded_img = b64encode(jpeg_bytes.tobytes()).decode()
+            labels_html, marks_html = _spectrogram_markers_html(markers)
             html += f"""
             <p style="font-size: 13px; font-weight: bold; margin: 16px 0 6px 0;">Audio Spectrogram:</p>
-            <img src="data:image/jpeg;base64,{encoded_img}"
-                 style="max-width: 100%; height: auto; margin: 0 0 10px 0; border: 1px solid var(--report-border);" />
+            <div class="spectro-wrap">
+                {labels_html}
+                <div class="spectro-figure">
+                    <img src="data:image/jpeg;base64,{encoded_img}" alt="Audio stream 1 spectrogram" />
+                    {marks_html}
+                </div>
+            </div>
             """
+            caption = "Audio stream 1."
+            if markers:
+                kinds = {m['kind'] for m in markers}
+                legend = []
+                if 'splice' in kinds:
+                    legend.append('<span class="spectro-key spectro-splice">S</span> splices')
+                if 'gap' in kinds:
+                    legend.append('<span class="spectro-key spectro-gap">G</span> digital-silence gaps')
+                caption += (" Highlighted: " + ", ".join(legend) + ". Labels match the tables above"
+                            " &mdash; hover a marker for its timecode, or click its label to jump to the row."
+                            " Short findings are widened so they stay visible; the table timecodes are exact.")
+            off_pic = (sum(1 for e in splice_events if e.get('stream', 0) != 0)
+                       + sum(1 for _, _, st in grouped_gaps if 1 not in st))
+            if off_pic:
+                caption += f" {off_pic} finding(s) on other audio streams are listed above but not shown here."
+            html += f'<p style="font-size: 12px; margin: 6px 0 10px 0; color: #555;">{caption}</p>'
         except Exception as e:
             logger.warning(f"Could not embed spectrogram image: {e}")
 
     # Results table
-    html += """
+    count_label = "Audio splices detected" if not legacy_spikes else "Spectrogram spikes detected"
+    html += f"""
     <table style="border-collapse: collapse; margin: 10px 0; font-size: 13px;">
         <tr style="background-color: #f0ebe4;">
-            <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: left;">Metric</th>
-            <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">Value</th>
-        </tr>
-    """
-    html += f"""
-        <tr>
-            <td style="padding: 6px 12px; border: 1px solid var(--report-border);">Spectrogram spikes detected</td>
-            <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{spike_count}</td>
+            <th style="{cell} text-align: left;">Metric</th>
+            <th style="{cell} text-align: right;">Value</th>
         </tr>
         <tr>
-            <td style="padding: 6px 12px; border: 1px solid var(--report-border);">Audio/video duration difference</td>
-            <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{duration_diff_ms:.3f} ms</td>
+            <td style="{cell}">{count_label}</td>
+            <td style="{cell} text-align: right;">{spike_count}</td>
         </tr>
         <tr>
-            <td style="padding: 6px 12px; border: 1px solid var(--report-border);">Audio stream duration</td>
-            <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{audio_duration:.6f} s</td>
+            <td style="{cell}">Digital-silence gaps</td>
+            <td style="{cell} text-align: right;">{len(grouped_gaps)}</td>
         </tr>
         <tr>
-            <td style="padding: 6px 12px; border: 1px solid var(--report-border);">Video stream duration</td>
-            <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{video_duration:.6f} s</td>
+            <td style="{cell}">Audio/video duration difference (reference only)</td>
+            <td style="{cell} text-align: right;">{duration_diff_ms:.3f} ms</td>
         </tr>
         <tr>
-            <td style="padding: 6px 12px; border: 1px solid var(--report-border);">Estimated loss from detected spikes</td>
-            <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{estimated_loss_ms:.4f} ms</td>
+            <td style="{cell}">Audio stream duration</td>
+            <td style="{cell} text-align: right;">{audio_duration:.6f} s</td>
         </tr>
         <tr>
-            <td style="padding: 6px 12px; border: 1px solid var(--report-border);">Audio sample rate</td>
-            <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{sample_rate} Hz</td>
+            <td style="{cell}">Video stream duration</td>
+            <td style="{cell} text-align: right;">{video_duration:.6f} s</td>
         </tr>
         <tr>
-            <td style="padding: 6px 12px; border: 1px solid var(--report-border);">Combined risk score</td>
-            <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{combined_score:.3f}</td>
+            <td style="{cell}">Audio sample rate</td>
+            <td style="{cell} text-align: right;">{sample_rate} Hz</td>
         </tr>
     </table>
     """
 
-    # Comparison note: measured duration difference vs estimated loss from spikes
-    if estimated_loss_ms > 0 and duration_diff_ms > 0:
-        ratio = duration_diff_ms / estimated_loss_ms
-        if ratio > 10:
-            html += f"""
-            <p style="font-size: 13px; color: #cc6600; margin: 8px 0;">
-                &#x26A0; The measured duration difference ({duration_diff_ms:.3f}ms) is {ratio:.0f}x larger than
-                the {spike_count} detected spike(s) account for ({estimated_loss_ms:.4f}ms).
-                Additional undetected drops or a systematic offset in the digitization chain is likely.
-            </p>
-            """
-        elif ratio < 0.5:
-            html += f"""
-            <p style="font-size: 13px; color: #cc6600; margin: 8px 0;">
-                &#x26A0; The measured duration difference ({duration_diff_ms:.3f}ms) is smaller than
-                the estimated loss from {spike_count} spike(s) ({estimated_loss_ms:.4f}ms).
-                Some detected spikes may be content transients rather than dropped samples.
-            </p>
-            """
-
-    # Spike timestamps (collapsible, if any)
-    if spike_timestamps:
+    if legacy_spikes:
         html += f"""
         <a id="link_spike_timestamps" href="javascript:void(0);"
-           onclick="toggleContent('spike_timestamps', 'Estimated spike timestamps ({len(spike_timestamps)}) ▼', 'Estimated spike timestamps ▲')"
+           onclick="toggleContent('spike_timestamps', 'Estimated spike timestamps ({len(legacy_spikes)}) ▼', 'Estimated spike timestamps ▲')"
            style="color: var(--report-accent); text-decoration: underline; margin: 10px 0; display: block; font-size: 13px;">
-           Estimated spike timestamps ({len(spike_timestamps)}) ▼</a>
+           Estimated spike timestamps ({len(legacy_spikes)}) ▼</a>
         <div id="spike_timestamps" style="display: none; margin: 0 0 16px 0;">
         <table style="border-collapse: collapse; font-size: 13px;">
             <tr style="background-color: #f0ebe4;">
-                <th style="padding: 6px 12px; border: 1px solid var(--report-border);">#</th>
-                <th style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">Timestamp (s)</th>
+                <th style="{cell}">#</th>
+                <th style="{cell} text-align: right;">Timestamp (s)</th>
             </tr>
         """
-        for i, ts in enumerate(spike_timestamps, 1):
+        for i, ts in enumerate(legacy_spikes, 1):
             html += f"""
             <tr>
-                <td style="padding: 6px 12px; border: 1px solid var(--report-border);">{i}</td>
-                <td style="padding: 6px 12px; border: 1px solid var(--report-border); text-align: right;">{ts:.2f}</td>
+                <td style="{cell}">{i}</td>
+                <td style="{cell} text-align: right;">{ts:.2f}</td>
             </tr>
             """
         html += "</table></div>"
@@ -7408,6 +7616,114 @@ def _report_head_html(video_id, logo_image_path, color_strip_store, waveform_sto
             }}
             .bars-ref-panel[hidden] {{
                 display: none !important;
+            }}
+            /* Dropped-sample spectrogram markers, laid over the image in
+               percentages (generate_report._spectrogram_markers). Each
+               finding is one stripe running from its label pill, in a strip
+               above the image, down through the time axis to just past the
+               plot's bottom edge. Soft tints rather than outlines, so the
+               splice line or silent stretch — and the axis times — read
+               through it. The only solid parts sit outside the plot (the
+               pill, and an end tick in the bottom overhang, --spectro-over),
+               so no frequency row is covered. Colours stand off the
+               spectrogram's black-purple-red-yellow palette. */
+            .spectro-splice {{ --spectro-c: 103, 216, 239; }}
+            .spectro-gap {{ --spectro-c: 134, 227, 160; }}
+            .spectro-wrap {{
+                display: inline-block;
+                max-width: 100%;
+                line-height: 0;
+                background: #000000;
+                border: 1px solid var(--report-border);
+                border-radius: 4px;
+                overflow: hidden;
+                -webkit-print-color-adjust: exact;
+                print-color-adjust: exact;
+            }}
+            .spectro-labels,
+            .spectro-figure {{
+                position: relative;
+            }}
+            .spectro-wrap img {{
+                display: block;
+                max-width: 100%;
+                height: auto;
+            }}
+            .spectro-band {{
+                position: absolute;
+                box-sizing: border-box;
+                transition: background-color 0.15s ease;
+            }}
+            .spectro-band.spectro-splice {{
+                background: linear-gradient(90deg,
+                    rgba(var(--spectro-c), 0) 0%,
+                    rgba(var(--spectro-c), 0.38) 50%,
+                    rgba(var(--spectro-c), 0) 100%);
+            }}
+            .spectro-band.spectro-gap {{
+                background-color: rgba(var(--spectro-c), 0.13);
+                border-left: 1px dashed rgba(var(--spectro-c), 0.85);
+                border-right: 1px dashed rgba(var(--spectro-c), 0.85);
+            }}
+            .spectro-stem {{
+                bottom: 0;
+            }}
+            .spectro-mark:hover {{
+                background-color: rgba(var(--spectro-c), 0.26);
+            }}
+            /* End tick just past the plot's bottom edge. */
+            .spectro-mark::after {{
+                content: "";
+                position: absolute;
+                bottom: 0;
+                height: var(--spectro-over);
+                background: rgb(var(--spectro-c));
+            }}
+            /* On a long tape a splice is narrower than a pixel column, so a
+               solid tick pins down where it is. */
+            .spectro-mark.spectro-splice::after {{
+                left: 50%;
+                width: 2px;
+                margin-left: -1px;
+            }}
+            /* Gap end: a tab spanning the gap. */
+            .spectro-mark.spectro-gap::after {{
+                left: -1px;
+                right: -1px;
+            }}
+            .spectro-pill {{
+                position: absolute;
+                z-index: 1;
+                transform: translateX(-50%);
+                padding: 0 7px;
+                border: none;
+                border-radius: 9px;
+                background: rgb(var(--spectro-c));
+                color: #0d1b22;
+                font: bold 11px/17px Arial, sans-serif;
+                text-decoration: none;
+                white-space: nowrap;
+                box-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+            }}
+            .spectro-pill:hover,
+            .spectro-pill:focus-visible {{
+                color: #000000;
+                box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.85);
+                outline: none;
+            }}
+            .spectro-key {{
+                display: inline-block;
+                padding: 0 6px;
+                border-radius: 8px;
+                background: rgb(var(--spectro-c));
+                color: #0d1b22;
+                font: bold 10px/15px Arial, sans-serif;
+                -webkit-print-color-adjust: exact;
+                print-color-adjust: exact;
+            }}
+            tr.spectro-row:target td {{
+                background-color: var(--report-notice-bg);
+                transition: background-color 0.3s ease;
             }}
         </style>
         <script>
