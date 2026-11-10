@@ -123,3 +123,20 @@ def test_filter_rejects_asymmetric_and_recurring_runs():
     assert passes_filter(100, 200, 300, 10, 60, 62, {}, f)
     assert not passes_filter(100, 200, 300, 10, 30, 90, {}, f)          # motion-like
     assert not passes_filter(100, 200, 300, 10, 60, 62, {110: [(200, 300, 10)]}, f)
+
+
+def test_single_field_streak_has_field_ratio_near_one():
+    prev, cur, nxt = _frames()
+    cur[201, 300:312] = 235
+    r = find_streaks(prev, cur, nxt, P)[0][0]
+    assert r.other_field == pytest.approx(135)
+    assert r.field_ratio == pytest.approx(1.0)
+
+
+def test_object_in_both_fields_has_low_field_ratio():
+    """A glint two frame lines tall covers one line of each field: it still passes the same-field
+    and temporal tests, but barely stands out against the opposite field."""
+    prev, cur, nxt = _frames()
+    cur[200:202, 300:312] = 235
+    runs = find_streaks(prev, cur, nxt, P)[0]
+    assert runs and all(r.field_ratio < 0.1 for r in runs)

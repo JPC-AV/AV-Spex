@@ -10,7 +10,7 @@ offline against operator verdicts as often as needed:
     <package>/dropout_scan/
         scan.json         params, code hash, video, fps, frames scanned, seconds, avoid spans
         streaks.csv.gz    one row per run: frame, time, line, x, length, polarity, spatial,
-                          temporal, level, flatness
+                          temporal, level, flatness, other_field
         frames.csv.gz     one row per frame with any candidate pixel: frame, time, n_runs,
                           candidate_pixels (n_runs counts every run, even past the per-frame cap)
 
@@ -43,7 +43,7 @@ from AV_Spex.checks import video_dropout_detection as vdd  # noqa: E402
 
 SCAN_DIR = "dropout_scan"
 STREAK_COLS = ("frame", "time", "line", "x", "length", "polarity", "spatial", "temporal",
-               "level", "flatness")
+               "level", "flatness", "other_field")
 FRAME_COLS = ("frame", "time", "n_runs", "candidate_pixels")
 
 
@@ -94,7 +94,7 @@ def scan_one(job):
                 runs += 1
                 sw.writerow((fs.index, f"{fs.time:.4f}", r.line, r.x, r.length, r.polarity,
                              f"{r.spatial:.1f}", f"{r.temporal:.1f}", f"{r.level:.1f}",
-                             f"{r.flatness:.1f}"))
+                             f"{r.flatness:.1f}", f"{r.other_field:.1f}"))
     meta = {
         "video": str(video), "video_id": Path(video).stem, "fps": v["fps"],
         "width": v["width"], "height": v["height"], "frames_scanned": frames,

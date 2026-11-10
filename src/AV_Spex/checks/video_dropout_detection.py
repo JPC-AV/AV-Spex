@@ -57,6 +57,18 @@ class StreakRun:
     temporal: float     # mean contrast against the adjacent frames
     level: float        # mean luma of the run
     flatness: float     # std of luma along the run
+    other_field: float = 0.0    # mean contrast against the opposite-field lines directly above
+                                # and below (one frame line away)
+
+    @property
+    def field_ratio(self) -> float:
+        """other_field / strength. Dropout is a loss on one head pass, so it sits on one field's
+        line and stands out about as much against the other field as against its own: ~1.
+        A real object (glint, teeth, an edge) is in both fields, so the ratio falls well
+        below 1. Measured on the November 2026 pilots: 19 of 22 dropouts in [0.9, 1.2], 22 of
+        156 non-dropouts."""
+        s = self.strength
+        return self.other_field / s if s > 0 else 0.0
 
     @property
     def strength(self) -> float:
@@ -84,6 +96,13 @@ def _field_neighbours_max(g: np.ndarray) -> np.ndarray:
     (two frame lines away). Edge lines get -inf, so they never pass; the ROI drops them anyway."""
     out = np.full(g.shape, -np.inf, dtype=np.float32)
     out[2:-2] = np.maximum(g[:-4], g[4:])
+    return out
+
+
+def _other_field_max(g: np.ndarray) -> np.ndarray:
+    """Per pixel, the max of the lines directly above and below (the opposite field)."""
+    out = np.full(g.shape, np.inf, dtype=np.float32)
+    out[1:-1] = np.maximum(g[:-2], g[2:])
     return out
 
 
@@ -141,11 +160,12 @@ def find_streaks(prev: np.ndarray, cur: np.ndarray, nxt: np.ndarray,
         lv = _row_means(cur_f, rows, starts, ends)
         sq = _row_means(cur_f * cur_f, rows, starts, ends)
         flat = np.sqrt(np.maximum(sq - lv * lv, 0))
+        of = _row_means(g - _other_field_max(g), rows, starts, ends)
         for i in range(len(rows)):
             runs.append(StreakRun(
                 line=int(rows[i]), x=int(starts[i]), length=int(ends[i] - starts[i]),
                 polarity=polarity, spatial=float(sp[i]), temporal=float(tp[i]),
-                level=float(lv[i]), flatness=float(flat[i])))
+                level=float(lv[i]), flatness=float(flat[i]), other_field=float(of[i])))
     if len(runs) > p.max_runs_per_frame:
         runs.sort(key=lambda r: r.strength * r.length, reverse=True)
         runs = runs[:p.max_runs_per_frame]
