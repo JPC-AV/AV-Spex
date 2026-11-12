@@ -11,10 +11,15 @@ holds dropout. Rows are:
     where a band has both, across white and black streaks. A pilot that only asked about the
     top scores could not say where precision falls off.
     That is --mode bands (pilot1). --mode filtered (pilot2 on) instead samples what the detector
-    would report: per tape, frames drawn uniformly from those whose best run passes
-    video_dropout_detection.passes_filter() (--passed), plus frames whose runs all fail it
-    (--rejected), to measure what the filter throws away. Frames already on an earlier sheet
-    (any events_key_*.json) are not asked about again.
+    would report: per tape, frames drawn uniformly from those with a run passing
+    video_dropout_detection.passes_filter() (--passed), to measure its precision. Three more
+    pools measure what the filter throws away: frames whose best claim fails only the score cut
+    (--low-score, the held-out sheet), frames whose best claim passes symmetry and recurrence
+    but fails the opposite-field band (--near-miss, pilot3 on), and frames whose runs fail the
+    rest (--rejected). Frames already on an earlier sheet (any events_key_*.json) are
+    not asked about again. The key records, for every row, how many other frames the filter
+    flags within 1, 5 and 30 seconds (flag_density), so the verdicts also show whether true
+    dropout sits in denser stretches of flags than false alarms do.
   - controls: a random analyzable frame with a box at a random place. Their verdicts estimate
     how often dropout is there when the scan did not pick the spot, and they keep the sheet
     blind: every row looks the same.
@@ -39,7 +44,8 @@ run is not found again is reported (it means the seek landed on the wrong frame)
         --tapes JPC_AV_02213 JPC_AV_03801 JPC_AV_03802 JPC_AV_03806 JPC_AV_02319 JPC_AV_03796
 """
 import argparse
-from dataclasses import asdict
+import bisect
+from dataclasses import asdict, replace
 import csv
 import gzip
 import json
@@ -97,6 +103,7 @@ INSTRUCTIONS = [
     ("Leave a row blank", "to skip it; blank rows count as unlabeled."),
 ]
 
+DENSITY_WINDOWS = (1, 5, 30)    # seconds either side of a row, for the key's flag_density
 BAND_NAMES = ("low", "mid", "high")
 CROP_W, CROP_H, CROP_SCALE = 160, 48, 2
 THUMB_SCALE = 0.5
@@ -134,6 +141,9 @@ def positions(every):
 
 def filter_features(run, pos):
     return {"symmetry": round(vdd.symmetry(run["spatial"], run["temporal"]), 3),
+            "field_ratio": round(vdd.field_ratio(run["spatial"], run["temporal"],
+                                                 run["other_field"]), 3),
+            "score": round(run_score(run), 1),
             "recurrence": vdd.recurrence(int(run["frame"]), int(run["line"]), int(run["x"]),
                                          int(run["length"]), pos)}
 
@@ -221,28 +231,64 @@ def earlier_frames(exclude_name):
     return seen
 
 
-def choose_filtered(tapes, n_passed, n_rejected, n_controls, spacing, rng, seen):
-    """Per tape: uniform samples of frames that pass the event filter (their best passing run)
-    and of frames that do not (their best run), plus controls. See the module docstring."""
+def flag_density(t, flagged_times):
+    """{window: other flagged frames within that many seconds of t}; flagged_times is sorted."""
+    out = {}
+    for w in DENSITY_WINDOWS:
+        lo = bisect.bisect_left(flagged_times, t - w)
+        hi = bisect.bisect_right(flagged_times, t + w)
+        i = bisect.bisect_left(flagged_times, t)
+        own = i < len(flagged_times) and abs(flagged_times[i] - t) < 1e-6
+        out[f"{w}s"] = hi - lo - (1 if own else 0)
+    return out
+
+
+def choose_filtered(tapes, n_passed, n_low, n_near, n_rejected, n_controls, spacing, rng, seen):
+    """Per tape: uniform samples of frames that pass the event filter (their best passing run),
+    of low-score frames (no passing run, but one that fails only the score cut), of near misses
+    (neither, but a run that passes symmetry and recurrence and fails the field band), and of
+    the rest (their best run), plus controls. See the module docstring.
+
+    Returns (rows, positions per tape, sorted times of every flagged frame per tape)."""
     rows = []
+    flagged = {}
+    f_full = vdd.EventFilter()
+    f_base = replace(f_full, min_field_ratio=0.0, max_field_ratio=float("inf"), min_score=0.0)
+
+    def in_band(r):
+        return (f_full.min_field_ratio
+                <= vdd.field_ratio(r["spatial"], r["temporal"], r["other_field"])
+                <= f_full.max_field_ratio)
     for vid, (meta, _best, _busy, every) in tapes.items():
         pos = positions(every)
-        passed, rejected = [], []
+        passed, low, near, rejected = [], [], [], []
         for f, rs in every.items():
             rs = [r for r in rs if not in_spans(r["time"], meta["avoid"])]
             if not rs:
                 continue
-            ok = [r for r in rs if vdd.passes_filter(f, int(r["line"]), int(r["x"]), int(r["length"]),
-                                                     r["spatial"], r["temporal"], pos)]
+            # symmetry and recurrence first (recurrence is the slow test), then the two cheap ones
+            base = [r for r in rs if vdd.passes_filter(f, int(r["line"]), int(r["x"]), int(r["length"]),
+                                                       r["spatial"], r["temporal"], r["other_field"],
+                                                       pos, f_base)]
+            banded = [r for r in base if in_band(r)]
+            ok = [r for r in banded if run_score(r) >= f_full.min_score]
             if ok:
                 passed.append(max(ok, key=run_score))
+            elif banded:
+                low.append(max(banded, key=run_score))
+            elif base:
+                near.append(max(base, key=run_score))
             else:
                 rejected.append(max(rs, key=run_score))
+        flagged[vid] = sorted(r["time"] for r in passed)
         mins = meta["frames_scanned"] / meta["fps"] / 60
         print(f"{vid}: {len(passed)} frames pass the filter ({len(passed) / mins:.1f}/min), "
-              f"{len(rejected)} have only rejected runs", file=sys.stderr)
+              f"{len(low)} low-score, {len(near)} near misses, {len(rejected)} have only rejected runs",
+              file=sys.stderr)
         times = list(seen.get(vid, ()))
-        for label, pool, n in (("passed", passed, n_passed), ("rejected", rejected, n_rejected)):
+        for label, pool, n in (("passed", passed, n_passed), ("low_score", low, n_low),
+                               ("near_miss", near, n_near),
+                               ("rejected", rejected, n_rejected)):
             rng.shuffle(pool)
             taken = 0
             for run in pool:
@@ -255,7 +301,7 @@ def choose_filtered(tapes, n_passed, n_rejected, n_controls, spacing, rng, seen)
             if taken < n:
                 print(f"{vid}: only {taken} of {n} {label} frames", file=sys.stderr)
         rows += controls(vid, meta, n_controls, times, spacing, rng)
-    return rows, {vid: positions(t[3]) for vid, t in tapes.items()}
+    return rows, {vid: positions(t[3]) for vid, t in tapes.items()}, flagged
 
 
 # --- images --------------------------------------------------------------------------------
@@ -383,11 +429,18 @@ def write_workbook(path, rows, image_dir):
 
 # --- main ----------------------------------------------------------------------------------
 
-def timing_for(vid, fps):
+def timing_for(vid, fps, video=None):
+    """(start frames, drop-frame, known) from labels/timecode.json; a tape not cached there yet
+    is probed from its video and added, so timecodes match the NLE."""
+    path = LABELS / "timecode.json"
     try:
-        cache = json.loads((LABELS / "timecode.json").read_text())
+        cache = json.loads(path.read_text())
     except FileNotFoundError:
         cache = {}
+    if vid not in cache and video is not None:
+        from AV_Spex.utils import ffprobe_probe
+        cache[vid] = {"fps": fps, "start_timecode": ffprobe_probe.start_timecode(str(video))}
+        path.write_text(json.dumps(cache, indent=2, sort_keys=True))
     tc = (cache.get(vid) or {}).get("start_timecode")
     start_frames, drop = _tc_parse_start_timecode(tc, max(1, round(fps)))
     return start_frames, drop, vid in cache
@@ -401,6 +454,10 @@ def main():
     ap.add_argument("--mode", choices=("bands", "filtered"), default="bands")
     ap.add_argument("--per-band", type=int, default=4, help="bands mode: candidates per score band per tape")
     ap.add_argument("--passed", type=int, default=8, help="filtered mode: frames passing the filter per tape")
+    ap.add_argument("--low-score", type=int, default=0,
+                    help="filtered mode: frames failing only the score cut, per tape")
+    ap.add_argument("--near-miss", type=int, default=0,
+                    help="filtered mode: frames failing only the opposite-field band, per tape")
     ap.add_argument("--rejected", type=int, default=3, help="filtered mode: frames failing it per tape")
     ap.add_argument("--controls", type=int, default=2, help="random controls per tape")
     ap.add_argument("--spacing", type=float, default=2.0, help="minimum seconds between rows of a tape")
@@ -425,12 +482,13 @@ def main():
             sys.exit(f"{vid}: video {videos[vid]} not reachable")
 
     rng = random.Random(args.seed)
-    pos_by_vid = {}
+    pos_by_vid, flagged = {}, {}
     if args.mode == "bands":
         picks = choose(tapes, args.per_band, args.controls, args.spacing, rng)
     else:
-        picks, pos_by_vid = choose_filtered(tapes, args.passed, args.rejected, args.controls,
-                                            args.spacing, rng, earlier_frames(args.name))
+        picks, pos_by_vid, flagged = choose_filtered(
+            tapes, args.passed, args.low_score, args.near_miss, args.rejected, args.controls, args.spacing, rng,
+            earlier_frames(args.name))
     picks.sort(key=lambda p: (p[0], p[1]))
 
     image_dir.mkdir(parents=True, exist_ok=True)
@@ -445,7 +503,7 @@ def main():
                   file=sys.stderr)
         fname = f"{blind}.png"
         make_image(videos[vid], run_, meta, image_dir / fname)
-        start_frames, drop, known = timing_for(vid, meta["fps"])
+        start_frames, drop, known = timing_for(vid, meta["fps"], videos[vid])
         tc = _tc_format_timecode(frame / meta["fps"], meta["fps"], start_frames, drop)
         rows.append({"blind_id": blind, "video_id": vid, "timecode": tc, "image_file": fname})
         busy = tapes[vid][2].get(frame, (0, 0))
@@ -455,6 +513,8 @@ def main():
                       "run": run_, "frame_n_runs": busy[0], "frame_candidate_pixels": busy[1]}
         if selector != "control" and vid in pos_by_vid:
             key[blind]["filter"] = filter_features(run_, pos_by_vid[vid])
+        if vid in flagged:
+            key[blind]["flag_density"] = flag_density(frame / meta["fps"], flagged[vid])
         print(f"{blind} {vid} {tc} {selector}", file=sys.stderr)
 
     write_workbook(sheet, rows, image_dir)

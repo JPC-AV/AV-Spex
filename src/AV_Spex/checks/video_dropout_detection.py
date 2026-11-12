@@ -67,8 +67,7 @@ class StreakRun:
         A real object (glint, teeth, an edge) is in both fields, so the ratio falls well
         below 1. Measured on the November 2026 pilots: 19 of 22 dropouts in [0.9, 1.2], 22 of
         156 non-dropouts."""
-        s = self.strength
-        return self.other_field / s if s > 0 else 0.0
+        return field_ratio(self.spatial, self.temporal, self.other_field)
 
     @property
     def strength(self) -> float:
@@ -234,7 +233,21 @@ def params_dict(params: StreakParams) -> dict:
 #   - recurrence: dropout lands at random positions, while content that trips the scan keeps
 #     tripping it at about the same place for a while. 9 of the 11 dropouts had no run near them
 #     in frames 2..15 either side; most content candidates had several.
-# Both thresholds are provisional until a second, population-sampled sheet confirms them.
+#   - field ratio: dropout is a loss on one head pass, so it sits on one field's line and
+#     stands out about as much against the opposite-field lines as against its own field
+#     (ratio ~1). A real object (glint, teeth, an edge) is in both fields, so the ratio falls.
+#     Over both pilots (178 judged rows, 22 dropout): 19 of 22 dropouts in [0.9, 1.2], 22 of 156
+#     non-dropouts. The band was chosen after seeing those labels, so it is unconfirmed until a
+#     sheet sampled with it applied (pilot3) is judged. Known loss: dropouts several lines tall
+#     cover both fields and fail it.
+#   - score: pilot3 sampled what the three tests above report (60 frames over 10 tapes) and
+#     measured their precision at 33 of 55 (0.60); the field band discarded no dropout (0 of 20).
+#     17 of the 22 false reports were interlaced motion edges, mostly 5-6 px long and faint, so
+#     length x strength separates them: at >= 400, 25 of 30 are dropout, keeping 18 of the 20
+#     dropouts the operator called clear. What it loses is mostly faint dropout.
+# Operating point frozen 2026-11-10 for the held-out confirmation (the 42162 tapes). The score
+# cut was chosen after seeing pilot3's labels, so the held-out sheet is its first real test.
+# Do not retune these against held-out verdicts.
 
 @dataclass(frozen=True)
 class EventFilter:
@@ -244,11 +257,25 @@ class EventFilter:
     recurrence_dx: int = 24         # pixels of horizontal slack around the run
     recurrence_dy: int = 12         # frame lines of vertical slack
     max_recurrence: int = 2         # frames with a nearby run allowed
+    min_field_ratio: float = 0.9    # other_field / min(spatial, temporal), see StreakRun
+    max_field_ratio: float = 1.2
+    min_score: float = 400.0        # length x min(spatial, temporal)
 
 
 def symmetry(spatial: float, temporal: float) -> float:
     hi = max(spatial, temporal)
     return min(spatial, temporal) / hi if hi > 0 else 0.0
+
+
+def field_ratio(spatial: float, temporal: float, other_field: float) -> float:
+    """Contrast against the opposite-field lines over the weaker same-field/temporal contrast."""
+    s = min(spatial, temporal)
+    return other_field / s if s > 0 else 0.0
+
+
+def run_score(length: int, spatial: float, temporal: float) -> float:
+    """Length times the weaker contrast: how much of a streak there is to see."""
+    return length * min(spatial, temporal)
 
 
 def recurrence(frame: int, line: int, x: int, length: int, positions_by_frame,
@@ -269,7 +296,11 @@ def recurrence(frame: int, line: int, x: int, length: int, positions_by_frame,
 
 
 def passes_filter(frame: int, line: int, x: int, length: int, spatial: float, temporal: float,
-                  positions_by_frame, f: EventFilter = EventFilter()) -> bool:
+                  other_field: float, positions_by_frame, f: EventFilter = EventFilter()) -> bool:
     if symmetry(spatial, temporal) < f.min_symmetry:
+        return False
+    if run_score(length, spatial, temporal) < f.min_score:
+        return False
+    if not f.min_field_ratio <= field_ratio(spatial, temporal, other_field) <= f.max_field_ratio:
         return False
     return recurrence(frame, line, x, length, positions_by_frame, f) <= f.max_recurrence

@@ -286,10 +286,14 @@ chance, and the top TOUT frames were dissolves. So the detector reads the pictur
      polarities, plus random controls, and every row looks the same.
    - **Rows, `--mode filtered`** (pilot2 on). Per tape, `--passed` frames are drawn uniformly
      from those with a run passing `video_dropout_detection.passes_filter()`. That samples what
-     the detector would report, so the verdicts estimate its real precision. `--rejected` frames
-     are drawn from those whose runs all fail the filter, to see what it throws away. Frames on
-     an earlier `events_key_*.json` aren't asked about again. The key records each run's
-     `symmetry` and `recurrence`, so the filter thresholds can be retuned from the verdicts.
+     the detector would report, so the verdicts estimate its real precision. Two more pools show
+     what the filter throws away: `--near-miss` frames (pilot3 on) pass symmetry and recurrence
+     but fail the opposite-field band, and `--rejected` frames fail the rest. Frames on an
+     earlier `events_key_*.json` aren't asked about again. The key records each run's
+     `symmetry`, `recurrence` and `field_ratio`, so the thresholds can be retuned from the
+     verdicts, and each row's `flag_density`: how many other frames the filter flags within 1, 5
+     and 30 seconds. That tests whether true dropout sits in denser stretches of flags than
+     false alarms do, which reporting passages instead of frames would depend on.
    - **Image.** Previous, this and next frame, cropped around the box and enlarged without
      smoothing, above the whole frame.
    - **Columns.** `verdict`, `polarity`, `visibility`, `location` (new from pilot2), `cause`,
@@ -300,6 +304,21 @@ chance, and the top TOUT frames were dissolves. So the detector reads the pictur
    - **Pilot1** (70 candidates, 11 dropout) gave the event filter in `video_dropout_detection.py`:
      - **Symmetry.** Spatial and temporal contrast within 10% of each other.
      - **No recurrence.** No run nearby in frames 2–15 either side.
-   - **Pilot2** measures the filter's precision on the frames it would actually report.
+   - **Pilot2** measured that filter's precision on the frames it would actually report: 10 of
+     78 (0.13). The labels pointed to a third test, now in the filter:
+     - **Field ratio.** Dropout sits on one field's line, so its contrast against the
+       opposite-field lines is about equal to its other contrasts (ratio 0.9–1.2). Content is
+       in both fields. The band was chosen after seeing the labels.
+   - **Pilot3** (60 passed, 20 near-miss, 10 controls) measured those three tests out of
+     sample: 33 of 55 (0.60), and no dropout among the near-misses. Most false reports were short,
+     faint motion edges, which gave the fourth test:
+     - **Score.** Length × the weaker contrast, at least 400. Chosen after seeing the labels.
+4. **Confirm.** The operating point is frozen (`EventFilter` defaults, pinned by a test) and
+   confirmed on tapes the study has not seen. `studies/2026-11_video_dropout/plan.md` in the
+   corpus states the decision and the adopt bar before that sheet is built.
+   - **Intake.** `corpus.py import --run-id gb-42162-heldout-2026-11 <vendor folder>` takes the
+     vendor's existing AV Spex outputs as a run, so nothing is re-run and the saved config is
+     untouched. `dropout_scan.py` then reads the videos where they are.
+   - **Sheet.** `--low-score` adds frames that fail only the score cut, to see what it loses.
 
 `labels.py` reads only `sheet_*.csv` (bin labels), so the `events_*` files don't affect it.

@@ -120,9 +120,36 @@ def test_recurrence_ignores_the_adjacent_frames_and_counts_frames_not_runs():
 
 def test_filter_rejects_asymmetric_and_recurring_runs():
     f = EventFilter(max_recurrence=0)
-    assert passes_filter(100, 200, 300, 10, 60, 62, {}, f)
-    assert not passes_filter(100, 200, 300, 10, 30, 90, {}, f)          # motion-like
-    assert not passes_filter(100, 200, 300, 10, 60, 62, {110: [(200, 300, 10)]}, f)
+    assert passes_filter(100, 200, 300, 10, 60, 62, 60, {}, f)
+    assert not passes_filter(100, 200, 300, 10, 30, 90, 30, {}, f)      # motion-like
+    assert not passes_filter(100, 200, 300, 10, 60, 62, 60, {110: [(200, 300, 10)]}, f)
+
+
+def test_filter_keeps_only_runs_inside_the_field_ratio_band():
+    """other_field is judged against the weaker of the two contrasts (60 here)."""
+    f = EventFilter()
+    assert passes_filter(100, 200, 300, 10, 60, 62, 54, {}, f)          # 0.90: lower edge
+    assert passes_filter(100, 200, 300, 10, 60, 62, 72, {}, f)          # 1.20: upper edge
+    assert not passes_filter(100, 200, 300, 10, 60, 62, 20, {}, f)      # in both fields: content
+    assert not passes_filter(100, 200, 300, 10, 60, 62, 90, {}, f)      # above the band
+    wide = EventFilter(min_field_ratio=0.0, max_field_ratio=float("inf"))
+    assert passes_filter(100, 200, 300, 10, 60, 62, 20, {}, wide)
+
+
+def test_filter_drops_short_faint_runs_below_the_score_cut():
+    """score = length x the weaker contrast; the frozen cut is 400."""
+    f = EventFilter()
+    assert passes_filter(100, 200, 300, 10, 40, 41, 40, {}, f)          # 400: on the cut
+    assert not passes_filter(100, 200, 300, 5, 40, 41, 40, {}, f)       # 200: short and faint
+    assert passes_filter(100, 200, 300, 5, 80, 82, 80, {}, f)           # 400: short but strong
+    assert passes_filter(100, 200, 300, 5, 40, 41, 40, {}, EventFilter(min_score=0))
+
+
+def test_frozen_operating_point():
+    """Frozen 2026-11-10 for the held-out confirmation; a change here needs a new study round."""
+    f = EventFilter()
+    assert (f.min_symmetry, f.max_recurrence, f.min_field_ratio, f.max_field_ratio, f.min_score) \
+        == (0.9, 2, 0.9, 1.2, 400.0)
 
 
 def test_single_field_streak_has_field_ratio_near_one():
