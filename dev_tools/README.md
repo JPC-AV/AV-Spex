@@ -30,6 +30,7 @@ runs/<run_id>/                        one directory per run
         ground_truth/active_signalstats.txt.gz    only with collect.sh -g
 cache/                                replay cache (see Replays)
 labels/                               label sheets and keys, seed labels, timecode.json
+truth/                                operator-confirmed cases per detector (see Scorecard)
 notes/                                study write-ups (by hand; no tool reads or writes it)
 studies/<date>_<slug>/                a study's plan, manifest and one-off scripts
 ```
@@ -109,6 +110,37 @@ Columns come from small extractor functions in `aggregate.py`, prefixed by area:
 
 To track something new, write an extractor and add it to `EXTRACTORS`. Older runs show the
 column empty.
+
+## Scorecard (known cases per detector)
+
+`aggregate.py --diff` shows that a detector's output changed. The scorecard says whether the
+change was right, by checking each run against cases an operator has confirmed.
+
+```bash
+python3 dev_tools/scorecard.py <run>                      # every detector with a truth file
+python3 dev_tools/scorecard.py <run_a> --compare <run_b>  # truth rows whose outcome changed
+python3 dev_tools/scorecard.py <run> --unjudged bars      # reported events no truth row covers
+python3 dev_tools/scorecard.py --check                    # validate the truth files
+```
+
+- **Truth.** `$AVSPEX_CORPUS/truth/<detector>.csv`, columns
+  `video_id,tc_in,tc_out,verdict,source,note`. Times are the file's own timecode as the NLE
+  shows it, or plain elapsed seconds. Both blank means the whole tape.
+  - `present`: a real event. The detector should report something overlapping the span.
+  - `absent`: an operator looked and there is nothing to report, usually a past false alarm.
+    The detector should report nothing overlapping the span.
+- **Outcomes.** `hit` / `MISS` for present rows, `clean` / `FALSE_ALARM` for absent rows.
+  `not_run` means the run has no output from that detector for the tape (sidecar missing, step
+  off, or the detector said it could not measure). It is never counted as clean or as a miss.
+- **Unjudged events.** Truth is never complete, so an event no row covers is not a false
+  alarm. `--unjudged DETECTOR` prints those as rows ready to paste into the truth file once an
+  operator has settled them. Every row added makes the scorecard stricter for good.
+- **Detectors.** `audio_dropout`, `audible_timecode`, `tone_leak`, `chroma_phase`, `bars`,
+  `duplicate_frames`, `dropped_samples`. To add one, write a function in `scorecard.py` that
+  returns the detector's events as `(start, end)` seconds, or `None` when it did not run, and
+  add it to `DETECTORS`.
+- **Start timecodes** come from `labels/timecode.json`. A tape not listed there is read as
+  starting at zero.
 
 ## Replays
 
