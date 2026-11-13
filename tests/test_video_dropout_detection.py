@@ -167,3 +167,35 @@ def test_object_in_both_fields_has_low_field_ratio():
     cur[200:202, 300:312] = 235
     runs = find_streaks(prev, cur, nxt, P)[0]
     assert runs and all(r.field_ratio < 0.1 for r in runs)
+
+
+# --- event model -----------------------------------------------------------------------------
+
+from AV_Spex.checks import video_dropout_detection as vdd  # noqa: E402
+
+
+def _logit(n_runs, pixels, flatness=30.0, length=14):
+    return vdd.event_logit(vdd.model_features(length, 60, 62, 61, 150, flatness, "white", 200,
+                                              n_runs, pixels))
+
+
+def test_model_constants_line_up_with_the_features():
+    n = len(vdd.model_features(10, 60, 62, 61, 150, 20, "white", 200, 3, 80))
+    assert n == 20
+    assert len(vdd.MODEL_MEAN) == len(vdd.MODEL_SCALE) == len(vdd.MODEL_WEIGHTS) == n
+
+
+def test_isolated_streak_in_a_quiet_frame_is_reported_and_one_in_a_busy_frame_is_not():
+    """The model's main lever: the same run scores high alone and low among many others."""
+    quiet, busy = _logit(2, 40), _logit(60, 1500)
+    assert vdd.is_dropout_event(quiet) and not vdd.is_dropout_event(busy)
+
+
+def test_a_run_that_varies_along_its_length_scores_higher_than_a_flat_one():
+    assert _logit(4, 80, flatness=30.0) > _logit(4, 80, flatness=5.0)
+
+
+def test_frozen_model():
+    """Frozen 2026-11-12 for the confirmation sheet; a refit needs a new study round."""
+    assert vdd.MODEL_THRESHOLD == 0.8608 and vdd.MODEL_BIAS == 0.746318
+    assert _logit(2, 40) == pytest.approx(1.5650, abs=1e-3)

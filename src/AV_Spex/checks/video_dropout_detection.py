@@ -304,3 +304,86 @@ def passes_filter(frame: int, line: int, x: int, length: int, spatial: float, te
     if not f.min_field_ratio <= field_ratio(spatial, temporal, other_field) <= f.max_field_ratio:
         return False
     return recurrence(frame, line, x, length, positions_by_frame, f) <= f.max_recurrence
+
+
+# --- event model: weighing a reported run's measurements together ------------------------------
+#
+# The four tests above, each a single threshold, reached 0.55 precision on tapes the study had
+# not seen (69 of 126 reported frames; November 2026 held-out sheet). Two measurements they
+# ignore separate dropout from the false reports better than any of them:
+#   - how busy the frame is: a dropout is an isolated streak in a quiet frame (median 4 runs),
+#     while motion, graphics and edges trip the scan all over it (median 32);
+#   - variation along the run: a dropout's luma varies more along its length than an edge's.
+# So a run that passes the filter is then scored by a logistic model over ten measurements and
+# their squares, fitted to the 156 operator-judged runs the filter reports (94 dropout, 42
+# tapes; studies/2026-11_video_dropout/scripts/fit_event_model.py in the corpus). Scored with
+# whole tapes left out, 66 of the 72 runs above the threshold were dropout (0.92), keeping 70%
+# of the dropouts. Those labels include the held-out sheet, so that figure is in-sample in the
+# sense that matters; it stands unconfirmed until a sheet sampled with the model applied is
+# judged. Frozen 2026-11-12. Whole frames of static are busy, so the model scores them low: it
+# is a detector of isolated streaks.
+
+MODEL_FRAME_HEIGHT = 486.0      # the fit's tapes are all 486 lines; other heights are scaled to it
+
+
+def model_features(length: int, spatial: float, temporal: float, other_field: float,
+                   level: float, flatness: float, polarity: str, line: int,
+                   frame_n_runs: int, frame_candidate_pixels: int,
+                   height: float = MODEL_FRAME_HEIGHT) -> List[float]:
+    """The model's inputs for one run: ten measurements, then their squares (which let a linear
+    model prefer a middle range, as the field ratio needs)."""
+    strength = min(spatial, temporal)
+    base = [
+        float(np.log(length)),
+        float(np.log(strength)),
+        symmetry(spatial, temporal),
+        abs(field_ratio(spatial, temporal, other_field) - 1.03),   # 1.03: the dropout median
+        level / 255.0,
+        flatness / 50.0,
+        1.0 if polarity == WHITE else 0.0,
+        line / height,
+        float(np.log1p(frame_n_runs)),          # every run in the frame, before the per-frame cap
+        float(np.log1p(frame_candidate_pixels)),
+    ]
+    return base + [v * v for v in base]
+
+
+# Fitted constants: one entry per model_features() value, in its order.
+MODEL_MEAN = (
+    2.73859, 4.244104, 0.959807, 0.046696, 0.474108,
+    0.496256, 0.602564, 0.540691, 2.780376, 5.530342,
+    7.908361, 18.226266, 0.922085, 0.003608, 0.294041,
+    0.388516, 0.602564, 0.374913, 11.258871, 34.543866,
+)
+MODEL_SCALE = (
+    0.639127, 0.46244, 0.029241, 0.037785, 0.263179,
+    0.377154, 0.489368, 0.287344, 1.878398, 1.98977,
+    4.115275, 4.013541, 0.055762, 0.005111, 0.253533,
+    0.525288, 0.489368, 0.303746, 14.356688, 25.17486,
+)
+MODEL_WEIGHTS = (
+    0.34954, 0.376255, -0.037199, -0.446236, -0.736179,
+    1.0083, -0.011756, -0.860588, -0.595137, -1.133747,
+    0.315465, 0.352252, -0.030275, 0.265988, 0.142219,
+    -0.133198, -0.011756, 0.477322, 0.954051, -0.071393,
+)
+MODEL_BIAS = 0.746318
+MODEL_THRESHOLD = 0.8608    # logit at which 70% of the judged dropouts were kept, tapes left out
+
+
+def event_logit(features) -> float:
+    """The model's score for model_features() output; higher is more like dropout."""
+    x = (np.asarray(features, dtype=np.float64) - MODEL_MEAN) / MODEL_SCALE
+    return float(x @ np.asarray(MODEL_WEIGHTS) + MODEL_BIAS)
+
+
+def run_event_logit(run: StreakRun, frame_n_runs: int, frame_candidate_pixels: int,
+                    height: float = MODEL_FRAME_HEIGHT) -> float:
+    return event_logit(model_features(run.length, run.spatial, run.temporal, run.other_field,
+                                      run.level, run.flatness, run.polarity, run.line,
+                                      frame_n_runs, frame_candidate_pixels, height))
+
+
+def is_dropout_event(logit: float, threshold: float = MODEL_THRESHOLD) -> bool:
+    """Whether a run that already passed passes_filter() is reported as dropout."""
+    return logit >= threshold

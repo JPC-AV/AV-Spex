@@ -320,5 +320,11 @@ chance, and the top TOUT frames were dissolves. So the detector reads the pictur
      vendor's existing AV Spex outputs as a run, so nothing is re-run and the saved config is
      untouched. `dropout_scan.py` then reads the videos where they are.
    - **Sheet.** `--low-score` adds frames that fail only the score cut, to see what it loses.
+   - **Result.** 69 of 126 reported frames were dropout (0.55): a NO-GO for the four thresholds.
+5. **Round 2: weigh the measurements together.** The judged runs now double as training data.
+   A logistic model over ten run and frame measurements (frozen in
+   `video_dropout_detection.MODEL_*`, fitted by the study's `scripts/fit_event_model.py`) scores
+   each run the filter passes; `--passed` samples frames it reports and `--model-rejected` the
+   ones it drops. It is confirmed on tapes neither the filter nor the model has seen.
 
 `labels.py` reads only `sheet_*.csv` (bin labels), so the `events_*` files don't affect it.

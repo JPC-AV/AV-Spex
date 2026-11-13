@@ -12,8 +12,10 @@ holds dropout. Rows are:
     top scores could not say where precision falls off.
     That is --mode bands (pilot1). --mode filtered (pilot2 on) instead samples what the detector
     would report: per tape, frames drawn uniformly from those with a run passing
-    video_dropout_detection.passes_filter() (--passed), to measure its precision. Three more
-    pools measure what the filter throws away: frames whose best claim fails only the score cut
+    video_dropout_detection.passes_filter() and then the event model (is_dropout_event), to
+    measure its precision (--passed). Four more pools measure what is thrown away: frames with a
+    run that passes the filter but not the model (--model-rejected, the confirm sheet on),
+    frames whose best claim fails only the score cut
     (--low-score, the held-out sheet), frames whose best claim passes symmetry and recurrence
     but fails the opposite-field band (--near-miss, pilot3 on), and frames whose runs fail the
     rest (--rejected). Frames already on an earlier sheet (any events_key_*.json) are
@@ -243,9 +245,19 @@ def flag_density(t, flagged_times):
     return out
 
 
-def choose_filtered(tapes, n_passed, n_low, n_near, n_rejected, n_controls, spacing, rng, seen):
-    """Per tape: uniform samples of frames that pass the event filter (their best passing run),
-    of low-score frames (no passing run, but one that fails only the score cut), of near misses
+def model_logit(run, busy, height):
+    """The event model's score for a cached run; busy maps frame -> (n_runs, candidate_pixels)."""
+    n_runs, pixels = busy.get(int(run["frame"]), (0, 0))
+    return vdd.event_logit(vdd.model_features(
+        int(run["length"]), run["spatial"], run["temporal"], run["other_field"], run["level"],
+        run["flatness"], run["polarity"], int(run["line"]), n_runs, pixels, height))
+
+
+def choose_filtered(tapes, n_passed, n_model, n_low, n_near, n_rejected, n_controls, spacing, rng,
+                    seen):
+    """Per tape: uniform samples of frames the detector reports (a run passing the event filter
+    and the event model; the run the model scores highest), of model-rejected frames (a run
+    passes the filter, none passes the model), of low-score frames (no passing run, but one that fails only the score cut), of near misses
     (neither, but a run that passes symmetry and recurrence and fails the field band), and of
     the rest (their best run), plus controls. See the module docstring.
 
@@ -259,9 +271,9 @@ def choose_filtered(tapes, n_passed, n_low, n_near, n_rejected, n_controls, spac
         return (f_full.min_field_ratio
                 <= vdd.field_ratio(r["spatial"], r["temporal"], r["other_field"])
                 <= f_full.max_field_ratio)
-    for vid, (meta, _best, _busy, every) in tapes.items():
+    for vid, (meta, _best, busy, every) in tapes.items():
         pos = positions(every)
-        passed, low, near, rejected = [], [], [], []
+        passed, dropped, low, near, rejected = [], [], [], [], []
         for f, rs in every.items():
             rs = [r for r in rs if not in_spans(r["time"], meta["avoid"])]
             if not rs:
@@ -272,8 +284,11 @@ def choose_filtered(tapes, n_passed, n_low, n_near, n_rejected, n_controls, spac
                                                        pos, f_base)]
             banded = [r for r in base if in_band(r)]
             ok = [r for r in banded if run_score(r) >= f_full.min_score]
-            if ok:
-                passed.append(max(ok, key=run_score))
+            scored = [(model_logit(r, busy, meta["height"]), r) for r in ok]
+            if any(vdd.is_dropout_event(lg) for lg, _ in scored):
+                passed.append(max(scored, key=lambda t: t[0])[1])
+            elif ok:
+                dropped.append(max(scored, key=lambda t: t[0])[1])
             elif banded:
                 low.append(max(banded, key=run_score))
             elif base:
@@ -282,11 +297,12 @@ def choose_filtered(tapes, n_passed, n_low, n_near, n_rejected, n_controls, spac
                 rejected.append(max(rs, key=run_score))
         flagged[vid] = sorted(r["time"] for r in passed)
         mins = meta["frames_scanned"] / meta["fps"] / 60
-        print(f"{vid}: {len(passed)} frames pass the filter ({len(passed) / mins:.1f}/min), "
-              f"{len(low)} low-score, {len(near)} near misses, {len(rejected)} have only rejected runs",
+        print(f"{vid}: {len(passed)} frames reported ({len(passed) / mins:.1f}/min), "
+              f"{len(dropped)} model-rejected, {len(low)} low-score, {len(near)} near misses, {len(rejected)} have only rejected runs",
               file=sys.stderr)
         times = list(seen.get(vid, ()))
-        for label, pool, n in (("passed", passed, n_passed), ("low_score", low, n_low),
+        for label, pool, n in (("passed", passed, n_passed), ("model_rejected", dropped, n_model),
+                               ("low_score", low, n_low),
                                ("near_miss", near, n_near),
                                ("rejected", rejected, n_rejected)):
             rng.shuffle(pool)
@@ -454,6 +470,8 @@ def main():
     ap.add_argument("--mode", choices=("bands", "filtered"), default="bands")
     ap.add_argument("--per-band", type=int, default=4, help="bands mode: candidates per score band per tape")
     ap.add_argument("--passed", type=int, default=8, help="filtered mode: frames passing the filter per tape")
+    ap.add_argument("--model-rejected", type=int, default=0,
+                    help="filtered mode: frames passing the filter but not the event model, per tape")
     ap.add_argument("--low-score", type=int, default=0,
                     help="filtered mode: frames failing only the score cut, per tape")
     ap.add_argument("--near-miss", type=int, default=0,
@@ -487,7 +505,7 @@ def main():
         picks = choose(tapes, args.per_band, args.controls, args.spacing, rng)
     else:
         picks, pos_by_vid, flagged = choose_filtered(
-            tapes, args.passed, args.low_score, args.near_miss, args.rejected, args.controls, args.spacing, rng,
+            tapes, args.passed, args.model_rejected, args.low_score, args.near_miss, args.rejected, args.controls, args.spacing, rng,
             earlier_frames(args.name))
     picks.sort(key=lambda p: (p[0], p[1]))
 
@@ -513,6 +531,7 @@ def main():
                       "run": run_, "frame_n_runs": busy[0], "frame_candidate_pixels": busy[1]}
         if selector != "control" and vid in pos_by_vid:
             key[blind]["filter"] = filter_features(run_, pos_by_vid[vid])
+            key[blind]["filter"]["model_logit"] = round(model_logit(run_, tapes[vid][2], meta["height"]), 4)
         if vid in flagged:
             key[blind]["flag_density"] = flag_density(frame / meta["fps"], flagged[vid])
         print(f"{blind} {vid} {tc} {selector}", file=sys.stderr)
@@ -520,6 +539,8 @@ def main():
     write_workbook(sheet, rows, image_dir)
     key_path.write_text(json.dumps({"run": run.name, "args": vars(args),
                                     "filter_params": asdict(vdd.EventFilter()),
+                                    "model": {"threshold": vdd.MODEL_THRESHOLD, "bias": vdd.MODEL_BIAS,
+                                              "weights": list(vdd.MODEL_WEIGHTS)},
                                     "streak_params": vdd.params_dict(vdd.StreakParams()),
                                     "rows": key}, indent=1))
     n_ctrl = sum(k["selector"] == "control" for k in key.values())
