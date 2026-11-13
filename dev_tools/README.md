@@ -31,7 +31,15 @@ runs/<run_id>/                        one directory per run
 cache/                                replay cache (see Replays)
 labels/                               label sheets and keys, seed labels, timecode.json
 notes/                                study write-ups (by hand; no tool reads or writes it)
+studies/<date>_<slug>/                a study's plan, manifest and one-off scripts
 ```
+
+- **Version control.** The corpus is its own git repository. Its `.gitignore` tracks the
+  labels (CSV and keys), `studies/`, `notes/` and each run's `run.json` / `package.json`, and
+  leaves out what can be rebuilt: `cache/`, the package sidecars and scan caches, and the event
+  workbooks with their images. The workbooks embed their pictures, so after each labeling
+  session run `python3 dev_tools/event_labels.py` to export the verdicts to
+  `labels/events_<NAME>.csv`, then commit the corpus.
 
 - **Run ID.** It is `<commit>[-d<hash of uncommitted src/ changes>]-c<hash of checks+spex config>`,
   so the same code and config always land in the same directory.
