@@ -148,14 +148,12 @@ def det_chroma_phase(p, t):
 
 
 def det_bars(p, t):
-    """The consensus bars spans frame analysis excluded. Runs older than bars_regions carry
-    only the head-bars end time, read as a span from zero."""
+    """The consensus bars spans frame analysis excluded (bars_regions). A JSON without the key
+    had no consensus spans. Its color_bars_end_time is not used: it is an end with no start,
+    and frame analysis's own fallback can fill it in after the consensus rejected the claim."""
     if not p.fa:
         return None
-    if "bars_regions" in p.fa:
-        return [(r["start"], r["end"]) for r in p.fa["bars_regions"] or []]
-    end = p.fa.get("color_bars_end_time")
-    return [(0.0, end)] if end else []
+    return [(r["start"], r["end"]) for r in p.fa.get("bars_regions") or []]
 
 
 def det_duplicate_frames(p, t):
