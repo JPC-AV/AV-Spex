@@ -7,6 +7,8 @@ $AVSPEX_CORPUS/truth/.
     scorecard.py RUN --detector audio_dropout
     scorecard.py RUN --compare RUN_B          truth rows whose outcome differs between two runs
     scorecard.py RUN --unjudged bars          what the detector reported that no truth row covers
+    scorecard.py RUN --sheet review.xlsx      every detector's unjudged events, as a form to fill in
+    scorecard.py --import-sheet review.xlsx   append the verdicts you filled in to truth/
     scorecard.py RUN --out scorecard.csv      one row per truth row, with its outcome
     scorecard.py --check                      validate the truth files only
 
@@ -314,7 +316,8 @@ def compare(run_a, run_b, truth, tolerance):
     print(f"\n{len(changed)} of {len(a)} truth rows changed outcome")
 
 
-def unjudged(run, truth, tolerance, name):
+def unjudged_events(run, truth, tolerance, name):
+    """Yield (video_id, tc_in, tc_out, seconds, source_dir) for each reported event no truth row covers."""
     if name not in DETECTORS:
         sys.exit(f"no detector named {name!r} (have: {', '.join(DETECTORS)})")
     rows = truth.get(name, [])
@@ -324,7 +327,6 @@ def unjudged(run, truth, tolerance, name):
         if "_span" in row:
             spans.setdefault(row["video_id"], []).append(row["_span"])
     from AV_Spex.checks.qct_parse import _tc_format_timecode
-    total = 0
     for vid, path in packages(run).items():
         pkg = Package(path)
         timing = Timing(vid, (pkg.info.get("video") or {}).get("fps"))
@@ -334,14 +336,95 @@ def unjudged(run, truth, tolerance, name):
         if not events:
             continue
         covered = spans.get(vid, [])
-        left = [e for e in sorted(set(events))
-                if not any(e[0] <= s[1] + tolerance and e[1] >= s[0] - tolerance for s in covered)]
-        for s, e in left:
-            tc = lambda x: _tc_format_timecode(x, timing.fps, timing.start_frames, timing.drop)
-            print(f"{vid},{tc(s)},{tc(e)},,,")
-        total += len(left)
+        tc = lambda x: _tc_format_timecode(x, timing.fps, timing.start_frames, timing.drop)
+        video = str(Path(pkg.info.get("source") or "") / (pkg.info.get("video_file") or ""))
+        for s, e in sorted(set(events)):
+            if not any(s <= c[1] + tolerance and e >= c[0] - tolerance for c in covered):
+                yield vid, tc(s), tc(e), round(e - s, 2), video
+
+
+def unjudged(run, truth, tolerance, name):
+    total = 0
+    for vid, tc_in, tc_out, _, _ in unjudged_events(run, truth, tolerance, name):
+        print(f"{vid},{tc_in},{tc_out},,,")
+        total += 1
     print(f"{total} unjudged {name} event(s) in {run.name}; copy the rows you settle into "
           f"truth/{name}.csv and fill in verdict, source and note", file=sys.stderr)
+
+
+SHEET_COLUMNS = ("detector", "video_id", "tc_in", "tc_out", "seconds", "verdict", "note", "video")
+
+
+def write_sheet(run, truth, tolerance, names, dest):
+    """One workbook of every unjudged event, with a verdict dropdown, for an operator to fill in."""
+    import openpyxl
+    from openpyxl.styles import Font
+    from openpyxl.worksheet.datavalidation import DataValidation
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "unjudged"
+    ws.append(SHEET_COLUMNS)
+    for c in ws[1]:
+        c.font = Font(bold=True)
+    counts = Counter()
+    for name in names:
+        for vid, tc_in, tc_out, secs, video in unjudged_events(run, truth, tolerance, name):
+            ws.append((name, vid, tc_in, tc_out, secs, "", "", video))
+            counts[name] += 1
+    dv = DataValidation(type="list", formula1='"%s"' % ",".join(VERDICTS), allow_blank=True)
+    ws.add_data_validation(dv)
+    dv.add(f"F2:F{max(ws.max_row, 2)}")
+    for col, width in zip("ABCDEFGH", (17, 14, 13, 13, 9, 10, 50, 60)):
+        ws.column_dimensions[col].width = width
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    wb.save(dest)
+    print(f"{sum(counts.values())} unjudged event(s) -> {dest}")
+    for name in names:
+        print(f"    {name:<18} {counts[name]:>4}")
+
+
+def import_sheet(src, truth):
+    """Append the judged rows of a review workbook to the truth files. Blank verdicts stay unjudged."""
+    import datetime
+    import openpyxl
+    ws = openpyxl.load_workbook(src, read_only=True)["unjudged"]
+    rows = ws.iter_rows(values_only=True)
+    header = [str(h or "") for h in next(rows)]
+    source = f"operator review {datetime.date.today().isoformat()}, {Path(src).name}"
+    have = {(n, r["video_id"], r["tc_in"], r["tc_out"]) for n, rs in truth.items() for r in rs}
+    add, odd, blank = {}, [], 0
+    for i, r in enumerate(rows, start=2):
+        row = {h: ("" if v is None else str(v).strip()) for h, v in zip(header, r)}
+        if not row.get("video_id"):
+            continue
+        v = row.get("verdict", "")
+        if not v:
+            blank += 1
+        elif v not in VERDICTS or row["detector"] not in DETECTORS:
+            odd.append(f"row {i}: detector {row['detector']!r}, verdict {v!r}")
+        elif (row["detector"], row["video_id"], row["tc_in"], row["tc_out"]) not in have:
+            add.setdefault(row["detector"], []).append(
+                {"video_id": row["video_id"], "tc_in": row["tc_in"], "tc_out": row["tc_out"],
+                 "verdict": v, "source": source, "note": row.get("note", "")})
+    for line in odd:
+        print(f"! {line}", file=sys.stderr)
+    if odd:
+        sys.exit("nothing imported; fix those rows first")
+    for name, new in add.items():
+        path = TRUTH / f"{name}.csv"
+        fresh = not path.exists()
+        if not fresh and not path.read_text().endswith("\n"):
+            with open(path, "a") as fh:
+                fh.write("\n")
+        with open(path, "a", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=COLUMNS)
+            if fresh:
+                w.writeheader()
+            w.writerows(new)
+        c = Counter(r["verdict"] for r in new)
+        print(f"{name:<18} +{c['present']} present  +{c['absent']} absent -> {path.name}")
+    print(f"{sum(len(v) for v in add.values())} row(s) added, {blank} left blank (still unjudged)")
 
 
 def main():
@@ -350,6 +433,8 @@ def main():
     ap.add_argument("--detector", action="append", help="only this detector (repeatable)")
     ap.add_argument("--compare", metavar="RUN_B", help="show truth rows whose outcome differs in RUN_B")
     ap.add_argument("--unjudged", metavar="DETECTOR", help="list reported events no truth row covers")
+    ap.add_argument("--sheet", metavar="XLSX", help="write every unjudged event to a workbook to fill in")
+    ap.add_argument("--import-sheet", metavar="XLSX", help="append a filled-in workbook's verdicts to truth/")
     ap.add_argument("--tolerance", type=float, default=1.0, help="seconds of slack either side of a span")
     ap.add_argument("--out", help="write one CSV row per truth row")
     ap.add_argument("--check", action="store_true", help="validate the truth files and exit")
@@ -370,14 +455,20 @@ def main():
             print(f"{name:<18} {c['present']:>3} present  {c['absent']:>3} absent  "
                   f"{len({r['video_id'] for r in rows}):>3} tape(s)")
         return
+    if args.import_sheet:
+        import_sheet(args.import_sheet, truth)
+        return
     if not args.run:
         ap.error("RUN is required (see corpus.py list)")
-    if not truth and not args.unjudged:
+    if not truth and not (args.unjudged or args.sheet):
         sys.exit(f"no truth files in {TRUTH}")
     run = resolve_run(args.run)
 
     if args.unjudged:
         unjudged(run, truth, args.tolerance, args.unjudged)
+        return
+    if args.sheet:
+        write_sheet(run, truth, args.tolerance, args.detector or list(DETECTORS), args.sheet)
         return
     if args.compare:
         compare(run, resolve_run(args.compare), truth, args.tolerance)

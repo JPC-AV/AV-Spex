@@ -120,6 +120,8 @@ change was right, by checking each run against cases an operator has confirmed.
 python3 dev_tools/scorecard.py <run>                      # every detector with a truth file
 python3 dev_tools/scorecard.py <run_a> --compare <run_b>  # truth rows whose outcome changed
 python3 dev_tools/scorecard.py <run> --unjudged bars      # reported events no truth row covers
+python3 dev_tools/scorecard.py <run> --sheet review.xlsx  # all unjudged events as a workbook: pick a verdict per row
+python3 dev_tools/scorecard.py --import-sheet review.xlsx # append the judged rows to truth/ (blank rows stay unjudged)
 python3 dev_tools/scorecard.py --check                    # validate the truth files
 ```
 
