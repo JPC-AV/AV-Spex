@@ -35,7 +35,7 @@ Values are the code defaults. "Config" means `FrameAnalysisConfig` in `utils/con
 | Step | What | Runs when |
 |---|---|---|
 | 0 | Bitplane check | enabled (not covered here) |
-| 1 | Resolve head color-bars end time (CSV fallback only when `brng_skip_color_bars` is on) | always |
+| 1 | Take the head color-bars end time passed in (the qct-parse/CLAMS consensus); none passed means no head bars, and the qct-parse CSV is never re-read | always |
 | 2a | Detect black segments from QCTools | any of border / signalstats / BRNG / duplicate-frame is on, and a QCTools report exists |
 | 2b | Scan QCTools: BRNG violations, per-bin profiles, suitability gate, composite scores, then candidate periods | any of border / signalstats / BRNG is on, and a QCTools report exists |
 | 3 | Border detection (+ visualization) | enabled |
@@ -55,10 +55,9 @@ Every step checks for cancellation before it starts.
 These pieces are used by period selection, signalstats and BRNG.
 
 ### 1.1 Head color-bars end time
-1. If `brng_skip_color_bars` is on and no end time was passed in, fall back to reading
-   `{video_id}_report_csvs/qct-parse_colorbars_durations.csv` (next to the video) and parse its end
-   timestamp. If that file isn't there, bars end = 0 (no bars).
-2. If `brng_skip_color_bars` is off, the passed-in value is used as is.
+1. The end time passed in is used as is. In the pipeline it is the qct-parse/CLAMS consensus.
+2. No end time passed in means no head bars. That includes a qct-parse head-bars claim the
+   consensus rejected, so `qct-parse_colorbars_durations.csv` is never re-read here.
 3. An empty value (no bars detected) is treated as 0 from here on.
 4. **Skip Color Bars decides who sees the bars.** On: the head end time and all `bars_regions` are
    excluded from the violation scan, period placement, signalstats and BRNG. Off: those steps get
