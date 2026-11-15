@@ -8,6 +8,8 @@ period_selection, ...), as one of two roles:
 
     dev       someone looked at this tape's results for the topic: labeled it, reviewed its
               detections, tuned a threshold against it. It can never again be a fair test of it.
+              A dev row below a heldout row of the same date counts as after it (test scored
+              the day it was drawn).
     heldout   set aside as a test for the topic, to be scored once against a frozen detector.
               Until a later `dev` row says the test is over, the tape is reserved: do not look.
 
@@ -81,6 +83,8 @@ def read_rows():
     if LEDGER.exists():
         with open(LEDGER, newline="") as fh:
             rows = [{k: (r.get(k) or "").strip() for k in COLUMNS} for r in csv.DictReader(fh)]
+        for n, r in enumerate(rows):
+            r["_n"] = n  # file order settles which of two same-day rows came first
     for path in sorted(TRUTH.glob("*.csv")) if TRUTH.is_dir() else []:
         seen = {}
         with open(path, newline="") as fh:
@@ -106,14 +110,24 @@ def by_tape(rows):
     return out
 
 
+def _after(dev, held):
+    """True if a dev use came after a heldout row. On the same day, a ledger row written
+    below the heldout row counts as after; a dev use implied by truth/ does not."""
+    if dev["date"] != held["date"]:
+        return dev["date"] > held["date"]
+    return "_n" in dev and "_n" in held and dev["_n"] > held["_n"]
+
+
 def status(uses):
     """A tape's standing for one topic, from its rows for that topic."""
     if not uses:
         return "fresh"
-    held = [u["date"] for u in uses if u["role"] == "heldout"]
-    dev = [u["date"] for u in uses if u["role"] == "dev"]
-    if held and not any(d > max(held) for d in dev):
-        return "reserved"
+    held = [u for u in uses if u["role"] == "heldout"]
+    dev = [u for u in uses if u["role"] == "dev"]
+    if held:
+        last = max(held, key=lambda u: (u["date"], u.get("_n", -1)))
+        if not any(_after(d, last) for d in dev):
+            return "reserved"
     return "spent" if held else "dev"
 
 
@@ -141,7 +155,7 @@ def problems(rows):
         for topic, uses in sorted(topics.items()):
             for h in (u for u in uses if u["role"] == "heldout"):
                 # an undated dev use (a truth row with no date in its source) counts as earlier
-                before = [u for u in uses if u["role"] == "dev" and u["date"] <= h["date"]]
+                before = [u for u in uses if u["role"] == "dev" and not _after(u, h)]
                 if before:
                     out.append(f"{vid} was dev for {topic} ({before[0]['source'] or before[0]['date']}) "
                                f"before it was held out on {h['date']}: not a fair test")
