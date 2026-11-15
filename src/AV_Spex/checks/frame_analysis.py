@@ -32,6 +32,8 @@ import matplotlib.patches as patches
 from AV_Spex.utils.log_setup import logger, report_ffmpeg_stderr
 from AV_Spex.utils import ffprobe_probe
 from AV_Spex.checks import dropped_sample_detection, duplicate_frame_detection
+from AV_Spex.checks import video_dropout_detection
+from AV_Spex.checks.video_dropout_detection import VideoDropoutResult
 from AV_Spex.checks import frame_analysis_report
 from AV_Spex.checks.qctools_bin_profile import (
     PROFILE_BIN_SIZE, BinProfile, BinProfiler,
@@ -4738,6 +4740,17 @@ class EnhancedFrameAnalysis:
             color_bars_end_time=color_bars_end_time,
         )
 
+    def _assess_video_dropout(self, periods) -> Optional[VideoDropoutResult]:
+        """Rate of reported dropout frames inside the analysis periods, as a tape-level
+        flag. See checks/video_dropout_detection.py; None only when cancelled."""
+        result = video_dropout_detection.assess_periods(
+            str(self.video_path), self.width, self.height, self.fps, periods,
+            check_cancelled=self.check_cancelled,
+        )
+        if result is not None:
+            logger.info(f"  {result.message}")
+        return result
+
     def _detect_duplicate_frames(
         self,
         color_bars_end_time: Optional[float] = None,
@@ -5097,6 +5110,8 @@ class EnhancedFrameAnalysis:
             'signalstats': signalstats_enabled,
             'dropped_sample_detection': dropped_sample_enabled,
             'duplicate_frame_detection': duplicate_frame_enabled,
+            'video_dropout': self._is_step_enabled(
+                getattr(frame_config, 'enable_video_dropout_detection', False)),
         }
 
         # Step 0: Bitplane check — verify 9th and 10th bits are not empty
@@ -5820,6 +5835,10 @@ class EnhancedFrameAnalysis:
             )
             return asdict(result) if result else None
 
+        def _run_video_dropout():
+            result = self._assess_video_dropout(_final_analysis_periods(results))
+            return asdict(result) if result else None
+
         if not self._run_analysis_steps([
             AnalysisStep(
                 key='dropped_sample_detection',
@@ -5835,6 +5854,15 @@ class EnhancedFrameAnalysis:
                 enabled=duplicate_frame_enabled,
                 run=_run_duplicate_frames,
                 skip_message="Skipping duplicate frame detection (disabled in config)\n",
+            ),
+            AnalysisStep(
+                key='video_dropout',
+                label='Video Dropout',
+                enabled=self._is_step_enabled(
+                    getattr(frame_config, 'enable_video_dropout_detection', False)),
+                run=_run_video_dropout,
+                start_message="Starting video dropout assessment of the analysis periods...",
+                skip_message="Skipping video dropout assessment (disabled in config)\n",
             ),
         ], results, signals):
             return results

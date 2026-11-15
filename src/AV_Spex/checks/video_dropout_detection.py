@@ -387,3 +387,127 @@ def run_event_logit(run: StreakRun, frame_n_runs: int, frame_candidate_pixels: i
 def is_dropout_event(logit: float, threshold: float = MODEL_THRESHOLD) -> bool:
     """Whether a run that already passed passes_filter() is reported as dropout."""
     return logit >= threshold
+
+
+# --- tape-level assessment over the analysis periods --------------------------------------------
+#
+# Frame by frame, filter + model was right 43 times in 65 on tapes the study had not seen
+# (confirm1 sheet, 2026-11-14): not good enough to list as findings. What the same reports do
+# support is a statement about the tape. The rate of reported frames inside the frame-analysis
+# periods ranks tapes much as an operator does: on ten tapes skimmed end to end (2026-11-15,
+# labels/dropout_tapes_skim1.xlsx in the corpus) the five judged "heavy" measured 12-40 reported
+# frames a minute (median of the periods), the four "some" 2-13 and the one "none" 11. The
+# measure cannot tell "some" from "none" (chroma smearing trips it), so only heavy is flagged.
+#
+# The median of the per-period rates is used, not the pooled rate: one period landing on a busy
+# passage (JPC_AV_02217: 76 a minute in one period, 0-8 in the others) should not flag a tape.
+#
+# Scope, to keep the wording honest: this looks only at the analysis periods (about 10% of a
+# half-hour tape), which avoid bars, black and stretches with no analyzable picture, and the
+# model scores whole frames of static low. Sync loss and picture roll are not counted.
+
+TAPE_FLAG_MEDIAN_PER_MINUTE = 15.0   # between the highest "some" (13) and the next "heavy" (19)
+MIN_SCANNED_FRACTION = 0.9           # of the frames the periods should hold; below it: unknown
+
+STATUS_FLAGGED = "flagged"
+STATUS_NOT_FLAGGED = "not_flagged"
+STATUS_UNKNOWN = "unknown"           # could not measure: never to be shown as a pass
+
+
+@dataclass
+class VideoDropoutResult:
+    status: str
+    message: str
+    median_per_minute: Optional[float] = None    # median over periods of reported frames/minute
+    total_per_minute: Optional[float] = None     # all reported frames over all scanned minutes
+    threshold_per_minute: float = TAPE_FLAG_MEDIAN_PER_MINUTE
+    seconds_scanned: float = 0.0
+    reported_frames: int = 0
+    periods: List[dict] = field(default_factory=list)    # start, duration, frames_scanned,
+                                                         # reported_frames, per_minute
+    examples: List[dict] = field(default_factory=list)   # the strongest report of each period
+
+
+def reported_frames(frames: List[FrameStreaks], height: float = MODEL_FRAME_HEIGHT,
+                    event_filter: EventFilter = EventFilter()) -> List[Tuple[FrameStreaks, StreakRun, float]]:
+    """The frames of one contiguous scan that the filter and the event model report, each with
+    its highest-scoring run and that run's logit. Recurrence is judged within `frames` only."""
+    positions = {f.index: [(r.line, r.x, r.length) for r in f.runs] for f in frames}
+    out = []
+    for f in frames:
+        best = None
+        for r in f.runs:
+            if not passes_filter(f.index, r.line, r.x, r.length, r.spatial, r.temporal,
+                                 r.other_field, positions, event_filter):
+                continue
+            logit = run_event_logit(r, f.n_runs, f.candidate_pixels, height)
+            if best is None or logit > best[1]:
+                best = (r, logit)
+        if best is not None and is_dropout_event(best[1]):
+            out.append((f, best[0], best[1]))
+    return out
+
+
+def summarize_periods(periods: List[dict], examples: List[dict], expected_frames: float,
+                      threshold: float = TAPE_FLAG_MEDIAN_PER_MINUTE) -> VideoDropoutResult:
+    """Turn per-period counts into the tape-level result. Split from the scan so the decision
+    can be tested, and replayed over cached scans, without decoding video."""
+    scanned = sum(p["frames_scanned"] for p in periods)
+    seconds = sum(p["seconds_scanned"] for p in periods)
+    measured = [p for p in periods if p["seconds_scanned"] > 0]
+    if not periods:
+        return VideoDropoutResult(STATUS_UNKNOWN, "No analysis periods to scan "
+                                  "(video dropout is measured inside the signalstats/BRNG periods)")
+    if not measured or scanned < MIN_SCANNED_FRACTION * expected_frames:
+        return VideoDropoutResult(
+            STATUS_UNKNOWN,
+            f"Could not read the analysis periods ({scanned} of about {expected_frames:.0f} frames decoded)",
+            seconds_scanned=round(seconds, 2), periods=periods)
+    rates = sorted(p["per_minute"] for p in measured)
+    mid = len(rates) // 2
+    median = rates[mid] if len(rates) % 2 else (rates[mid - 1] + rates[mid]) / 2
+    count = sum(p["reported_frames"] for p in measured)
+    total = count / (seconds / 60)
+    flagged = median >= threshold
+    message = (f"{'Possible heavy dropout' if flagged else 'No heavy dropout indicated'} in the analyzed periods: "
+               f"{median:.1f} reported frames/min (median of {len(measured)} periods; flagged at {threshold:g})")
+    return VideoDropoutResult(
+        STATUS_FLAGGED if flagged else STATUS_NOT_FLAGGED, message,
+        median_per_minute=round(median, 2), total_per_minute=round(total, 2),
+        threshold_per_minute=threshold, seconds_scanned=round(seconds, 2), reported_frames=count,
+        periods=periods, examples=examples if flagged or count else [])
+
+
+def assess_periods(video_path: str, width: int, height: int, fps: float,
+                   periods, params: StreakParams = StreakParams(),
+                   event_filter: EventFilter = EventFilter(),
+                   check_cancelled=None, scan=None) -> Optional[VideoDropoutResult]:
+    """Scan each (start, duration) period and report whether the tape looks dropout-heavy.
+
+    Returns None when cancelled. A period that cannot be decoded counts as unscanned; too many
+    of those and the result is `unknown`, never `not_flagged`. `scan` replaces scan_video in
+    tests."""
+    scan = scan or scan_video
+    out, examples, expected = [], [], 0.0
+    for start, duration in periods or ():
+        start, duration = float(start), float(duration)
+        expected += max(0.0, duration * fps - 2)     # the scan skips each period's end frames
+        try:
+            frames = list(scan(video_path, width, height, fps, params, start=start,
+                               duration=duration, check_cancelled=check_cancelled))
+        except Exception as e:      # a failed decode must surface as "unknown", not as zero
+            logger.warning(f"Video dropout scan failed for the period at {start:.1f}s: {e}")
+            frames = []
+        if check_cancelled and check_cancelled():
+            return None
+        hits = reported_frames(frames, height, event_filter)
+        seconds = len(frames) / fps if fps else 0.0
+        out.append({"start": start, "duration": duration, "frames_scanned": len(frames),
+                    "seconds_scanned": round(seconds, 3), "reported_frames": len(hits),
+                    "per_minute": round(len(hits) / (seconds / 60), 2) if seconds else 0.0})
+        if hits:
+            f, r, logit = max(hits, key=lambda h: h[2])
+            examples.append({"time": round(f.time, 3), "period_start": start, "line": r.line,
+                             "x": r.x, "length": r.length, "polarity": r.polarity,
+                             "logit": round(logit, 3)})
+    return summarize_periods(out, examples, expected)

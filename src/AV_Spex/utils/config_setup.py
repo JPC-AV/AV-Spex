@@ -304,6 +304,9 @@ class FrameAnalysisConfig:
     enable_duplicate_frame_detection: bool = False
     duplicate_min_run_length: int = 2
 
+    # Video dropout: a tape-level flag measured inside the analysis periods
+    enable_video_dropout_detection: bool = False
+
 # Output configuration
 VALID_QCTOOLS_EXTENSIONS = ("qctools.xml.gz", "qctools.mkv")
 

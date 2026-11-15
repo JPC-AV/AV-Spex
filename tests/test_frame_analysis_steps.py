@@ -503,3 +503,30 @@ def test_skip_color_bars_off_brng_fallback_periods_may_start_in_bars(monkeypatch
         monkeypatch, tmp_path, enable_signalstats=False, skip_color_bars=True, **BARS)[1]
 
     assert brng_calls[0]['analysis_periods'][0][0] < on_calls[0]['analysis_periods'][0][0]
+
+
+# ===========================================================================
+# Video dropout: a tape-level flag measured inside the final analysis periods
+# ===========================================================================
+
+def test_video_dropout_is_off_by_default_and_follows_its_flag():
+    assert _steps_chosen(_analyzer(_config()))['video_dropout'] is False
+    on = _config(enable_video_dropout_detection=True)
+    assert _steps_chosen(_analyzer(on))['video_dropout'] is True
+
+
+def test_video_dropout_scans_the_periods_it_is_given(monkeypatch):
+    from AV_Spex.checks import frame_analysis as fa
+    seen = {}
+
+    def fake(video, width, height, fps, periods, check_cancelled=None):
+        seen.update(video=video, size=(width, height), fps=fps, periods=periods)
+        return fa.VideoDropoutResult(status='not_flagged', message='ok')
+
+    monkeypatch.setattr(fa.video_dropout_detection, 'assess_periods', fake)
+    obj = _analyzer(_config())
+    obj.width, obj.height, obj.fps = 720, 486, 29.97
+    result = obj._assess_video_dropout([(30.0, 30), (510.0, 30)])
+    assert result.status == 'not_flagged'
+    assert seen == {'video': '/v.mkv', 'size': (720, 486), 'fps': 29.97,
+                    'periods': [(30.0, 30), (510.0, 30)]}

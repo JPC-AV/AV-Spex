@@ -199,3 +199,95 @@ def test_frozen_model():
     """Frozen 2026-11-12 for the confirmation sheet; a refit needs a new study round."""
     assert vdd.MODEL_THRESHOLD == 0.8608 and vdd.MODEL_BIAS == 0.746318
     assert _logit(2, 40) == pytest.approx(1.5650, abs=1e-3)
+
+
+# --- tape-level assessment over the analysis periods -----------------------------------------
+
+FPS = 30.0
+
+
+def _frame(index, start=0.0, dropout=False):
+    """A scanned frame; with `dropout`, one isolated streak that passes the filter and model."""
+    runs = [vdd.StreakRun(line=200, x=300, length=14, polarity="white", spatial=60, temporal=62,
+                          level=150, flatness=30.0, other_field=61)] if dropout else []
+    return vdd.FrameStreaks(index=index, time=start + index / FPS, runs=runs,
+                            n_runs=len(runs) * 2, candidate_pixels=40 if dropout else 0)
+
+
+def _fake_scan(per_period, short=(), fail=()):
+    """scan_video stand-in: `per_period` maps a period start to its number of dropout frames."""
+    def scan(video, width, height, fps, params, start=0.0, duration=None, check_cancelled=None):
+        if start in fail:
+            raise OSError("decode failed")
+        n = int(duration * fps) - 2
+        if start in short:
+            n //= 4
+        hits = per_period.get(start, 0)
+        step = max(1, n // max(1, hits)) if hits else 0
+        # spread the dropout frames out so no two fall inside the recurrence window
+        wanted = {i * step for i in range(hits)} if hits else set()
+        return iter([_frame(i, start, i in wanted) for i in range(n)])
+    return scan
+
+
+def _assess(per_period, periods=None, **kw):
+    periods = periods if periods is not None else [(s, 30) for s in (0.0, 100.0, 200.0, 300.0, 400.0, 500.0)]
+    return vdd.assess_periods("x.mkv", 720, 486, FPS, periods, scan=_fake_scan(per_period, **kw))
+
+
+def test_the_test_streak_is_one_the_filter_and_model_report():
+    frames = [_frame(i, dropout=(i == 50)) for i in range(100)]
+    hits = vdd.reported_frames(frames)
+    assert [f.index for f, _run, _logit in hits] == [50]
+
+
+def test_a_streak_that_recurs_in_place_is_not_reported():
+    """Recurrence is the filter's test for picture content: the same spot, frame after frame."""
+    frames = [_frame(i, dropout=True) for i in range(100)]
+    assert vdd.reported_frames(frames) == []
+
+
+def test_tape_with_dropout_in_every_period_is_flagged():
+    result = _assess({s: 10 for s in (0.0, 100.0, 200.0, 300.0, 400.0, 500.0)})   # ~20 a minute
+    assert result.status == vdd.STATUS_FLAGGED
+    assert result.median_per_minute >= vdd.TAPE_FLAG_MEDIAN_PER_MINUTE
+    assert result.reported_frames == 60 and len(result.periods) == 6
+    assert len(result.examples) == 6     # one per period, so the images are spread over the tape
+
+
+def test_one_busy_period_does_not_flag_a_tape():
+    """JPC_AV_02217: 76 a minute in one period, almost nothing in the rest."""
+    result = _assess({0.0: 38, 100.0: 1, 300.0: 2})
+    assert result.status == vdd.STATUS_NOT_FLAGGED
+    assert result.total_per_minute > result.median_per_minute
+    assert [e["period_start"] for e in result.examples] == [0.0, 100.0, 300.0]
+
+
+def test_clean_tape_is_not_flagged_and_has_no_examples():
+    result = _assess({})
+    assert result.status == vdd.STATUS_NOT_FLAGGED
+    assert result.median_per_minute == 0 and result.examples == []
+
+
+def test_no_periods_is_unknown_not_a_pass():
+    result = _assess({}, periods=[])
+    assert result.status == vdd.STATUS_UNKNOWN and result.median_per_minute is None
+
+
+def test_periods_that_cannot_be_decoded_are_unknown_not_a_pass():
+    every = (0.0, 100.0, 200.0, 300.0, 400.0, 500.0)
+    assert _assess({}, fail=every).status == vdd.STATUS_UNKNOWN
+    assert _assess({}, short=every).status == vdd.STATUS_UNKNOWN
+    # one unreadable period in six leaves under 90% of the frames: still not a verdict
+    assert _assess({}, fail=(0.0,)).status == vdd.STATUS_UNKNOWN
+
+
+def test_cancelling_returns_nothing():
+    result = vdd.assess_periods("x.mkv", 720, 486, FPS, [(0.0, 30)], scan=_fake_scan({}),
+                                check_cancelled=lambda: True)
+    assert result is None
+
+
+def test_frozen_tape_threshold():
+    """Set 2026-11-15 from the ten-tape skim; changing it needs fresh tapes to confirm."""
+    assert vdd.TAPE_FLAG_MEDIAN_PER_MINUTE == 15.0 and vdd.MIN_SCANNED_FRACTION == 0.9
