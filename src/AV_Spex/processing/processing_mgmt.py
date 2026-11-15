@@ -691,7 +691,38 @@ def _clams_region_is_bars(video_path, report_directory, video_id, start_seconds,
         append_ssim_csv=True,
         check_cancelled=check_cancelled,
     )
-    return bool(hits)
+    # The scan is padded by 2 s each side, so a run that sits only in the padding
+    # (the real bars just before a disputed span) says nothing about the span.
+    needed = min(1.0, (end_seconds - start_seconds) / 2.0)
+    return any(
+        min(hit_end, end_seconds) - max(hit_start, start_seconds) >= needed
+        for hit_start, hit_end in hits
+    )
+
+
+def _uncorroborated_pieces(span_start, span_end, clams_bars_spans):
+    """The parts of a qct-parse bars span that no CLAMS bars span covers.
+
+    A piece no longer than HEAD_END_AGREEMENT_SLACK that touches CLAMS coverage
+    is ordinary edge disagreement and is not returned.
+    """
+    pieces = [(span_start, span_end)]
+    for clams_start, clams_end in clams_bars_spans:
+        remaining = []
+        for lo, hi in pieces:
+            if clams_end <= lo or clams_start >= hi:
+                remaining.append((lo, hi))
+                continue
+            if clams_start > lo:
+                remaining.append((lo, clams_start))
+            if clams_end < hi:
+                remaining.append((clams_end, hi))
+        pieces = remaining
+    whole = pieces == [(span_start, span_end)]
+    return [
+        (lo, hi) for lo, hi in pieces
+        if hi > lo and (whole or hi - lo > HEAD_END_AGREEMENT_SLACK)
+    ]
 
 
 def merge_head_bars_consensus(
@@ -741,7 +772,14 @@ def merge_head_bars_consensus(
             # The detectors disagree on where the head bars end; let the SSIM
             # evidence over the disputed span decide.
             span_lo, span_hi = sorted((qctparse_head_end, clams_head_end))
-            verdict = region_is_bars(span_lo, span_hi)
+            ask_lo = span_lo
+            if qctparse_head_start is not None and qctparse_head_start > clams_head_end:
+                # qct-parse's "head" is a separate, later span, not a longer
+                # version of CLAMS' head bars. Judge that span on its own:
+                # the gap before it is claimed by neither detector, and the
+                # samples at the CLAMS end are bars and would confirm anything.
+                ask_lo = qctparse_head_start
+            verdict = region_is_bars(ask_lo, span_hi)
             if verdict is False:
                 merged_end = span_lo
                 logger.warning(
@@ -776,16 +814,40 @@ def merge_head_bars_consensus(
     # skipping a second of content costs little, while analysing bars as
     # content skews the results. Chroma-phase detection and access-file
     # trimming intentionally keep using only the head end time.
+    #
+    # qct-parse's luma thresholds also fire on short stretches of saturated
+    # graphics anywhere in the program, and can drag a real span's end across
+    # a slate. So when CLAMS ran, any part of a qct-parse span that CLAMS did
+    # not also call bars is put to the SSIM arbiter and removed if it is
+    # decisively not bars. No evidence (None) keeps the span.
+    clams_bars_spans = [
+        (span_start, span_end) for span_start, span_end, kind in clams_regions or []
+        if kind == "bars"
+    ]
     exclusion_spans = []
     for label, span_start, span_end in qctparse_all_regions or []:
         if span_start is None or span_end is None:
             continue
         if head_demoted and label in ("head", "head-relaxed"):
             continue
-        exclusion_spans.append((span_start, span_end))
-    for span_start, span_end, kind in clams_regions or []:
-        if kind == "bars":
-            exclusion_spans.append((span_start, span_end))
+        kept = [(span_start, span_end)]
+        if clams_ran:
+            for piece_lo, piece_hi in _uncorroborated_pieces(span_start, span_end, clams_bars_spans):
+                if region_is_bars(piece_lo, piece_hi) is not False:
+                    continue
+                logger.warning(
+                    f"qct-parse bars span {piece_lo:.1f}s-{piece_hi:.1f}s ({label}) is not "
+                    f"bars per CLAMS SSIM - not treating it as bars"
+                )
+                trimmed = []
+                for lo, hi in kept:
+                    if piece_lo > lo:
+                        trimmed.append((lo, min(hi, piece_lo)))
+                    if piece_hi < hi:
+                        trimmed.append((max(lo, piece_hi), hi))
+                kept = [(lo, hi) for lo, hi in trimmed if hi > lo]
+        exclusion_spans.extend(kept)
+    exclusion_spans.extend(clams_bars_spans)
 
     all_bars_regions = None
     if exclusion_spans:

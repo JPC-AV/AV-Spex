@@ -32,12 +32,12 @@ from AV_Spex.processing.processing_mgmt import (
 def consensus(qct_start=None, qct_end=None, qct_regions=None,
               clams_start=None, clams_end=None, clams_regions=None,
               clams_ran=True, verdict=None):
-    """Run the consensus with a fixed SSIM verdict."""
+    """Run the consensus with a fixed SSIM verdict, or a (lo, hi) -> verdict callable."""
     calls = []
 
     def arbiter(lo, hi):
         calls.append((lo, hi))
-        return verdict
+        return verdict(lo, hi) if callable(verdict) else verdict
 
     merged_end, demoted, regions = merge_head_bars_consensus(
         qctparse_head_start=qct_start,
@@ -218,7 +218,7 @@ def test_demoted_head_region_is_dropped_from_exclusions():
     _, demoted, regions, _ = consensus(
         qct_start=0.0, qct_end=60.0,
         qct_regions=[("head", 0.0, 60.0), ("additional-1", 300.0, 310.0)],
-        clams_ran=True, verdict=False)
+        clams_ran=True, verdict=lambda lo, hi: False if hi <= 60.0 else True)
     assert demoted is True
     assert regions == [(300.0, 310.0)], "the demoted head span is not excluded"
 
@@ -229,6 +229,65 @@ def test_head_relaxed_label_is_also_dropped_when_demoted():
         qct_regions=[("head-relaxed", 0.0, 60.0)],
         clams_ran=True, verdict=False)
     assert regions is None
+
+
+def test_additional_span_rejected_by_ssim_is_not_excluded():
+    """JPC_AV_02219 / 03802: a 2 s qct-parse span on program graphics, SSIM ~0.38."""
+    _, _, regions, calls = consensus(
+        qct_regions=[("additional-1", 462.2, 464.3)], clams_ran=True, verdict=False)
+    assert calls == [(462.2, 464.3)]
+    assert regions is None
+
+
+def test_additional_span_stands_on_inconclusive_evidence():
+    _, _, regions, _ = consensus(
+        qct_regions=[("additional-1", 462.2, 464.3)], clams_ran=True, verdict=None)
+    assert regions == [(462.2, 464.3)]
+
+
+def test_additional_span_is_not_arbitrated_when_clams_did_not_run():
+    _, _, regions, calls = consensus(
+        qct_regions=[("additional-1", 462.2, 464.3)], clams_ran=False, verdict=False)
+    assert calls == []
+    assert regions == [(462.2, 464.3)]
+
+
+def test_span_overrunning_clams_is_cut_back_when_ssim_rejects_the_overrun():
+    """JPC_AV_02216: qct-parse 1.2-21.1 s, CLAMS 1.0-12.0 s, the rest is a slate."""
+    _, _, regions, calls = consensus(
+        qct_regions=[("additional-1", 1.235, 21.088)],
+        clams_regions=[(1.001, 12.012, "bars")], verdict=False)
+    assert calls == [(12.012, 21.088)]
+    assert regions == [(1.001, 12.012)]
+
+
+def test_small_edge_disagreement_with_clams_is_not_arbitrated():
+    _, _, regions, calls = consensus(
+        qct_regions=[("head", 2.4, 46.6)],
+        clams_regions=[(3.0, 44.0, "bars")], verdict=False)
+    assert calls == []
+    assert regions == [(2.4, 46.6)]
+
+
+def test_late_head_label_rejected_by_ssim_is_not_excluded():
+    """JPC_AV_02216: qct-parse labels 30.2-34.3 s "head"; CLAMS has head bars to 12.0 s."""
+    merged_end, demoted, regions, _ = consensus(
+        qct_start=30.23, qct_end=34.268,
+        qct_regions=[("head", 30.23, 34.268), ("additional-1", 1.235, 21.088)],
+        clams_start=1.001, clams_end=12.012,
+        clams_regions=[(1.001, 12.012, "bars")], verdict=False)
+    assert merged_end == 12.012
+    assert regions == [(1.001, 12.012)]
+
+
+def test_separate_late_head_claim_is_judged_on_its_own_span():
+    """JPC_AV_03841: CLAMS head bars end at 24 s, qct-parse's "head" is 53.3-56.2 s. Asking
+    about 24-56.2 s let the bars samples at 24 s confirm it; the question is 53.3-56.2 s."""
+    merged_end, _, _, calls = consensus(
+        qct_start=53.3, qct_end=56.2, qct_regions=[("head", 53.3, 56.2)],
+        clams_start=23.0, clams_end=24.0, clams_regions=[(23.0, 24.0, "bars")], verdict=False)
+    assert calls[0] == (53.3, 56.2)
+    assert merged_end == 24.0
 
 
 def test_adjacent_spans_within_a_second_are_coalesced():
@@ -416,6 +475,20 @@ def test_region_is_bars_returns_none_when_cancelled(tmp_path):
     assert pm._clams_region_is_bars(
         "/v.mkv", str(tmp_path), "V1", 0.0, 10.0,
         check_cancelled=lambda: True) is None
+
+
+def test_verify_scan_hit_in_the_padding_does_not_confirm_the_span(tmp_path, monkeypatch):
+    """JPC_AV_02216: the padded verify scan re-found the real bars at 10-11.5 s and that
+    confirmed the disputed 12.0-34.3 s span, putting the head-bars end at 34.3 s."""
+    monkeypatch.setattr(pm.bars_detection_clams, "get_video_fps", lambda path: 29.97)
+    monkeypatch.setattr(pm, "run_clams_bars_detection", lambda **kw: [(10.0, 11.5)])
+    assert pm._clams_region_is_bars("/v.mkv", str(tmp_path), "V1", 12.012, 34.268) is False
+
+
+def test_verify_scan_hit_inside_the_span_confirms_it(tmp_path, monkeypatch):
+    monkeypatch.setattr(pm.bars_detection_clams, "get_video_fps", lambda path: 29.97)
+    monkeypatch.setattr(pm, "run_clams_bars_detection", lambda **kw: [(11.0, 20.0)])
+    assert pm._clams_region_is_bars("/v.mkv", str(tmp_path), "V1", 12.012, 34.268) is True
 
 
 # ---------------------------------------------------------------------------
