@@ -148,10 +148,13 @@ def det_chroma_phase(p, t):
 
 
 def det_bars(p, t):
-    """The consensus bars spans frame analysis excluded (bars_regions). A JSON without the key
-    had no consensus spans. Its color_bars_end_time is not used: it is an end with no start,
-    and frame analysis's own fallback can fill it in after the consensus rejected the claim."""
+    """The consensus bars spans frame analysis excluded (bars_regions). A JSON with a head-bars
+    end time but no span list cannot be scored: the end has no start, it may predate
+    bars_regions, and before the November 2026 fix frame analysis's own fallback could fill it
+    in after the consensus had rejected the claim. That is not_run, not "no bars"."""
     if not p.fa:
+        return None
+    if "bars_regions" not in p.fa and p.fa.get("color_bars_end_time"):
         return None
     return [(r["start"], r["end"]) for r in p.fa.get("bars_regions") or []]
 
@@ -325,7 +328,15 @@ def unjudged_events(run, truth, tolerance, name):
         if "_span" in row:
             spans.setdefault(row["video_id"], []).append(row["_span"])
     from AV_Spex.checks.qct_parse import _tc_format_timecode
+    import ledger
+    held = ledger.reserved(name)
+    skipped = sorted(held & set(packages(run)))
+    if skipped:
+        print(f"leaving out {len(skipped)} tape(s) held out for {name} (ledger.py): "
+              f"{', '.join(skipped)}", file=sys.stderr)
     for vid, path in packages(run).items():
+        if vid in held:
+            continue
         pkg = Package(path)
         timing = Timing(vid, (pkg.info.get("video") or {}).get("fps"))
         events = reported.get((name, vid))

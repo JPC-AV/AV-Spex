@@ -22,7 +22,10 @@
 #            for period replays; roughly 5-15% of the tape's real time per package)
 #   -i       Keep images (thumbnails, border/spectrogram pictures) as well
 #
-# Cycle options (passed through): -s DIR, -b GB, -r GB, -n. See cycle_avspex_batches.sh -h.
+# Cycle options (passed through): -s DIR, -b GB, -r GB, -w, -n. See cycle_avspex_batches.sh -h.
+# -w leaves the original packages untouched (nothing is written back); the corpus still gets
+# every sidecar. With -s on the same APFS volume as the sources, staging is a clone: instant
+# and free, so a whole drive can be collected without copying it.
 # AV Spex arguments after "--" are refused: they change the saved config behind the run ID's
 # back. Set the config first (-c, or av-spex -dr ...).
 #
@@ -48,7 +51,7 @@ while [ $# -gt 0 ]; do
         -i) export COLLECT_IMAGES=1; shift ;;
         -s) STAGING_DIR="$2"; PASS+=("$1" "$2"); shift 2 ;;
         -b|-r) PASS+=("$1" "$2"); shift 2 ;;
-        -h|--help) sed -n '3,36p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '3,38p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         --) echo "collect.sh: av-spex arguments are not allowed; set the config first (-c FILE)" >&2; exit 1 ;;
         *) PASS+=("$1"); shift ;;
     esac

@@ -31,6 +31,8 @@ runs/<run_id>/                        one directory per run
 cache/                                replay cache (see Replays)
 labels/                               label sheets and keys, seed labels, timecode.json
 truth/                                operator-confirmed cases per detector (see Scorecard)
+ledger.csv                            which tape was used for what (see Tape ledger)
+configs/                              AV Spex configs used for runs (baseline_checks.json)
 notes/                                study write-ups (by hand; no tool reads or writes it)
 studies/<date>_<slug>/                a study's plan, manifest and one-off scripts
 ```
@@ -143,6 +145,31 @@ python3 dev_tools/scorecard.py --check                    # validate the truth f
   add it to `DETECTORS`.
 - **Start timecodes** come from `labels/timecode.json`. A tape not listed there is read as
   starting at zero.
+
+## Tape ledger (dev vs held-out)
+
+A detector tuned and tested on the same tapes looks better than it is. `ledger.py` records every
+use of a tape, per topic (a detector or a study), in `$AVSPEX_CORPUS/ledger.csv`:
+
+```bash
+python3 dev_tools/ledger.py                          # per topic: dev / spent / reserved / fresh
+python3 dev_tools/ledger.py tapes --topic bars       # one line per tape
+python3 dev_tools/ledger.py fresh bars --run <run>   # tapes never used for bars (--untouched: for anything)
+python3 dev_tools/ledger.py draw bars 15 --run <run> # hold out 15 fresh tapes, picked by a recorded seed
+python3 dev_tools/ledger.py add bars dev 02213 02216 --source "bars retune" --note "..."
+python3 dev_tools/ledger.py check                    # validate; flag tapes that were dev before held out
+```
+
+- **dev**: someone looked at the tape's results for the topic (labeled, reviewed, tuned). It can
+  never again be a fair test of it. Tapes with rows in `truth/<detector>.csv` are dev for that
+  detector automatically; everything else needs a row.
+- **heldout**: set aside as a test, to be scored once against a frozen detector. Until a later
+  `dev` row says the test is over, the tape is **reserved** and `scorecard.py --unjudged / --sheet`
+  leaves it out. Afterwards it is **spent**: usable for development, never again as a test.
+- **The order that keeps a test fair**: `draw` the held-out tapes before looking at them, tune on
+  the rest, freeze, score the held-out tapes once, then `add ... dev` to release them.
+- Collecting a run does not use a tape. Looking at its results does: reviewing a new run's
+  `--unjudged` list makes every tape in it dev for that detector, so draw the held-out set first.
 
 ## Replays
 

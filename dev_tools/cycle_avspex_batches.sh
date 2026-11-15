@@ -21,6 +21,9 @@
 #   -r GB    Free space to keep in reserve on the local disk, GB (default: 10)
 #   -k KEY   Keep progress under <staging>/.avspex_cycle/KEY/ (collect.sh passes the run ID,
 #            so each code + config gets its own done list)
+#   -w       Do not write outputs back to the package's original location. The originals are
+#            left exactly as they were (use with collect.sh, where the corpus keeps the results,
+#            when the packages already hold outputs you want to keep, e.g. a vendor's)
 #   -n       Dry run: list the batches and exit
 #   -h       Help
 #
@@ -42,11 +45,12 @@ STAGING_DIR="$HOME/git/JPC_AV/sample_files/jpc"
 BATCH_GB=40
 RESERVE_GB=10
 DRY_RUN=0
+WRITE_BACK=1
 STATE_KEY=""
 AVSPEX_CMD="${AVSPEX_CMD:-av-spex}"
 DEFAULT_SOURCES=(/Volumes/EXT2_EXF/george_blood /Volumes/EXT2_EXF/media_burn)
 
-usage() { sed -n '3,39p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '3,42p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 # ------------------------------------------------------------- arguments ---
 ORIG_ARGS=("$@")
@@ -59,6 +63,7 @@ while [ $# -gt 0 ]; do
         -r) RESERVE_GB="$2"; shift 2 ;;
         -k) STATE_KEY="$2"; shift 2 ;;
         -n) DRY_RUN=1; shift ;;
+        -w) WRITE_BACK=0; shift ;;
         -h|--help) usage 0 ;;
         --) shift; AVSPEX_ARGS=("$@"); break ;;
         -*) echo "Unknown option: $1" >&2; usage 1 ;;
@@ -123,7 +128,13 @@ copy_in() {
     local name="$1" src="$2" dest="$STAGING_DIR/$1"
     log "  copying in  $name  ($src)"
     rm -f "$MARKERS/$name"
-    cp -Rp $CP_NOXATTR "$src" "$STAGING_DIR/" 2>>"$LOG_FILE" || { log "  ! copy failed: $name"; return 1; }
+    # Staging on the same volume as the source (macOS): clone instead of copying. On APFS
+    # that is instant and takes no extra space. cp refuses -c together with -X.
+    local how="$CP_NOXATTR"
+    if [ "$(uname)" = "Darwin" ] && [ "$(stat -f %d "$src")" = "$(stat -f %d "$STAGING_DIR")" ]; then
+        how="-c"
+    fi
+    cp -Rp $how "$src" "$STAGING_DIR/" 2>>"$LOG_FILE" || { log "  ! copy failed: $name"; return 1; }
     local a b
     a=$(tree_bytes "$src"); b=$(tree_bytes "$dest")
     if [ "$a" != "$b" ]; then
@@ -136,6 +147,10 @@ copy_in() {
 # Copy files created/modified since the marker back to the external.
 copy_back() {
     local name="$1" src_dir="$2" local_dir="$STAGING_DIR/$1" n=0 rc=0 rel f
+    if [ "$WRITE_BACK" -eq 0 ]; then
+        log "  not writing back (-w): $src_dir left as it was"
+        return 0
+    fi
     log "  copying back new/updated files for $name"
     while IFS= read -r -d '' f; do
         rel="${f#$local_dir/}"
