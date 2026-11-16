@@ -1,0 +1,6 @@
+# These files only ever grow by rows appended at the end. A union merge keeps both sides'
+# new rows, so two people adding verdicts never produce a conflict. After a merge, run
+# `avspex-dev doctor`: it validates the truth files and the ledger.
+ledger.csv            merge=union
+truth/*.csv           merge=union
+labels/events_*.csv   merge=union

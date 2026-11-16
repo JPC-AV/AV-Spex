@@ -42,7 +42,7 @@ smoothing (so single field lines stay sharp), above the whole frame at half size
 Before an image is written, the three frames are re-decoded and re-scanned; a candidate whose
 run is not found again is reported (it means the seek landed on the wrong frame).
 
-    python3 dev_tools/dropout_sheet.py period-study-2026-10 --name pilot1 \\
+    avspex-dev dropout sheet period-study-2026-10 --name pilot1 \\
         --tapes JPC_AV_02213 JPC_AV_03801 JPC_AV_03802 JPC_AV_03806 JPC_AV_02319 JPC_AV_03796
 """
 import argparse

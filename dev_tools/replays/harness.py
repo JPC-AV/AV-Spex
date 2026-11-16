@@ -9,9 +9,9 @@ the app. Only the second is a problem, so wanted drift is recorded in the run's
 expected_drift.json with the periods the tape gets now. A recorded tape counts as `expected`
 while it keeps those periods; if it moves again it is UNEXPECTED, like any other mismatch.
 
-    python3 dev_tools/replays/harness.py RUN                                # status per tape
-    python3 dev_tools/replays/harness.py RUN --accept JPC_AV_02211 --reason "tail-static gate (22a2c20)"
-    python3 dev_tools/replays/harness.py RUN --forget JPC_AV_02211          # drop an entry
+    avspex-dev replay harness RUN                                # status per tape
+    avspex-dev replay harness RUN --accept JPC_AV_02211 --reason "tail-static gate (22a2c20)"
+    avspex-dev replay harness RUN --forget JPC_AV_02211          # drop an entry
 
 --accept records a tape's current periods with the reason, the date and the code it was
 replayed under. Accept only drift you have looked at and can explain. An entry for a tape that

@@ -9,8 +9,8 @@ composite score and family scores today, whether today's selection (replayed at 
 --duration, default the app's 6 x 30) covers it, and the bin's whole-file active-area ground
 truth when the package has it.
 
-    python3 dev_tools/replays/bin_table.py RUN [RUN ...] [--out bins.csv]
-    python3 dev_tools/replays/bin_table.py period-study-2026-10 --screen [--screen-out screen.csv]
+    avspex-dev replay bin-table RUN [RUN ...] [--out bins.csv]
+    avspex-dev replay bin-table period-study-2026-10 --screen [--screen-out screen.csv]
 
 --screen adds the unsupervised screen: for every tag statistic and direction, across the
 analyzable bins of every package,

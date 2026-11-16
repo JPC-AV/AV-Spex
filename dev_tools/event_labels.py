@@ -7,8 +7,8 @@ version control: every saved verdict rewrites the whole file. The CSV holds ever
 operator typed and is what the corpus repository tracks. The workbook stays the form to fill
 in. Run this after each labeling session, before committing the corpus:
 
-    python3 dev_tools/event_labels.py            # every workbook
-    python3 dev_tools/event_labels.py confirm1   # just one
+    avspex-dev dropout export            # every workbook
+    avspex-dev dropout export confirm1   # just one
 
 Rows are written as they are, blank ones included, so the CSV diff shows exactly what a
 session changed. A verdict that is not on the list is reported, not dropped.

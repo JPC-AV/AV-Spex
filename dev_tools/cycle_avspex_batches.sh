@@ -13,10 +13,10 @@
 # can't leave a package half-moved.
 #
 # Usage:
-#   ./cycle_avspex_batches.sh [options] [SOURCE_DIR ...] [-- AV_SPEX_ARGS ...]
+#   ./cycle_avspex_batches.sh [options] SOURCE_DIR ... [-- AV_SPEX_ARGS ...]
 #
 # Options:
-#   -s DIR   Local staging dir   (default: $HOME/git/JPC_AV/sample_files/jpc)
+#   -s DIR   Local staging dir   (default: $AVSPEX_STAGING; one of the two is required)
 #   -b GB    Max batch size, GB  (default: 40)
 #   -r GB    Free space to keep in reserve on the local disk, GB (default: 10)
 #   -k KEY   Keep progress under <staging>/.avspex_cycle/KEY/ (collect.sh passes the run ID,
@@ -27,12 +27,12 @@
 #   -n       Dry run: list the batches and exit
 #   -h       Help
 #
-# SOURCE_DIRs are searched recursively for folders named JPC_AV_<digits>.
-# Default sources: /Volumes/EXT2_EXF/george_blood /Volumes/EXT2_EXF/media_burn
+# SOURCE_DIRs are searched recursively for folders named JPC_AV_<digits>. At least one is
+# required.
 #
 # Anything after "--" is passed to av-spex, e.g.
-#   ./cycle_avspex_batches.sh -- --profile step1
-#   ./cycle_avspex_batches.sh /Volumes/EXT2_APFS/jpc -- --off mediatrace
+#   ./cycle_avspex_batches.sh -s ~/staging /Volumes/DRIVE/jpc -- --profile step1
+#   ./cycle_avspex_batches.sh -s ~/staging /Volumes/DRIVE/jpc -- --off mediatrace
 #
 # Re-running is safe: completed packages are listed in
 # <staging>/.avspex_cycle[/KEY]/done.txt and skipped. Delete a line there to redo one.
@@ -41,14 +41,13 @@
 # with CYCLE_SOURCE set to the package's original path.
 
 # ---------------------------------------------------------------- settings ---
-STAGING_DIR="$HOME/git/JPC_AV/sample_files/jpc"
+STAGING_DIR="${AVSPEX_STAGING:-}"
 BATCH_GB=40
 RESERVE_GB=10
 DRY_RUN=0
 WRITE_BACK=1
 STATE_KEY=""
 AVSPEX_CMD="${AVSPEX_CMD:-av-spex}"
-DEFAULT_SOURCES=(/Volumes/EXT2_EXF/george_blood /Volumes/EXT2_EXF/media_burn)
 
 usage() { sed -n '3,42p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
@@ -70,7 +69,8 @@ while [ $# -gt 0 ]; do
         *)  SOURCES+=("${1%/}"); shift ;;
     esac
 done
-[ ${#SOURCES[@]} -eq 0 ] && SOURCES=("${DEFAULT_SOURCES[@]}")
+[ ${#SOURCES[@]} -eq 0 ] && { echo "No SOURCE_DIR given." >&2; usage 1; }
+[ -z "$STAGING_DIR" ] && { echo "No staging directory: pass -s DIR or set AVSPEX_STAGING." >&2; exit 1; }
 
 # Keep the Mac awake for the whole run (macOS only).
 if [ "$DRY_RUN" -eq 0 ] && [ -z "$CYCLE_CAFFEINATED" ] && command -v caffeinate >/dev/null 2>&1; then

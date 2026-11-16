@@ -9,7 +9,7 @@
 #      over the crop frame analysis used, while the video is still local,
 #   4. copies the sidecars the run wrote into the corpus run directory (corpus.py).
 #
-# Expects COLLECT_RUN_ID (set by collect.sh). CYCLE_SOURCE (set by the cycle script) is
+# Expects COLLECT_RUN_ID (set by collect.sh or by `avspex-dev collect`). CYCLE_SOURCE (set by the cycle script) is
 # recorded as the package's original location. Exits with av-spex's exit code.
 
 PKG="${1%/}"
@@ -36,7 +36,8 @@ avspex_s=$(( $(date +%s) - started ))
 
 GT_JSON=""
 if [ $rc -eq 0 ] && [ "${COLLECT_GROUND_TRUTH:-0}" = "1" ]; then
-    corpus_root="${AVSPEX_CORPUS:-$HOME/git/JPC_AV/avspex_corpus}"
+    [ -n "${AVSPEX_CORPUS:-}" ] || eval "$("$PY" "$HERE/corpus.py" env)"
+    corpus_root="$AVSPEX_CORPUS"
     gt_dir="$corpus_root/runs/$RUN_ID/packages/$(basename "$PKG")/ground_truth"
     mkdir -p "$gt_dir"
     JSON="$PKG/${NAME}_qc_metadata/${NAME}_enhanced_frame_analysis.json"

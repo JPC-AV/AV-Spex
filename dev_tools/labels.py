@@ -5,7 +5,7 @@ labels.py: operator labels, their schema, loading and checks.
 label_sheet.py writes sheets and tag_weights.py scores against them; both read labels through
 this module, so they agree on what is labeled. Run it on its own after editing a sheet:
 
-    python3 dev_tools/labels.py
+    avspex-dev labels
 
 It prints every problem, then each damage mode's counts, and exits 1 on an error. The tools run
 the same check when they load labels and stop at an error.
@@ -273,7 +273,7 @@ def load(directory=None):
     errors = sum(p.level == "error" for p in problems)
     if errors:
         sys.exit(f"{errors} error(s) in the label sheets; fix them and rerun "
-                 f"(python3 dev_tools/labels.py lists them)")
+                 f"(avspex-dev labels lists them)")
     return labels
 
 

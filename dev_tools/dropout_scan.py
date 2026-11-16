@@ -19,8 +19,8 @@ replays/_selection.py from the package's QCTools report), recorded so later step
 without loading the report again. A tape whose scan.json matches the current code and params is
 skipped unless --force.
 
-    python3 dev_tools/dropout_scan.py period-study-2026-10 \\
-        ~/git/JPC_AV/sample_files/jpc/JPC_AV_02213/JPC_AV_02213.mkv ... [-j 6]
+    avspex-dev dropout scan period-study-2026-10 \\
+        /path/to/JPC_AV_02213/JPC_AV_02213.mkv ... [-j 6]
 
 Videos are matched to packages by the video ID in their file name.
 """

@@ -7,8 +7,13 @@ $AVSPEX_CORPUS/truth/.
     scorecard.py RUN --detector audio_dropout
     scorecard.py RUN --compare RUN_B          truth rows whose outcome differs between two runs
     scorecard.py RUN --unjudged bars          what the detector reported that no truth row covers
-    scorecard.py RUN --sheet review.xlsx      every detector's unjudged events, as a form to fill in
+    scorecard.py RUN --sheet [review.xlsx]    every detector's unjudged events, as a form to fill in
+                                              (default: truth/review_<run>_<reviewer>_<date>.xlsx)
     scorecard.py --import-sheet review.xlsx   append the verdicts you filled in to truth/
+
+RUN is a run ID, a unique prefix of one, or `latest`. Left out, it is `latest`: the most
+recently collected run whose sidecars are on this machine. The same commands through the
+front door: avspex-dev score / sheet / import-sheet.
     scorecard.py RUN --sheet t.xlsx --heldout --detector bars
                                               the held-out test form: only the tapes ledger.py
                                               reserves for the detector, clean tapes included
@@ -56,7 +61,8 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from aggregate import Package  # noqa: E402
-from corpus import CORPUS, resolve_run  # noqa: E402
+from corpus import CORPUS, require_sidecars, resolve_run  # noqa: E402
+import settings  # noqa: E402
 
 TRUTH = CORPUS / "truth"
 COLUMNS = ("video_id", "tc_in", "tc_out", "verdict", "source", "note")
@@ -69,10 +75,17 @@ BAD = ("MISS", "FALSE_ALARM")
 class Timing:
     """What turns a tape's timecode into elapsed seconds: frame rate, start timecode and
     drop-frame flag. The start timecode comes from labels/timecode.json (filled by
-    label_sheet.py --probe and dropout_sheet.py); a tape not listed there starts at zero."""
+    label_sheet.py --probe and dropout_sheet.py, and where a correction by hand goes); for a
+    tape not listed there, from what the collection recorded in package.json; a tape with
+    neither starts at zero."""
     _cache = None
 
-    def __init__(self, vid, fps):
+    @classmethod
+    def for_package(cls, pkg):
+        video = pkg.info.get("video") or {}
+        return cls(pkg.vid, video.get("fps"), video.get("start_timecode"))
+
+    def __init__(self, vid, fps, start_timecode=None):
         from AV_Spex.checks.qct_parse import _tc_parse_start_timecode
         if Timing._cache is None:
             try:
@@ -82,7 +95,8 @@ class Timing:
         entry = Timing._cache.get(vid) or {}
         self.fps = fps or entry.get("fps") or 29.97
         self.known = vid in Timing._cache
-        self.start_frames, self.drop = _tc_parse_start_timecode(entry.get("start_timecode"),
+        self.start_frames, self.drop = _tc_parse_start_timecode(entry.get("start_timecode") if self.known
+                                                                else start_timecode,
                                                                 max(1, round(self.fps)))
 
     def seconds(self, text):
@@ -252,7 +266,7 @@ def score(run, truth, tolerance):
                 continue
             if vid not in loaded:
                 pkg = Package(pkgs[vid])
-                loaded[vid] = (pkg, Timing(vid, (pkg.info.get("video") or {}).get("fps")))
+                loaded[vid] = (pkg, Timing.for_package(pkg))
             pkg, timing = loaded[vid]
             if (name, vid) not in reported:
                 try:
@@ -346,7 +360,7 @@ def unjudged_events(run, truth, tolerance, name, heldout=False):
         if (vid in held) != heldout:
             continue
         pkg = Package(path)
-        timing = Timing(vid, (pkg.info.get("video") or {}).get("fps"))
+        timing = Timing.for_package(pkg)
         events = reported.get((name, vid))
         if events is None and (name, vid) not in reported:
             events = DETECTORS[name](pkg, timing)
@@ -374,12 +388,47 @@ def unjudged(run, truth, tolerance, name):
 
 
 SHEET_COLUMNS = ("detector", "video_id", "tc_in", "tc_out", "seconds", "verdict", "note", "video")
+SHEET_INSTRUCTIONS = (
+    ("What this is", "Each row is something a detector reported that nobody has judged yet. Open the video, "
+                     "go to the timecode and decide whether the detector was right."),
+    ("tc_in / tc_out", "The file's own timecode, as your NLE or player shows it for this file (drop-frame "
+                       "timecodes have a ';' before the frames). Blank on both means the whole tape."),
+    ("verdict: present", "The thing the detector names is really there in this span."),
+    ("verdict: absent", "You looked and it is not there: a false alarm."),
+    ("verdict: blank", "Not judged. Leave a row blank when you did not check it or cannot tell; it stays "
+                       "unjudged and will come up again on a later sheet. A blank is never counted against "
+                       "the detector."),
+    ("note", "Anything that explains the verdict: what you saw or heard instead, or that the event is real "
+             "but the span is off."),
+    ("Something missed", "To record an event the detector did not report, add a row: detector, video_id, "
+                         "tc_in, tc_out, verdict present."),
+    ("Do not change", "detector, video_id, tc_in and tc_out on the rows already here. They are how the verdict "
+                      "finds its way back."),
+    ("When done", "Save, then run: avspex-dev import-sheet <this file>. It appends your verdicts to the truth "
+                  "files in the corpus; commit and push the corpus afterwards."),
+    ("Detectors", "audio_dropout: the audio falls silent mid-program. audible_timecode: timecode (LTC) audible "
+                  "on an audio channel. tone_leak: 1 kHz reference tone leaking into program audio. "
+                  "chroma_phase: colour (hue) error. bars: a colour-bars passage. duplicate_frames: a run of "
+                  "repeated frames. dropped_samples: an audio splice or digital-silence gap."),
+)
+
+
+def default_sheet_path(run):
+    """truth/review_<run>_<reviewer>_<date>.xlsx, numbered if that name is taken."""
+    import datetime
+    who = re.sub(r"[^A-Za-z0-9]+", "-", settings.reviewer()).strip("-") or "reviewer"
+    stem = f"review_{run.name}_{who}_{datetime.date.today().isoformat()}"
+    path, n = TRUTH / f"{stem}.xlsx", 1
+    while path.exists():
+        n += 1
+        path = TRUTH / f"{stem}_{n}.xlsx"
+    return path
 
 
 def write_sheet(run, truth, tolerance, names, dest, heldout=False):
     """One workbook of every unjudged event, with a verdict dropdown, for an operator to fill in."""
     import openpyxl
-    from openpyxl.styles import Font
+    from openpyxl.styles import Alignment, Font
     from openpyxl.worksheet.datavalidation import DataValidation
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -399,10 +448,21 @@ def write_sheet(run, truth, tolerance, names, dest, heldout=False):
         ws.column_dimensions[col].width = width
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
+    info = wb.create_sheet("instructions")
+    info.column_dimensions["A"].width = 20
+    info.column_dimensions["B"].width = 110
+    for term, text in SHEET_INSTRUCTIONS:
+        info.append((term, text))
+    for row in info.iter_rows():
+        row[0].font = Font(bold=True)
+        for c in row:
+            c.alignment = Alignment(vertical="top", wrap_text=True)
+    Path(dest).parent.mkdir(parents=True, exist_ok=True)
     wb.save(dest)
-    print(f"{sum(counts.values())} unjudged event(s) -> {dest}")
+    print(f"{sum(counts.values())} unjudged event(s) from {run.name} -> {dest}")
     for name in names:
         print(f"    {name:<18} {counts[name]:>4}")
+    print(f"Fill in the verdict column (see the instructions tab), then: avspex-dev import-sheet {dest}")
 
 
 def import_sheet(src, truth):
@@ -412,7 +472,7 @@ def import_sheet(src, truth):
     ws = openpyxl.load_workbook(src, read_only=True)["unjudged"]
     rows = ws.iter_rows(values_only=True)
     header = [str(h or "") for h in next(rows)]
-    source = f"operator review {datetime.date.today().isoformat()}, {Path(src).name}"
+    source = f"{settings.reviewer()} review {datetime.date.today().isoformat()}, {Path(src).name}"
     have = {(n, r["video_id"], r["tc_in"], r["tc_out"]) for n, rs in truth.items() for r in rs}
     add, odd, blank = {}, [], 0
     for i, r in enumerate(rows, start=2):
@@ -454,7 +514,9 @@ def main():
     ap.add_argument("--detector", action="append", help="only this detector (repeatable)")
     ap.add_argument("--compare", metavar="RUN_B", help="show truth rows whose outcome differs in RUN_B")
     ap.add_argument("--unjudged", metavar="DETECTOR", help="list reported events no truth row covers")
-    ap.add_argument("--sheet", metavar="XLSX", help="write every unjudged event to a workbook to fill in")
+    ap.add_argument("--sheet", metavar="XLSX", nargs="?", const="",
+                    help="write every unjudged event to a workbook to fill in "
+                         "(default: truth/review_<run>_<reviewer>_<date>.xlsx)")
     ap.add_argument("--heldout", action="store_true",
                     help="with --sheet: only the tapes the ledger holds out for each detector "
                          "(the form for scoring a held-out test)")
@@ -482,20 +544,25 @@ def main():
     if args.import_sheet:
         import_sheet(args.import_sheet, truth)
         return
+    run = resolve_run(args.run or "latest")
+    require_sidecars(run)
     if not args.run:
-        ap.error("RUN is required (see corpus.py list)")
-    if not truth and not (args.unjudged or args.sheet):
-        sys.exit(f"no truth files in {TRUTH}")
-    run = resolve_run(args.run)
+        print(f"run: {run.name} (latest)", file=sys.stderr)
+    if not truth and not (args.unjudged or args.sheet is not None):
+        sys.exit(f"no truth files in {TRUTH}: nothing has been judged yet. Start with "
+                 f"avspex-dev sheet {run.name}")
 
     if args.unjudged:
         unjudged(run, truth, args.tolerance, args.unjudged)
         return
-    if args.sheet:
-        write_sheet(run, truth, args.tolerance, args.detector or list(DETECTORS), args.sheet, args.heldout)
+    if args.sheet is not None:
+        write_sheet(run, truth, args.tolerance, args.detector or list(DETECTORS),
+                    args.sheet or default_sheet_path(run), args.heldout)
         return
     if args.compare:
-        compare(run, resolve_run(args.compare), truth, args.tolerance)
+        other = resolve_run(args.compare)
+        require_sidecars(other)
+        compare(run, other, truth, args.tolerance)
         return
     results, _ = score(run, truth, args.tolerance)
     print_report(run, results)

@@ -19,9 +19,12 @@ run_id = <commit>[-d<src diff hash>]-c<config hash>. The same code and config al
 the same run directory, so re-running a batch resumes it, and any code or config change
 starts a new one rather than overwriting the old results.
 
-Subcommands (collect.sh calls most of these; you will mostly use `list`):
+Subcommands (collect.sh calls most of these; you will mostly use `list`, which is
+`avspex-dev runs`):
 
-    corpus.py list                              runs, labels and package counts
+    corpus.py list                              runs, labels, package counts, and whether each
+                                                run's sidecars are on this machine
+    corpus.py env                               shell exports of the corpus and staging paths
     corpus.py init-run [--label L]              write run.json for the current code + config
     corpus.py run-id                            print the run ID the current code + config map to
     corpus.py check-run RUN_ID                  fail if code or config drifted from RUN_ID
@@ -42,9 +45,13 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import settings  # noqa: E402
+
 REPO = Path(__file__).resolve().parent.parent
-CORPUS = Path(os.environ.get("AVSPEX_CORPUS", Path.home() / "git/JPC_AV/avspex_corpus")).expanduser()
+CORPUS = settings.corpus()
 RUNS = CORPUS / "runs"
+PACKAGE_NAME = re.compile(r"JPC_AV_\d+")
 
 # Sidecars worth keeping. Media, HTML reports and images are excluded by default: they are
 # most of the bytes and nothing downstream reads them (pass --images to keep pictures).
@@ -122,11 +129,15 @@ def init_run(label=None):
     run_dir = RUNS / run_id
     (run_dir / "packages").mkdir(parents=True, exist_ok=True)
     run_json = run_dir / "run.json"
+    # Sessions go to an untracked log, not run.json: two people collecting into the same run
+    # would otherwise both edit one tracked file.
+    with open(run_dir / "sessions.log", "a") as fh:
+        fh.write(f"{_now()}\t{platform.node()}\n")
     if run_json.exists():
         info = json.loads(run_json.read_text())
-        if label and label not in info.setdefault("labels", []):
-            info["labels"].append(label)
-        info.setdefault("sessions", []).append(_now())
+        if not label or label in info.setdefault("labels", []):
+            return run_id
+        info["labels"].append(label)
     else:
         try:
             from importlib.metadata import version
@@ -137,7 +148,6 @@ def init_run(label=None):
             "run_id": run_id,
             "labels": [label] if label else [],
             "created": _now(),
-            "sessions": [_now()],
             **{k: v for k, v in code.items() if not k.startswith("_")},
             "config_hash": config["config_hash"],
             "avspex_version": avspex_version,
@@ -189,10 +199,15 @@ def find_video(pkg, vid):
 
 
 def video_properties(video):
-    """As frame analysis saw them (probe_video_properties), so replays need no video."""
+    """As frame analysis saw them (probe_video_properties), so replays need no video. The
+    start timecode is kept too, so timecodes on review sheets match the NLE without a
+    separate probe of the video later."""
     from AV_Spex.checks.frame_analysis import probe_video_properties
+    from AV_Spex.utils import ffprobe_probe
     props = probe_video_properties(str(video)) or {}
-    return {k: props.get(k) for k in ("width", "height", "fps", "total_frames", "duration")}
+    out = {k: props.get(k) for k in ("width", "height", "fps", "total_frames", "duration")}
+    out["start_timecode"] = ffprobe_probe.start_timecode(str(video))
+    return out
 
 
 def qctools_report(pkg_dir, vid):
@@ -268,6 +283,7 @@ def collect_package(run_id, pkg, started=None, log_offset=0, exit_code=None, avs
         "frame_analysis_seconds": frame_analysis_seconds(out / log_rel),
         "ground_truth": ground_truth,
         "collected": _now(),
+        "host": platform.node(),
         "files": sorted(files),
     }
     _write_json(out / "package.json", info)
@@ -299,6 +315,21 @@ def done(run_id):
             yield info["folder"]
 
 
+def discover_packages(sources):
+    """Package folders (named JPC_AV_<digits>) under these directories; a source that is
+    itself a package counts as one. Trash folders are skipped."""
+    pkgs = []
+    for src in (Path(s).expanduser() for s in sources):
+        if not src.is_dir():
+            sys.exit(f"source not found (drive mounted?): {src}")
+        if PACKAGE_NAME.fullmatch(src.name):
+            pkgs.append(src)
+            continue
+        pkgs += sorted(d for d in src.rglob("JPC_AV_*") if d.is_dir() and PACKAGE_NAME.fullmatch(d.name)
+                       and not {"$RECYCLE.BIN", ".Trashes"} & set(d.parts))
+    return pkgs
+
+
 # ------------------------------------------------------------------- import ---
 
 def import_existing(sources, run_id, label, images=False):
@@ -312,11 +343,7 @@ def import_existing(sources, run_id, label, images=False):
         _write_json(run_dir / "run.json", {"run_id": run_id, "labels": [label] if label else [],
                                            "created": _now(), "imported": True,
                                            "commit": None, "config_hash": None})
-    pkgs = []
-    for src in map(Path, sources):
-        pkgs += [src] if re.fullmatch(r"JPC_AV_\d+", src.name) else sorted(
-            d for d in src.rglob("JPC_AV_*") if d.is_dir() and re.fullmatch(r"JPC_AV_\d+", d.name))
-    for pkg in pkgs:
+    for pkg in discover_packages(sources):
         vid = package_id(pkg)
         qc = pkg / f"{vid}_qc_metadata"
         if not (qc / f"{vid}_enhanced_frame_analysis.json").exists():
@@ -355,13 +382,74 @@ def _write_json(path, data):
     os.replace(tmp, path)
 
 
+def _packages(run_dir):
+    out = []
+    for pj in sorted((Path(run_dir) / "packages").glob("*/package.json")):
+        try:
+            out.append((pj.parent, json.loads(pj.read_text())))
+        except ValueError:
+            pass
+    return out
+
+
+def has_sidecars(run_dir):
+    """False when the run is here as records only: its package.json files came with the
+    corpus repository, but the sidecars they list were collected on another machine and are
+    not tracked. A run with no packages, or whose records list no files, counts as local."""
+    listed = [(d, info["files"][0]) for d, info in _packages(run_dir) if info.get("files")]
+    return not listed or any((d / rel).exists() for d, rel in listed)
+
+
+def run_hosts(run_dir):
+    """Machines that collected this run, from the packages, else from run.json."""
+    hosts = {info["host"] for _, info in _packages(run_dir) if info.get("host")}
+    if not hosts:
+        try:
+            host = json.loads((Path(run_dir) / "run.json").read_text()).get("host")
+            hosts = {host} if host else set()
+        except (OSError, ValueError):
+            pass
+    return sorted(hosts)
+
+
+def require_sidecars(run_dir):
+    """Stop with an explanation rather than report every detector as not run."""
+    if not has_sidecars(run_dir):
+        where = ", ".join(run_hosts(run_dir)) or "another machine"
+        sys.exit(f"{Path(run_dir).name}: this run was collected on {where}; its sidecars are not on "
+                 f"this machine (the corpus repository tracks only the records). Collect the tapes "
+                 f"here, or copy runs/{Path(run_dir).name}/packages/ over from that machine.")
+
+
+def latest_run():
+    """The most recently collected run whose sidecars are on this machine."""
+    best = None
+    for run_dir in RUNS.iterdir() if RUNS.exists() else []:
+        if not (run_dir / "run.json").exists() or not has_sidecars(run_dir):
+            continue
+        pkgs = _packages(run_dir)
+        if not pkgs:
+            continue
+        when = max(info.get("collected") or "" for _, info in pkgs)
+        if best is None or when > best[0]:
+            best = (when, run_dir)
+    if best is None:
+        sys.exit(f"no run with sidecars on this machine in {CORPUS} (avspex-dev collect makes one)")
+    return best[1]
+
+
 def resolve_run(arg):
+    """A run directory from a path, a run ID, a unique prefix of one, or 'latest'."""
     p = Path(arg).expanduser()
     if (p / "run.json").exists():
         return p
+    if not CORPUS.exists():
+        sys.exit(f"no corpus at {CORPUS} ({settings.corpus_source()}); run avspex-dev setup")
+    if arg == "latest":
+        return latest_run()
     hits = [d for d in RUNS.glob(f"{arg}*") if (d / "run.json").exists()] if RUNS.exists() else []
     if not hits:
-        sys.exit(f"{arg}: no such run (see corpus.py list)")
+        sys.exit(f"{arg}: no such run (see avspex-dev runs)")
     if len(hits) > 1:
         sys.exit(f"{arg}: ambiguous, matches {', '.join(h.name for h in hits)}")
     return hits[0]
@@ -378,6 +466,7 @@ def find_packages(args, require=None):
             pkgs.append(p)
             continue
         run = resolve_run(arg)
+        require_sidecars(run)
         pkgs.extend(sorted(pj.parent for pj in (run / "packages").glob("*/package.json")))
     if require:
         missing = [d.name for d in pkgs if not (d / require).exists()]
@@ -397,16 +486,18 @@ def list_runs():
         if not rj.exists():
             continue
         info = json.loads(rj.read_text())
-        pkgs = list((run_dir / "packages").glob("*/package.json"))
-        ok = sum(json.loads(p.read_text()).get("avspex_exit") == 0 for p in pkgs)
+        pkgs = _packages(run_dir)
+        ok = sum(p.get("avspex_exit") == 0 for _, p in pkgs)
+        where = "local" if has_sidecars(run_dir) else "records only"
         print(f"{info['run_id']:<32} {info.get('created', ''):<20} {ok:>3}/{len(pkgs):<3} packages  "
-              f"{', '.join(info.get('labels') or [])}")
+              f"{where:<13} {', '.join(info.get('labels') or [])}")
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list")
+    sub.add_parser("env")
     p = sub.add_parser("init-run")
     p.add_argument("--label")
     sub.add_parser("run-id")
@@ -439,6 +530,11 @@ def main():
 
     if args.cmd == "list":
         list_runs()
+    elif args.cmd == "env":
+        import shlex
+        print(f"export AVSPEX_CORPUS={shlex.quote(str(CORPUS))}")
+        if settings.staging():
+            print(f"export AVSPEX_STAGING={shlex.quote(str(settings.staging()))}")
     elif args.cmd == "init-run":
         print(init_run(args.label))
     elif args.cmd == "run-id":

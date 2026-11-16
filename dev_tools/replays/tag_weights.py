@@ -3,8 +3,8 @@
 tag_weights.py: score QCTools tags, and period-selection scoring configurations, against
 operator labels (label_sheet.py).
 
-    python3 dev_tools/replays/tag_weights.py period-study-2026-10 [--out-dir DIR]
-    python3 dev_tools/replays/tag_weights.py period-study-2026-10 --damage tape --stake
+    avspex-dev replay tag-weights period-study-2026-10 [--out-dir DIR]
+    avspex-dev replay tag-weights period-study-2026-10 --damage tape --stake
 
 Labels: read and checked by labels.py (every labels/sheet_*.csv through its key, plus
 labels/seed_labels.csv); an error in a sheet stops the run. Unfilled rows are unlabeled and
@@ -522,7 +522,7 @@ def main():
                 w.writerow([n, f"{b:.0f}", ";".join(cs), ";".join(sorted(set(cs.values())))])
         n_open = sum(r["verdict"] == "open" for r in rows)
         print(f"\n{n_open} configuration(s) open; {len(open_bins)} bins could change a verdict -> {path}"
-              + (f"\n  label them: python3 dev_tools/label_sheet.py <run> --bins {path} --name <name>"
+              + (f"\n  label them: avspex-dev label-sheet <run> --bins {path} --name <name>"
                  if open_bins else ""))
 
 

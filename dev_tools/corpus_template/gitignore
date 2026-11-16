@@ -1,0 +1,17 @@
+# Tracked: labels (CSV + keys), truth, the ledger, studies, notes, and each run's records.
+# Not tracked: anything rebuilt from the tapes or from code.
+.DS_Store
+cache/
+out/
+
+# Sidecars and scan caches: large, and re-collectable. Keep only the run and package records.
+runs/*/packages/*/*
+!runs/*/packages/*/package.json
+runs/*/sessions.log
+
+# Label workbooks embed their images; `avspex-dev dropout export` writes the verdicts to CSV.
+labels/events_*.xlsx
+labels/events_*_images/
+
+# Excel lock files
+~$*

@@ -65,6 +65,8 @@ namespaces = false
 
 [project.optional-dependencies]
 test = ["pytest"]
+# dev_tools/ (not shipped): review workbooks need openpyxl
+dev = ["pytest", "openpyxl"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
