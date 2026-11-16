@@ -269,6 +269,38 @@ def test_run_clams_bars_detection_stop_after_one_breaks_after_first_run(monkeypa
     assert runs[0] == (0.0, 4.0)  # first run only
 
 
+def test_run_clams_bars_detection_release_threshold_holds_a_run_through_a_dip(monkeypatch, tmp_path):
+    """JPC_AV_04179: bars at 0.71 against a 0.70 threshold, one sample at 0.67."""
+    scores = [0.1, 0.71, 0.71, 0.67, 0.71, 0.71, 0.3, 0.1]
+    _patch_cv2_and_reference(monkeypatch, scores)
+    monkeypatch.setattr(bd, "get_video_fps", lambda _p: 1.0)
+    runs = bd.run_clams_bars_detection(
+        "/v.mkv", str(tmp_path), "video_x", threshold=0.7, sample_ratio=1,
+        stop_at_frame=8, min_frame_count=2, stop_after_one=True, release_threshold=0.6)
+    assert runs == [(1.0, 6.0)]
+
+
+def test_run_clams_bars_detection_without_release_threshold_the_dip_ends_the_run(monkeypatch, tmp_path):
+    scores = [0.1, 0.71, 0.71, 0.71, 0.67, 0.71, 0.71, 0.3]
+    _patch_cv2_and_reference(monkeypatch, scores)
+    monkeypatch.setattr(bd, "get_video_fps", lambda _p: 1.0)
+    runs = bd.run_clams_bars_detection(
+        "/v.mkv", str(tmp_path), "video_x", threshold=0.7, sample_ratio=1,
+        stop_at_frame=8, min_frame_count=2, stop_after_one=True)
+    assert runs == [(1.0, 4.0)]
+
+
+def test_run_clams_bars_detection_release_threshold_does_not_open_a_run(monkeypatch, tmp_path):
+    """Scores between the two thresholds continue a run but never start one."""
+    scores = [0.65, 0.65, 0.65, 0.65, 0.65, 0.65]
+    _patch_cv2_and_reference(monkeypatch, scores)
+    monkeypatch.setattr(bd, "get_video_fps", lambda _p: 1.0)
+    runs = bd.run_clams_bars_detection(
+        "/v.mkv", str(tmp_path), "video_x", threshold=0.7, sample_ratio=1,
+        stop_at_frame=6, min_frame_count=2, stop_after_one=False, release_threshold=0.6)
+    assert runs == []
+
+
 def test_run_clams_bars_detection_in_progress_run_flushed_at_end(monkeypatch, tmp_path):
     """If the loop ends while still in a run, the run should be appended."""
     scores = [0.0, 1.0, 1.0, 1.0, 1.0]  # in-run from frame 1 onward, never drops

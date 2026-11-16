@@ -1025,6 +1025,11 @@ def process_qctools_output(video_path, source_directory, destination_directory, 
             stop_at_frame=bars_params.stop_at_frame,
             min_frame_count=bars_params.min_frame_count,
             stop_after_one=bars_params.stop_after_one,
+            # Degraded bars can sit right at the threshold; one sample dipping
+            # under it used to end the run (JPC_AV_04179: 0.71, one 0.67 at
+            # 12 s, bars to 27 s). Once open, a run holds down to the relaxed
+            # threshold. False spans on the judged tapes score 0.46 or less.
+            release_threshold=min(SECONDARY_BARS_THRESHOLD, bars_params.threshold),
             fps=fps,
             pass_label="primary",
             check_cancelled=check_cancelled,
