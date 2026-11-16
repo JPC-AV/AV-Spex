@@ -19,6 +19,8 @@ Also:
     avspex-dev ledger ...              which tape was used for what; held-out draws    (ledger.py)
     avspex-dev labels                  validate the bin label sheets                   (labels.py)
     avspex-dev label-sheet RUN ...     build a bin label sheet                         (label_sheet.py)
+    avspex-dev replay detector [RUN]   re-run the QCTools-report detectors from a run's sidecars and
+                                       score them: minutes, no tapes needed            (replays/detector.py)
     avspex-dev replay NAME ...         harness | period-grid | bin-table | tag-weights (replays/)
     avspex-dev dropout NAME ...        scan | sheet | export                           (dropout_*.py, event_labels.py)
     avspex-dev corpus ...              run-id, import, and what collect calls          (corpus.py)
@@ -56,8 +58,9 @@ SCRIPTS = {
     "corpus": ("corpus.py", []),
 }
 GROUPS = {
-    "replay": {"harness": "replays/harness.py", "period-grid": "replays/period_grid.py",
-               "bin-table": "replays/bin_table.py", "tag-weights": "replays/tag_weights.py"},
+    "replay": {"detector": "replays/detector.py", "harness": "replays/harness.py",
+               "period-grid": "replays/period_grid.py", "bin-table": "replays/bin_table.py",
+               "tag-weights": "replays/tag_weights.py"},
     "dropout": {"scan": "dropout_scan.py", "sheet": "dropout_sheet.py", "export": "event_labels.py"},
 }
 TOOLS = ("av-spex", "ffmpeg", "ffprobe", "qcli", "mediainfo", "exiftool", "mediaconch")

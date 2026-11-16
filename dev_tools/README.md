@@ -211,6 +211,7 @@ with the same arguments, so the script form still works.
 | `ledger ...` | Which tape was used for what; held-out draws | `ledger.py` |
 | `labels` | Validate the bin label sheets | `labels.py` |
 | `label-sheet RUN ...` | Build a bin label sheet | `label_sheet.py` |
+| `replay detector [RUN]` | Re-run bars, chroma phase, audio dropout and audible timecode from a run's sidecars under the current code, and score them: minutes, no tapes needed ([replays](docs/replays.md#detector-replay)) | `replays/detector.py` |
 | `replay harness\|period-grid\|bin-table\|tag-weights ...` | Offline replays of period selection | `replays/*.py` |
 | `dropout scan\|sheet\|export ...` | Video dropout study tools | `dropout_scan.py`, `dropout_sheet.py`, `event_labels.py` |
 | `corpus ...` | `run-id`, `import`, and the pieces `collect` calls | `corpus.py` |

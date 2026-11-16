@@ -449,6 +449,9 @@ def resolve_run(arg):
         return latest_run()
     hits = [d for d in RUNS.glob(f"{arg}*") if (d / "run.json").exists()] if RUNS.exists() else []
     if not hits:
+        # Detector replays (replays/detector.py) are run-like directories kept outside runs/
+        hits = [d for d in (CORPUS / "out" / "replays").glob(f"{arg}*") if (d / "run.json").exists()]
+    if not hits:
         sys.exit(f"{arg}: no such run (see avspex-dev runs)")
     if len(hits) > 1:
         sys.exit(f"{arg}: ambiguous, matches {', '.join(h.name for h in hits)}")

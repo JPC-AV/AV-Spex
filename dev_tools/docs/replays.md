@@ -50,3 +50,52 @@ itself, so changing any of them rebuilds it. Each package directory keeps one en
 under a new key deletes the old one.
 `bin_table.py --no-cache` bypasses it. With a warm cache, a replay of the whole study run takes
 seconds.
+
+## Detector replay
+
+`avspex-dev replay detector` answers "what would this change to a detector do?" without a
+collect. It re-runs the detectors that read the QCTools report, under the code as it is now,
+from the sidecars a run kept, then scores the result against the confirmed cases. The whole
+106-tape baseline run takes about two minutes on eight cores; a collect of it takes most of a
+day.
+
+```bash
+avspex-dev replay detector                                  # latest run, all four detectors
+avspex-dev replay detector --detector bars --truth-only     # the fast loop while tuning
+avspex-dev replay detector --tapes JPC_AV_02678 -v          # one tape, listing what changed
+```
+
+- **What is replayed.** `bars`, `chroma_phase`, `audio_dropout`, `audible_timecode`. The replay
+  calls the real `run_qctparse()` on the stored report and the real
+  `merge_head_bars_consensus()`, so a change anywhere in those is picked up, wiring included.
+- **What is frozen.** CLAMS reads the video, so its bars and tone spans and its SSIM scores are
+  read back from the run. **A change to the CLAMS detectors, or to how
+  `process_qctools_output()` runs them, is not replayed**: collect again for that. The bars
+  arbiter uses the recorded SSIM scores; if a change makes it ask about a span they do not
+  cover, it scans the video when the drive is mounted, and otherwise says so and keeps the span
+  (no evidence is not a rejection).
+- **What cannot be replayed.** `tone_leak`, `duplicate_frames` and `dropped_samples` read the
+  video itself.
+- **Config.** The run's saved config, not the one AV Spex has saved now. Nothing is saved.
+- **The check that makes it believable.** "Reproduces the run?" counts the tapes whose events
+  come back identical. Under the code the run was collected with it must be all of them (it is,
+  for `bd5014b-cb355033`: chroma phase, audio dropout and audible timecode reproduce on every
+  tape). After a change it is the list of tapes the change moved.
+- **Reading the result.** Truth rows are the measurement: `better` and `WORSE` rows are what the
+  change did to confirmed cases. An *unjudged* event that is no longer reported may be a fix or
+  a new miss; `-v` lists those so they can be reviewed.
+- **Held-out tapes** are replayed (computing is not looking) but left out of everything printed
+  for the detector they are reserved for.
+- **Where it goes.** `out/replays/replay-<run>-<code>/` in the corpus, untracked. `<code>` is
+  the commit plus a hash of uncommitted `src/` changes, so each state of the code gets its own
+  replay and re-running skips tapes already done (`--force` redoes them; use it after editing
+  the replay itself, which is outside `src/`). The directory is run-like, so the other tools
+  take its name wherever they take a run:
+
+  ```bash
+  avspex-dev score replay-bd5014b-cb355033-e26018a --detector bars
+  avspex-dev sheet replay-bd5014b-cb355033-e26018a --heldout --detector bars   # held-out test form
+  ```
+
+A confirmed fix still ends with a held-out test on tapes nobody tuned against. The replay makes
+the tuning loop fast; it does not replace that test.
