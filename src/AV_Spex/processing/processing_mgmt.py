@@ -700,6 +700,24 @@ def _clams_region_is_bars(video_path, report_directory, video_id, start_seconds,
     )
 
 
+def _extend_head_run_starts(primary_runs, relaxed_runs):
+    """Pull the start of each primary head run back to the start of the relaxed run it sits in.
+
+    Bars that score a hair under the primary threshold for most of their length
+    and over it only near the end (JPC_AV_03841: 0.69-0.70 from 7 s, primary run
+    23-25 s) are otherwise reported as their last second. Ends are left alone:
+    the primary pass already holds its end down to the relaxed threshold.
+    """
+    extended = []
+    for start, end in primary_runs:
+        if start < HEAD_BARS_START_THRESHOLD:
+            for relaxed_start, relaxed_end in relaxed_runs:
+                if relaxed_start < start and relaxed_end >= start:
+                    start = relaxed_start
+        extended.append((start, end))
+    return extended
+
+
 def _uncorroborated_pieces(span_start, span_end, clams_bars_spans):
     """The parts of a qct-parse bars span that no CLAMS bars span covers.
 
@@ -1061,6 +1079,24 @@ def process_qctools_output(video_path, source_directory, destination_directory, 
         # CLAMS candidate to work with.
         head_bars_second_pass = []
         primary_has_head = any(s < HEAD_BARS_START_THRESHOLD for s, _ in primary_bars)
+        if primary_has_head and fps and fps > 0:
+            # Same replay, used the other way: a primary head run may be only the
+            # tail of bars that sit just under the primary threshold.
+            relaxed_hits = bars_detection_clams.runs_from_recorded_scores(
+                report_directory, video_id,
+                threshold=SECONDARY_BARS_THRESHOLD,
+                max_frame=int(CLAMS_HEAD_RESCAN_SECONDS * fps),
+                min_frame_count=bars_params.min_frame_count,
+                fps=fps,
+            )
+            extended = _extend_head_run_starts(primary_bars, relaxed_hits)
+            if extended != primary_bars:
+                logger.info(
+                    f"CLAMS bars head: relaxed threshold moves the start from "
+                    f"{primary_bars[0][0]:.1f}s to {extended[0][0]:.1f}s"
+                )
+                primary_bars = extended
+                results['clams_bars_start_time'] = primary_bars[0][0]
         if not primary_has_head and fps and fps > 0:
             head_hits = bars_detection_clams.runs_from_recorded_scores(
                 report_directory, video_id,

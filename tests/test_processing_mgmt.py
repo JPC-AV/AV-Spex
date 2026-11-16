@@ -492,6 +492,27 @@ def test_verify_scan_hit_inside_the_span_confirms_it(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# _extend_head_run_starts
+# ---------------------------------------------------------------------------
+
+def test_head_run_start_moves_back_to_the_relaxed_run():
+    """JPC_AV_03841: primary 23-25 s is the tail of bars the relaxed threshold sees from 7 s."""
+    assert pm._extend_head_run_starts([(23.0, 25.0)], [(7.0, 25.0)]) == [(7.0, 25.0)]
+
+
+def test_head_run_end_is_not_extended():
+    assert pm._extend_head_run_starts([(4.0, 12.0)], [(4.0, 30.0)]) == [(4.0, 12.0)]
+
+
+def test_relaxed_run_that_ends_before_the_primary_run_is_ignored():
+    assert pm._extend_head_run_starts([(23.0, 25.0)], [(2.0, 9.0)]) == [(23.0, 25.0)]
+
+
+def test_run_outside_the_head_window_is_not_extended():
+    assert pm._extend_head_run_starts([(100.0, 120.0)], [(90.0, 120.0)]) == [(100.0, 120.0)]
+
+
+# ---------------------------------------------------------------------------
 # find_qctools_report
 # ---------------------------------------------------------------------------
 
