@@ -9,6 +9,9 @@ $AVSPEX_CORPUS/truth/.
     scorecard.py RUN --unjudged bars          what the detector reported that no truth row covers
     scorecard.py RUN --sheet review.xlsx      every detector's unjudged events, as a form to fill in
     scorecard.py --import-sheet review.xlsx   append the verdicts you filled in to truth/
+    scorecard.py RUN --sheet t.xlsx --heldout --detector bars
+                                              the held-out test form: only the tapes ledger.py
+                                              reserves for the detector, clean tapes included
     scorecard.py RUN --out scorecard.csv      one row per truth row, with its outcome
     scorecard.py --check                      validate the truth files only
 
@@ -317,8 +320,13 @@ def compare(run_a, run_b, truth, tolerance):
     print(f"\n{len(changed)} of {len(a)} truth rows changed outcome")
 
 
-def unjudged_events(run, truth, tolerance, name):
-    """Yield (video_id, tc_in, tc_out, seconds, source_dir) for each reported event no truth row covers."""
+def unjudged_events(run, truth, tolerance, name, heldout=False):
+    """Yield (video_id, tc_in, tc_out, seconds, source_dir) for each reported event no truth row covers.
+
+    heldout=True turns the selection round: only the tapes reserved for this detector in the
+    ledger, which is the sheet for scoring its held-out test. A reserved tape where the
+    detector ran and reported nothing gets one row with no span (the whole tape), so the
+    operator can confirm it is clean or add what was missed."""
     if name not in DETECTORS:
         sys.exit(f"no detector named {name!r} (have: {', '.join(DETECTORS)})")
     rows = truth.get(name, [])
@@ -331,22 +339,26 @@ def unjudged_events(run, truth, tolerance, name):
     import ledger
     held = ledger.reserved(name)
     skipped = sorted(held & set(packages(run)))
-    if skipped:
+    if skipped and not heldout:
         print(f"leaving out {len(skipped)} tape(s) held out for {name} (ledger.py): "
               f"{', '.join(skipped)}", file=sys.stderr)
     for vid, path in packages(run).items():
-        if vid in held:
+        if (vid in held) != heldout:
             continue
         pkg = Package(path)
         timing = Timing(vid, (pkg.info.get("video") or {}).get("fps"))
         events = reported.get((name, vid))
         if events is None and (name, vid) not in reported:
             events = DETECTORS[name](pkg, timing)
+        video = str(Path(pkg.info.get("source") or "") / (pkg.info.get("video_file") or ""))
+        if heldout and events is None:
+            print(f"{name}: did not run on held-out tape {vid}; not on the sheet", file=sys.stderr)
+        if heldout and events == []:
+            yield vid, "", "", "", video
         if not events:
             continue
         covered = spans.get(vid, [])
         tc = lambda x: _tc_format_timecode(x, timing.fps, timing.start_frames, timing.drop)
-        video = str(Path(pkg.info.get("source") or "") / (pkg.info.get("video_file") or ""))
         for s, e in sorted(set(events)):
             if not any(s <= c[1] + tolerance and e >= c[0] - tolerance for c in covered):
                 yield vid, tc(s), tc(e), round(e - s, 2), video
@@ -364,7 +376,7 @@ def unjudged(run, truth, tolerance, name):
 SHEET_COLUMNS = ("detector", "video_id", "tc_in", "tc_out", "seconds", "verdict", "note", "video")
 
 
-def write_sheet(run, truth, tolerance, names, dest):
+def write_sheet(run, truth, tolerance, names, dest, heldout=False):
     """One workbook of every unjudged event, with a verdict dropdown, for an operator to fill in."""
     import openpyxl
     from openpyxl.styles import Font
@@ -377,7 +389,7 @@ def write_sheet(run, truth, tolerance, names, dest):
         c.font = Font(bold=True)
     counts = Counter()
     for name in names:
-        for vid, tc_in, tc_out, secs, video in unjudged_events(run, truth, tolerance, name):
+        for vid, tc_in, tc_out, secs, video in unjudged_events(run, truth, tolerance, name, heldout):
             ws.append((name, vid, tc_in, tc_out, secs, "", "", video))
             counts[name] += 1
     dv = DataValidation(type="list", formula1='"%s"' % ",".join(VERDICTS), allow_blank=True)
@@ -443,6 +455,9 @@ def main():
     ap.add_argument("--compare", metavar="RUN_B", help="show truth rows whose outcome differs in RUN_B")
     ap.add_argument("--unjudged", metavar="DETECTOR", help="list reported events no truth row covers")
     ap.add_argument("--sheet", metavar="XLSX", help="write every unjudged event to a workbook to fill in")
+    ap.add_argument("--heldout", action="store_true",
+                    help="with --sheet: only the tapes the ledger holds out for each detector "
+                         "(the form for scoring a held-out test)")
     ap.add_argument("--import-sheet", metavar="XLSX", help="append a filled-in workbook's verdicts to truth/")
     ap.add_argument("--tolerance", type=float, default=1.0, help="seconds of slack either side of a span")
     ap.add_argument("--out", help="write one CSV row per truth row")
@@ -477,7 +492,7 @@ def main():
         unjudged(run, truth, args.tolerance, args.unjudged)
         return
     if args.sheet:
-        write_sheet(run, truth, args.tolerance, args.detector or list(DETECTORS), args.sheet)
+        write_sheet(run, truth, args.tolerance, args.detector or list(DETECTORS), args.sheet, args.heldout)
         return
     if args.compare:
         compare(run, resolve_run(args.compare), truth, args.tolerance)

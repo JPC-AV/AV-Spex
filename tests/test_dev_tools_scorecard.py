@@ -275,6 +275,17 @@ def test_unjudged_leaves_out_tapes_held_out_for_that_detector(corpus):
     assert [vid for vid, _, _ in unjudged(run, "bars")] == [A]
 
 
+def test_heldout_lists_only_reserved_tapes_and_a_whole_tape_row_for_a_clean_one(corpus):
+    run = package(corpus, A, fa={"bars_regions": [{"start": 1.0, "end": 20.0}]})
+    package(corpus, B, fa={"bars_regions": [{"start": 2.0, "end": 32.032}]})
+    package(corpus, C, fa={"bars_regions": []})
+    ledger.append([{"video_id": v, "topic": "bars", "role": "heldout", "date": "2026-11-14",
+                    "source": "", "note": ""} for v in (B, C)])
+    rows = [(vid, tc_in, tc_out) for vid, tc_in, tc_out, _, _ in
+            scorecard.unjudged_events(run, scorecard.load_truth()[0], 1.0, "bars", heldout=True)]
+    assert sorted(rows) == [(B, "00:00:02:00", "00:00:32:00"), (C, "", "")]
+
+
 # --------------------------------------------------------------------- sheet ---
 
 def fill(sheet, verdicts):
