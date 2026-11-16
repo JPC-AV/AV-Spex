@@ -11,8 +11,8 @@ real period selection for every grid point:
 It then scores the chosen periods against the whole-file active-area signalstats pass. No
 video is decoded: everything comes from the QCTools report and the package's sidecars.
 
-    python3 dev_tools/replays/period_grid.py RUN [RUN ...] [--out grid.csv]
-    python3 dev_tools/replays/period_grid.py period-study-2026-10 --counts 3,6,8 --durations 30,60
+    avspex-dev replay period-grid RUN [RUN ...] [--out grid.csv]
+    avspex-dev replay period-grid period-study-2026-10 --counts 3,6,8 --durations 30,60
 
 RUN is a run ID (or unique prefix), a run directory, or a single corpus package directory.
 Packages without ground truth are skipped. Results: one CSV row per (package, count, duration),

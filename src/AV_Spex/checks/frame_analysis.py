@@ -32,6 +32,8 @@ import matplotlib.patches as patches
 from AV_Spex.utils.log_setup import logger, report_ffmpeg_stderr
 from AV_Spex.utils import ffprobe_probe
 from AV_Spex.checks import dropped_sample_detection, duplicate_frame_detection
+from AV_Spex.checks import video_dropout_detection
+from AV_Spex.checks.video_dropout_detection import VideoDropoutResult
 from AV_Spex.checks import frame_analysis_report
 from AV_Spex.checks.qctools_bin_profile import (
     PROFILE_BIN_SIZE, BinProfile, BinProfiler,
@@ -4738,6 +4740,17 @@ class EnhancedFrameAnalysis:
             color_bars_end_time=color_bars_end_time,
         )
 
+    def _assess_video_dropout(self, periods) -> Optional[VideoDropoutResult]:
+        """Rate of reported dropout frames inside the analysis periods, as a tape-level
+        flag. See checks/video_dropout_detection.py; None only when cancelled."""
+        result = video_dropout_detection.assess_periods(
+            str(self.video_path), self.width, self.height, self.fps, periods,
+            check_cancelled=self.check_cancelled,
+        )
+        if result is not None:
+            logger.info(f"  {result.message}")
+        return result
+
     def _detect_duplicate_frames(
         self,
         color_bars_end_time: Optional[float] = None,
@@ -5097,6 +5110,8 @@ class EnhancedFrameAnalysis:
             'signalstats': signalstats_enabled,
             'dropped_sample_detection': dropped_sample_enabled,
             'duplicate_frame_detection': duplicate_frame_enabled,
+            'video_dropout': self._is_step_enabled(
+                getattr(frame_config, 'enable_video_dropout_detection', False)),
         }
 
         # Step 0: Bitplane check — verify 9th and 10th bits are not empty
@@ -5111,23 +5126,20 @@ class EnhancedFrameAnalysis:
         ], results, signals):
             return results
 
-        # Step 1: Detect color bars (always run if skip_color_bars is True, as it's a prerequisite)
-        if skip_color_bars:
-            if color_bars_end_time is None:
-                color_bars_end_time = self._detect_color_bars_duration()
-                # Only log if we detected color bars via fallback (not already passed in)
-                if color_bars_end_time > 0:
-                    logger.info(f"Color bars detected, ending at {color_bars_end_time:.1f}s\n")
-            if color_bars_end_time > 0:
-                results['color_bars_end_time'] = color_bars_end_time
-
-        # No bars detected arrives as None. With skip_color_bars off, None was
-        # never replaced, and period selection formats it as a number and the
-        # BRNG fallback adds to it — a TypeError that process_frame_analysis
-        # caught, silently discarding the whole frame analysis. Every consumer
-        # treats 0 as "no bars", so normalize once here.
+        # Step 1: Head color bars. The end time is the caller's to decide: in
+        # the pipeline it is the qct-parse/CLAMS consensus, and None means
+        # "no head bars" — including a qct-parse claim the consensus rejected.
+        # This used to fall back to re-reading the qct-parse durations CSV,
+        # which revived exactly those rejected claims (and read the span's
+        # start as its end), so BRNG/signalstats skipped real program. Every
+        # consumer treats 0 as "no bars", so normalize once here; left as
+        # None, period selection formats it as a number and the BRNG fallback
+        # adds to it — a TypeError that process_frame_analysis caught,
+        # silently discarding the whole frame analysis.
         if color_bars_end_time is None:
             color_bars_end_time = 0
+        if skip_color_bars and color_bars_end_time > 0:
+            results['color_bars_end_time'] = color_bars_end_time
 
         # Period selection (QCTools violations + suggested periods) is only
         # needed for the video-frame analysis steps. Dropped sample detection
@@ -5823,6 +5835,10 @@ class EnhancedFrameAnalysis:
             )
             return asdict(result) if result else None
 
+        def _run_video_dropout():
+            result = self._assess_video_dropout(_final_analysis_periods(results))
+            return asdict(result) if result else None
+
         if not self._run_analysis_steps([
             AnalysisStep(
                 key='dropped_sample_detection',
@@ -5838,6 +5854,15 @@ class EnhancedFrameAnalysis:
                 enabled=duplicate_frame_enabled,
                 run=_run_duplicate_frames,
                 skip_message="Skipping duplicate frame detection (disabled in config)\n",
+            ),
+            AnalysisStep(
+                key='video_dropout',
+                label='Video Dropout',
+                enabled=self._is_step_enabled(
+                    getattr(frame_config, 'enable_video_dropout_detection', False)),
+                run=_run_video_dropout,
+                start_message="Starting video dropout assessment of the analysis periods...",
+                skip_message="Skipping video dropout assessment (disabled in config)\n",
             ),
         ], results, signals):
             return results
@@ -5876,36 +5901,6 @@ class EnhancedFrameAnalysis:
         
         return results
 
-    def _detect_color_bars_duration(self) -> float:
-        """Detect color bars duration from video or QCTools report"""
-        # First check if qct-parse already detected color bars
-        report_dir = self.video_path.parent / f"{self.video_id}_report_csvs"
-        colorbars_csv = report_dir / "qct-parse_colorbars_durations.csv"
-        
-        if colorbars_csv.exists():
-            import csv
-            try:
-                with open(colorbars_csv, 'r') as f:
-                    reader = csv.reader(f)
-                    rows = list(reader)
-                    if len(rows) >= 2 and "color bars found" in rows[0][0]:
-                        # Parse end timestamp
-                        end_str = rows[1][1] if len(rows[1]) > 1 else None
-                        if end_str:
-                            # Convert timestamp to seconds
-                            parts = end_str.split(':')
-                            if len(parts) == 3:
-                                hours = int(parts[0])
-                                minutes = int(parts[1])
-                                seconds = float(parts[2])
-                                return hours * 3600 + minutes * 60 + seconds
-            except Exception as e:
-                logger.warning(f"Could not parse color bars CSV: {e}")
-        
-        # If no qct-parse data, could implement direct detection here
-        # For now, return 0 to indicate no color bars detected
-        return 0
-    
     def _is_meaningful_improvement(self, previous: BRNGAnalysisResult, 
                               current: BRNGAnalysisResult,
                               previous_area: Tuple = None,

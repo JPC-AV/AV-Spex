@@ -2,6 +2,8 @@
 #
 # collect.sh: run AV Spex over many packages and keep the results in the developer corpus.
 #
+# This is the staged form, for packages on a slow or read-only drive: `avspex-dev collect`
+# without --stage runs AV Spex on the packages where they are and needs none of this.
 # Wraps cycle_avspex_batches.sh (which shuttles packages from the external drives to local
 # disk in batches) and, for each package, runs av-spex and copies the sidecars it wrote into
 # $AVSPEX_CORPUS/runs/<run_id>/packages/<folder>/ (see corpus.py). The run ID comes from the
@@ -12,7 +14,7 @@
 #     than mixing two setups under one ID.
 #
 # Usage:
-#   dev_tools/collect.sh [collect options] [cycle options] [SOURCE_DIR ...]
+#   dev_tools/collect.sh [collect options] [cycle options] SOURCE_DIR ...
 #
 # Collect options:
 #   -c FILE  Import this AV Spex config first (av-spex --import-config FILE). Otherwise the
@@ -22,20 +24,26 @@
 #            for period replays; roughly 5-15% of the tape's real time per package)
 #   -i       Keep images (thumbnails, border/spectrogram pictures) as well
 #
-# Cycle options (passed through): -s DIR, -b GB, -r GB, -n. See cycle_avspex_batches.sh -h.
+# Cycle options (passed through): -s DIR, -b GB, -r GB, -w, -n. See cycle_avspex_batches.sh -h.
+# The staging directory is -s DIR, else $AVSPEX_STAGING, else the one saved by avspex-dev setup.
+# -w leaves the original packages untouched (nothing is written back); the corpus still gets
+# every sidecar. With -s on the same APFS volume as the sources, staging is a clone: instant
+# and free, so a whole drive can be collected without copying it.
 # AV Spex arguments after "--" are refused: they change the saved config behind the run ID's
 # back. Set the config first (-c, or av-spex -dr ...).
 #
 # Examples:
-#   dev_tools/collect.sh -l "baseline" /Volumes/EXT2_EXF/george_blood /Volumes/EXT2_EXF/media_burn
-#   dev_tools/collect.sh -c ~/configs/study.json -g -l "period study" /Volumes/EXT2_APFS/jpc
+#   dev_tools/collect.sh -s ~/staging -l "baseline" /Volumes/DRIVE/vendor_a /Volumes/DRIVE/vendor_b
+#   dev_tools/collect.sh -c ~/configs/study.json -g -l "period study" /Volumes/DRIVE/jpc
 #
 # Packages with the same folder name in two sources must go in separate invocations (the cycle
 # script refuses duplicates); they share the run, so the second invocation skips them.
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PY="${COLLECT_PYTHON:-python3}"
-STAGING_DIR="$HOME/git/JPC_AV/sample_files/jpc"
+# Corpus and staging paths come from one place (settings.py); the environment wins.
+eval "$("$PY" "$HERE/corpus.py" env)" || exit 1
+STAGING_DIR="${AVSPEX_STAGING:-}"
 LABEL=""
 CONFIG=""
 PASS=()
@@ -46,13 +54,20 @@ while [ $# -gt 0 ]; do
         -l) LABEL="$2"; shift 2 ;;
         -g) export COLLECT_GROUND_TRUTH=1; shift ;;
         -i) export COLLECT_IMAGES=1; shift ;;
-        -s) STAGING_DIR="$2"; PASS+=("$1" "$2"); shift 2 ;;
+        -s) STAGING_DIR="$2"; shift 2 ;;
         -b|-r) PASS+=("$1" "$2"); shift 2 ;;
-        -h|--help) sed -n '3,36p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '3,41p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         --) echo "collect.sh: av-spex arguments are not allowed; set the config first (-c FILE)" >&2; exit 1 ;;
         *) PASS+=("$1"); shift ;;
     esac
 done
+
+if [ -z "$STAGING_DIR" ]; then
+    echo "collect.sh: no staging directory. Pass -s DIR, or use 'avspex-dev collect SOURCE...'" >&2
+    echo "            to run AV Spex on the packages where they are." >&2
+    exit 1
+fi
+PASS=(-s "$STAGING_DIR" ${PASS[@]+"${PASS[@]}"})
 
 if [ -n "$CONFIG" ]; then
     av-spex --import-config "$CONFIG" >/dev/null || { echo "could not import $CONFIG" >&2; exit 1; }
@@ -60,7 +75,7 @@ fi
 
 RUN_ID=$("$PY" "$HERE/corpus.py" init-run ${LABEL:+--label "$LABEL"}) || exit 1
 export COLLECT_RUN_ID="$RUN_ID"
-echo "Run: $RUN_ID  (corpus: ${AVSPEX_CORPUS:-$HOME/git/JPC_AV/avspex_corpus})"
+echo "Run: $RUN_ID  (corpus: $AVSPEX_CORPUS)"
 
 # The corpus is the record of what is done; make the cycle script's done list agree with it.
 STATE="${STAGING_DIR%/}/.avspex_cycle/$RUN_ID"
@@ -73,5 +88,5 @@ done
 AVSPEX_CMD="$HERE/collect_one.sh" "$HERE/cycle_avspex_batches.sh" -k "$RUN_ID" ${PASS[@]+"${PASS[@]}"}
 rc=$?
 echo "Run $RUN_ID: $("$PY" "$HERE/corpus.py" done "$RUN_ID" | grep -c .) package(s) collected"
-echo "Aggregate with: python3 $HERE/aggregate.py $RUN_ID"
+echo "Next: avspex-dev sheet $RUN_ID   (review workbook)   or   avspex-dev table $RUN_ID"
 exit $rc

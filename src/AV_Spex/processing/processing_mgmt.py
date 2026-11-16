@@ -691,7 +691,56 @@ def _clams_region_is_bars(video_path, report_directory, video_id, start_seconds,
         append_ssim_csv=True,
         check_cancelled=check_cancelled,
     )
-    return bool(hits)
+    # The scan is padded by 2 s each side, so a run that sits only in the padding
+    # (the real bars just before a disputed span) says nothing about the span.
+    needed = min(1.0, (end_seconds - start_seconds) / 2.0)
+    return any(
+        min(hit_end, end_seconds) - max(hit_start, start_seconds) >= needed
+        for hit_start, hit_end in hits
+    )
+
+
+def _extend_head_run_starts(primary_runs, relaxed_runs):
+    """Pull the start of each primary head run back to the start of the relaxed run it sits in.
+
+    Bars that score a hair under the primary threshold for most of their length
+    and over it only near the end (JPC_AV_03841: 0.69-0.70 from 7 s, primary run
+    23-25 s) are otherwise reported as their last second. Ends are left alone:
+    the primary pass already holds its end down to the relaxed threshold.
+    """
+    extended = []
+    for start, end in primary_runs:
+        if start < HEAD_BARS_START_THRESHOLD:
+            for relaxed_start, relaxed_end in relaxed_runs:
+                if relaxed_start < start and relaxed_end >= start:
+                    start = relaxed_start
+        extended.append((start, end))
+    return extended
+
+
+def _uncorroborated_pieces(span_start, span_end, clams_bars_spans):
+    """The parts of a qct-parse bars span that no CLAMS bars span covers.
+
+    A piece no longer than HEAD_END_AGREEMENT_SLACK that touches CLAMS coverage
+    is ordinary edge disagreement and is not returned.
+    """
+    pieces = [(span_start, span_end)]
+    for clams_start, clams_end in clams_bars_spans:
+        remaining = []
+        for lo, hi in pieces:
+            if clams_end <= lo or clams_start >= hi:
+                remaining.append((lo, hi))
+                continue
+            if clams_start > lo:
+                remaining.append((lo, clams_start))
+            if clams_end < hi:
+                remaining.append((clams_end, hi))
+        pieces = remaining
+    whole = pieces == [(span_start, span_end)]
+    return [
+        (lo, hi) for lo, hi in pieces
+        if hi > lo and (whole or hi - lo > HEAD_END_AGREEMENT_SLACK)
+    ]
 
 
 def merge_head_bars_consensus(
@@ -741,7 +790,14 @@ def merge_head_bars_consensus(
             # The detectors disagree on where the head bars end; let the SSIM
             # evidence over the disputed span decide.
             span_lo, span_hi = sorted((qctparse_head_end, clams_head_end))
-            verdict = region_is_bars(span_lo, span_hi)
+            ask_lo = span_lo
+            if qctparse_head_start is not None and qctparse_head_start > clams_head_end:
+                # qct-parse's "head" is a separate, later span, not a longer
+                # version of CLAMS' head bars. Judge that span on its own:
+                # the gap before it is claimed by neither detector, and the
+                # samples at the CLAMS end are bars and would confirm anything.
+                ask_lo = qctparse_head_start
+            verdict = region_is_bars(ask_lo, span_hi)
             if verdict is False:
                 merged_end = span_lo
                 logger.warning(
@@ -776,16 +832,40 @@ def merge_head_bars_consensus(
     # skipping a second of content costs little, while analysing bars as
     # content skews the results. Chroma-phase detection and access-file
     # trimming intentionally keep using only the head end time.
+    #
+    # qct-parse's luma thresholds also fire on short stretches of saturated
+    # graphics anywhere in the program, and can drag a real span's end across
+    # a slate. So when CLAMS ran, any part of a qct-parse span that CLAMS did
+    # not also call bars is put to the SSIM arbiter and removed if it is
+    # decisively not bars. No evidence (None) keeps the span.
+    clams_bars_spans = [
+        (span_start, span_end) for span_start, span_end, kind in clams_regions or []
+        if kind == "bars"
+    ]
     exclusion_spans = []
     for label, span_start, span_end in qctparse_all_regions or []:
         if span_start is None or span_end is None:
             continue
         if head_demoted and label in ("head", "head-relaxed"):
             continue
-        exclusion_spans.append((span_start, span_end))
-    for span_start, span_end, kind in clams_regions or []:
-        if kind == "bars":
-            exclusion_spans.append((span_start, span_end))
+        kept = [(span_start, span_end)]
+        if clams_ran:
+            for piece_lo, piece_hi in _uncorroborated_pieces(span_start, span_end, clams_bars_spans):
+                if region_is_bars(piece_lo, piece_hi) is not False:
+                    continue
+                logger.warning(
+                    f"qct-parse bars span {piece_lo:.1f}s-{piece_hi:.1f}s ({label}) is not "
+                    f"bars per CLAMS SSIM - not treating it as bars"
+                )
+                trimmed = []
+                for lo, hi in kept:
+                    if piece_lo > lo:
+                        trimmed.append((lo, min(hi, piece_lo)))
+                    if piece_hi < hi:
+                        trimmed.append((max(lo, piece_hi), hi))
+                kept = [(lo, hi) for lo, hi in trimmed if hi > lo]
+        exclusion_spans.extend(kept)
+    exclusion_spans.extend(clams_bars_spans)
 
     all_bars_regions = None
     if exclusion_spans:
@@ -963,6 +1043,11 @@ def process_qctools_output(video_path, source_directory, destination_directory, 
             stop_at_frame=bars_params.stop_at_frame,
             min_frame_count=bars_params.min_frame_count,
             stop_after_one=bars_params.stop_after_one,
+            # Degraded bars can sit right at the threshold; one sample dipping
+            # under it used to end the run (JPC_AV_04179: 0.71, one 0.67 at
+            # 12 s, bars to 27 s). Once open, a run holds down to the relaxed
+            # threshold. False spans on the judged tapes score 0.46 or less.
+            release_threshold=min(SECONDARY_BARS_THRESHOLD, bars_params.threshold),
             fps=fps,
             pass_label="primary",
             check_cancelled=check_cancelled,
@@ -994,6 +1079,24 @@ def process_qctools_output(video_path, source_directory, destination_directory, 
         # CLAMS candidate to work with.
         head_bars_second_pass = []
         primary_has_head = any(s < HEAD_BARS_START_THRESHOLD for s, _ in primary_bars)
+        if primary_has_head and fps and fps > 0:
+            # Same replay, used the other way: a primary head run may be only the
+            # tail of bars that sit just under the primary threshold.
+            relaxed_hits = bars_detection_clams.runs_from_recorded_scores(
+                report_directory, video_id,
+                threshold=SECONDARY_BARS_THRESHOLD,
+                max_frame=int(CLAMS_HEAD_RESCAN_SECONDS * fps),
+                min_frame_count=bars_params.min_frame_count,
+                fps=fps,
+            )
+            extended = _extend_head_run_starts(primary_bars, relaxed_hits)
+            if extended != primary_bars:
+                logger.info(
+                    f"CLAMS bars head: relaxed threshold moves the start from "
+                    f"{primary_bars[0][0]:.1f}s to {extended[0][0]:.1f}s"
+                )
+                primary_bars = extended
+                results['clams_bars_start_time'] = primary_bars[0][0]
         if not primary_has_head and fps and fps > 0:
             head_hits = bars_detection_clams.runs_from_recorded_scores(
                 report_directory, video_id,

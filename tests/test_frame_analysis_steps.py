@@ -263,7 +263,6 @@ def _run_refinement(monkeypatch, tmp_path, brng_rounds, areas):
     analyzer = _analyzer(config)
     analyzer.output_dir = tmp_path
     analyzer._run_analysis_steps = lambda steps, results, signals: True
-    analyzer._detect_color_bars_duration = lambda: 0
     analyzer._get_video_duration = lambda: 600.0
     analyzer._log_brng_analysis_summary = lambda *a, **kw: None
     analyzer._create_refinement_comparison = lambda **kw: None
@@ -411,6 +410,33 @@ def test_no_bars_with_skip_off_signalstats_gets_zero_not_none(monkeypatch, tmp_p
     assert 'color_bars_end_time' not in results   # no bars is still reported as no bars
 
 
+def test_no_head_bars_is_not_revived_from_the_qct_parse_csv(monkeypatch, tmp_path):
+    """None means the consensus found (or kept) no head bars. A qct-parse durations CSV on
+    disk may still hold the claim the consensus rejected; analyze() must not read it back."""
+    from pathlib import Path
+    report_dir = tmp_path / "V1_report_csvs"
+    report_dir.mkdir()
+    (report_dir / "qct-parse_colorbars_durations.csv").write_text(
+        "qct-parse color bars found:\nhead,00:02:40.7610,00:02:44.2970\n")
+
+    from AV_Spex.checks import frame_analysis as fa
+    real_analyzer = _analyzer
+
+    def analyzer_beside_csv(config):
+        obj = real_analyzer(config)
+        obj.video_path = Path(tmp_path / "V1.mkv")
+        return obj
+
+    monkeypatch.setitem(globals(), "_analyzer", analyzer_beside_csv)
+    results, brng_calls, analyzer = _run_without_bars(
+        monkeypatch, tmp_path, enable_signalstats=True, skip_color_bars=True)
+
+    assert 'color_bars_end_time' not in results
+    call = analyzer.signalstats_analyzer.analyze_with_signalstats.call_args
+    assert call.kwargs['color_bars_end_time'] == 0
+    assert not hasattr(fa.EnhancedFrameAnalysis, '_detect_color_bars_duration')
+
+
 def test_find_analysis_periods_accepts_no_bars():
     from AV_Spex.checks.frame_analysis import IntegratedSignalstatsAnalyzer
     analyzer = IntegratedSignalstatsAnalyzer.__new__(IntegratedSignalstatsAnalyzer)
@@ -477,3 +503,30 @@ def test_skip_color_bars_off_brng_fallback_periods_may_start_in_bars(monkeypatch
         monkeypatch, tmp_path, enable_signalstats=False, skip_color_bars=True, **BARS)[1]
 
     assert brng_calls[0]['analysis_periods'][0][0] < on_calls[0]['analysis_periods'][0][0]
+
+
+# ===========================================================================
+# Video dropout: a tape-level flag measured inside the final analysis periods
+# ===========================================================================
+
+def test_video_dropout_is_off_by_default_and_follows_its_flag():
+    assert _steps_chosen(_analyzer(_config()))['video_dropout'] is False
+    on = _config(enable_video_dropout_detection=True)
+    assert _steps_chosen(_analyzer(on))['video_dropout'] is True
+
+
+def test_video_dropout_scans_the_periods_it_is_given(monkeypatch):
+    from AV_Spex.checks import frame_analysis as fa
+    seen = {}
+
+    def fake(video, width, height, fps, periods, check_cancelled=None):
+        seen.update(video=video, size=(width, height), fps=fps, periods=periods)
+        return fa.VideoDropoutResult(status='not_flagged', message='ok')
+
+    monkeypatch.setattr(fa.video_dropout_detection, 'assess_periods', fake)
+    obj = _analyzer(_config())
+    obj.width, obj.height, obj.fps = 720, 486, 29.97
+    result = obj._assess_video_dropout([(30.0, 30), (510.0, 30)])
+    assert result.status == 'not_flagged'
+    assert seen == {'video': '/v.mkv', 'size': (720, 486), 'fps': 29.97,
+                    'periods': [(30.0, 30), (510.0, 30)]}

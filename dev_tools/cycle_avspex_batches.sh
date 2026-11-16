@@ -13,23 +13,26 @@
 # can't leave a package half-moved.
 #
 # Usage:
-#   ./cycle_avspex_batches.sh [options] [SOURCE_DIR ...] [-- AV_SPEX_ARGS ...]
+#   ./cycle_avspex_batches.sh [options] SOURCE_DIR ... [-- AV_SPEX_ARGS ...]
 #
 # Options:
-#   -s DIR   Local staging dir   (default: $HOME/git/JPC_AV/sample_files/jpc)
+#   -s DIR   Local staging dir   (default: $AVSPEX_STAGING; one of the two is required)
 #   -b GB    Max batch size, GB  (default: 40)
 #   -r GB    Free space to keep in reserve on the local disk, GB (default: 10)
 #   -k KEY   Keep progress under <staging>/.avspex_cycle/KEY/ (collect.sh passes the run ID,
 #            so each code + config gets its own done list)
+#   -w       Do not write outputs back to the package's original location. The originals are
+#            left exactly as they were (use with collect.sh, where the corpus keeps the results,
+#            when the packages already hold outputs you want to keep, e.g. a vendor's)
 #   -n       Dry run: list the batches and exit
 #   -h       Help
 #
-# SOURCE_DIRs are searched recursively for folders named JPC_AV_<digits>.
-# Default sources: /Volumes/EXT2_EXF/george_blood /Volumes/EXT2_EXF/media_burn
+# SOURCE_DIRs are searched recursively for folders named JPC_AV_<digits>. At least one is
+# required.
 #
 # Anything after "--" is passed to av-spex, e.g.
-#   ./cycle_avspex_batches.sh -- --profile step1
-#   ./cycle_avspex_batches.sh /Volumes/EXT2_APFS/jpc -- --off mediatrace
+#   ./cycle_avspex_batches.sh -s ~/staging /Volumes/DRIVE/jpc -- --profile step1
+#   ./cycle_avspex_batches.sh -s ~/staging /Volumes/DRIVE/jpc -- --off mediatrace
 #
 # Re-running is safe: completed packages are listed in
 # <staging>/.avspex_cycle[/KEY]/done.txt and skipped. Delete a line there to redo one.
@@ -38,15 +41,15 @@
 # with CYCLE_SOURCE set to the package's original path.
 
 # ---------------------------------------------------------------- settings ---
-STAGING_DIR="$HOME/git/JPC_AV/sample_files/jpc"
+STAGING_DIR="${AVSPEX_STAGING:-}"
 BATCH_GB=40
 RESERVE_GB=10
 DRY_RUN=0
+WRITE_BACK=1
 STATE_KEY=""
 AVSPEX_CMD="${AVSPEX_CMD:-av-spex}"
-DEFAULT_SOURCES=(/Volumes/EXT2_EXF/george_blood /Volumes/EXT2_EXF/media_burn)
 
-usage() { sed -n '3,39p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '3,42p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 # ------------------------------------------------------------- arguments ---
 ORIG_ARGS=("$@")
@@ -59,13 +62,15 @@ while [ $# -gt 0 ]; do
         -r) RESERVE_GB="$2"; shift 2 ;;
         -k) STATE_KEY="$2"; shift 2 ;;
         -n) DRY_RUN=1; shift ;;
+        -w) WRITE_BACK=0; shift ;;
         -h|--help) usage 0 ;;
         --) shift; AVSPEX_ARGS=("$@"); break ;;
         -*) echo "Unknown option: $1" >&2; usage 1 ;;
         *)  SOURCES+=("${1%/}"); shift ;;
     esac
 done
-[ ${#SOURCES[@]} -eq 0 ] && SOURCES=("${DEFAULT_SOURCES[@]}")
+[ ${#SOURCES[@]} -eq 0 ] && { echo "No SOURCE_DIR given." >&2; usage 1; }
+[ -z "$STAGING_DIR" ] && { echo "No staging directory: pass -s DIR or set AVSPEX_STAGING." >&2; exit 1; }
 
 # Keep the Mac awake for the whole run (macOS only).
 if [ "$DRY_RUN" -eq 0 ] && [ -z "$CYCLE_CAFFEINATED" ] && command -v caffeinate >/dev/null 2>&1; then
@@ -123,7 +128,13 @@ copy_in() {
     local name="$1" src="$2" dest="$STAGING_DIR/$1"
     log "  copying in  $name  ($src)"
     rm -f "$MARKERS/$name"
-    cp -Rp $CP_NOXATTR "$src" "$STAGING_DIR/" 2>>"$LOG_FILE" || { log "  ! copy failed: $name"; return 1; }
+    # Staging on the same volume as the source (macOS): clone instead of copying. On APFS
+    # that is instant and takes no extra space. cp refuses -c together with -X.
+    local how="$CP_NOXATTR"
+    if [ "$(uname)" = "Darwin" ] && [ "$(stat -f %d "$src")" = "$(stat -f %d "$STAGING_DIR")" ]; then
+        how="-c"
+    fi
+    cp -Rp $how "$src" "$STAGING_DIR/" 2>>"$LOG_FILE" || { log "  ! copy failed: $name"; return 1; }
     local a b
     a=$(tree_bytes "$src"); b=$(tree_bytes "$dest")
     if [ "$a" != "$b" ]; then
@@ -136,6 +147,10 @@ copy_in() {
 # Copy files created/modified since the marker back to the external.
 copy_back() {
     local name="$1" src_dir="$2" local_dir="$STAGING_DIR/$1" n=0 rc=0 rel f
+    if [ "$WRITE_BACK" -eq 0 ]; then
+        log "  not writing back (-w): $src_dir left as it was"
+        return 0
+    fi
     log "  copying back new/updated files for $name"
     while IFS= read -r -d '' f; do
         rel="${f#$local_dir/}"

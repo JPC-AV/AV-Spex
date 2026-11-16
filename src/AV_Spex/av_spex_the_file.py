@@ -102,6 +102,7 @@ class ParsedArguments:
     enable_signalstats: Optional[str]
     enable_dropped_sample_detection: Optional[str]
     enable_duplicate_frame_detection: Optional[str]
+    enable_video_dropout_detection: Optional[str]
     frame_borders: Optional[str]
     frame_border_pixels: Optional[int]
     frame_no_colorbar_skip: bool
@@ -240,6 +241,8 @@ The scripts will confirm that the digital files conform to predetermined specifi
                              help='Enable/disable dropped sample detection in frame analysis')
     frame_group.add_argument('--enable-duplicate-frame-detection', choices=['on', 'off'],
                              help='Enable/disable duplicate frame detection in frame analysis')
+    frame_group.add_argument('--enable-video-dropout-detection', choices=['on', 'off'],
+                             help='Enable/disable the video dropout flag (measured inside the analysis periods; needs signalstats or BRNG analysis)')
     frame_group.add_argument('--frame-borders', choices=['simple', 'sophisticated'],
                              help='Border detection mode for frame analysis (simple or sophisticated)')
     frame_group.add_argument('--frame-border-pixels', type=int,
@@ -323,6 +326,7 @@ The scripts will confirm that the digital files conform to predetermined specifi
         enable_signalstats=getattr(args, 'enable_signalstats', None),
         enable_dropped_sample_detection=getattr(args, 'enable_dropped_sample_detection', None),
         enable_duplicate_frame_detection=getattr(args, 'enable_duplicate_frame_detection', None),
+        enable_video_dropout_detection=getattr(args, 'enable_video_dropout_detection', None),
         frame_borders=getattr(args, 'frame_borders', None),
         frame_border_pixels=getattr(args, 'frame_border_pixels', None),
         frame_no_colorbar_skip=getattr(args, 'frame_no_colorbar_skip', False),
@@ -568,6 +572,9 @@ def run_cli_mode(args):
 
     if args.enable_duplicate_frame_detection:
         frame_updates['outputs']['frame_analysis']['enable_duplicate_frame_detection'] = (args.enable_duplicate_frame_detection == 'on')
+
+    if args.enable_video_dropout_detection:
+        frame_updates['outputs']['frame_analysis']['enable_video_dropout_detection'] = (args.enable_video_dropout_detection == 'on')
 
     # Handle configuration of how sub-steps work
     if args.frame_borders is not None:

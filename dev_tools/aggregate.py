@@ -6,7 +6,7 @@ aggregate.py: flatten collected runs into one table, or diff two runs package by
     aggregate.py --diff RUN_A RUN_B [--only REGEX] columns that changed, per package
     aggregate.py --columns RUN                     list the columns with an example value
 
-RUN is a run ID, a unique prefix of one, or a run directory (see `corpus.py list`).
+RUN is a run ID, a unique prefix of one, or a run directory (see `avspex-dev runs`).
 
 Each column comes from one small extractor function below, reading the package's sidecars.
 To track something new, add an extractor and append it to EXTRACTORS; old runs simply show
@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from corpus import resolve_run  # noqa: E402
+from corpus import require_sidecars, resolve_run  # noqa: E402
 
 
 class Package:
@@ -259,6 +259,8 @@ def main():
     ap.add_argument("--columns", action="store_true", help="list columns with an example value")
     args = ap.parse_args()
     runs = [resolve_run(r) for r in args.runs]
+    for run in runs:
+        require_sidecars(run)
 
     if args.diff:
         if len(runs) != 2:

@@ -23,8 +23,8 @@ sheet says why a bin is there. Bins already labeled in an earlier sheet (or seed
 are skipped, so a second round only asks about new bins. The sheets must pass labels.py's
 check first.
 
-    python3 dev_tools/label_sheet.py period-study-2026-10 --probe          # first time; drives mounted
-    python3 dev_tools/label_sheet.py period-study-2026-10 --name round1
+    avspex-dev label-sheet period-study-2026-10 --probe          # first time; drives mounted
+    avspex-dev label-sheet period-study-2026-10 --name round1
 
 --round legality builds a smaller sheet aimed at one question: should the legal-floor luma
 measures (_selection.add_legal_floor_columns: how far a bin falls below legal black or rises
@@ -36,14 +36,14 @@ above legal white) be scored? Per tape, up to --per-tape 6:
   - the unlabeled evidence bins of the legality scoring configurations (study.LEGALITY_CONFIGS)
   - the 2nd and 3rd bins of under_black and over_white, while room remains
 
-    python3 dev_tools/label_sheet.py period-study-2026-10 --round legality --name round2 \
-        --regions ~/git/JPC_AV/avspex_corpus/labels/missed_regions.csv
+    avspex-dev label-sheet period-study-2026-10 --round legality --name round2 \
+        --regions <corpus>/labels/missed_regions.csv
 
 --bins FILE builds a sheet of exactly the bins in FILE (video_id,bin_start, e.g. the
 tag_weights_<MODE>_stake_bins.csv that `tag_weights.py --stake` writes), plus --controls random
 controls per tape (default 1), so a round asks only about bins that can change a verdict:
 
-    python3 dev_tools/label_sheet.py period-study-2026-10 --bins tag_weights_tape_stake_bins.csv \
+    avspex-dev label-sheet period-study-2026-10 --bins tag_weights_tape_stake_bins.csv \
         --name round3
 
 --probe reads each package's start timecode from its source video (package.json "source") and
@@ -54,7 +54,7 @@ Filling in: see labels.py. In short, defect is one of labels.DEFECTS (several jo
 e.g. dropout+noise), severity 0 (nothing worth a period), 1 (visible) or 2 (obvious/serious), and
 origin one of labels.ORIGINS (where the problem comes from; blank for none). A bin with findings
 of different severity or origin takes one row each, under the same blind_id. A row left blank
-counts as unlabeled. Check a sheet with `python3 dev_tools/labels.py` after editing it.
+counts as unlabeled. Check a sheet with `avspex-dev labels` after editing it.
 """
 import argparse
 import csv

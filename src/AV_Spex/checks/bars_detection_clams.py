@@ -214,9 +214,16 @@ def run_clams_bars_detection(
     append_ssim_csv: bool = False,
     check_cancelled=None,
     signals=None,
+    release_threshold: Optional[float] = None,
 ) -> List[Tuple[float, float]]:
     """
     Detect SMPTE color bars by SSIM comparison against a bundled reference image.
+
+    `release_threshold` (lower than `threshold`) lets a run that has opened above
+    `threshold` continue until the score falls to or below the release value, so
+    one sample dipping just under the threshold does not end degraded bars early.
+    None keeps a single threshold. The CSV's `exceeds_threshold` column always
+    refers to `threshold`.
 
     Parameters mirror the upstream CLAMS app's runtime parameters; AV Spex adds
     `start_frame` so a caller can scan a windowed range, and `pass_label` /
@@ -307,6 +314,8 @@ def run_clams_bars_detection(
                     if not in_run:
                         in_run = True
                         run_start_frame = cur_frame
+                elif in_run and release_threshold is not None and score > release_threshold:
+                    pass  # still bars-like: the run continues
                 elif in_run:
                     in_run = False
                     if cur_frame - run_start_frame > min_frame_count:
