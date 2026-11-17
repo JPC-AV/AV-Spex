@@ -731,7 +731,7 @@ class QCToolsParser:
         self,
         color_bars_end_time: float = 0,
         black_segments: Optional[List[Tuple[float, float]]] = None,
-        min_run_length: int = 2,
+        min_run_length: int = 1,
     ) -> Tuple[List[Dict], Dict[str, float]]:
         """
         Scan QCTools report for runs of consecutive frames whose YDIF/UDIF/VDIF
@@ -747,7 +747,15 @@ class QCToolsParser:
             color_bars_end_time: End of color bars to exclude
             black_segments: List of (start, end) tuples to exclude
             min_run_length: Minimum K (consecutive low-diff frames) required to
-                            report a run. Default 2 → freeze of ≥3 frames.
+                            report a run. Default 1 → a single repeated frame,
+                            which is what one dropped frame looks like. On
+                            analog captures the picture's own noise keeps
+                            ordinary frames, still ones included, over the
+                            thresholds: seven whole JPC tapes (396,000 frames)
+                            hold no such frame of real picture.
+
+        The report's first video frame is never a candidate: it has no frame
+        before it, so its differences read 0 whatever it shows.
 
         Returns:
             (runs, thresholds) where:
@@ -783,6 +791,9 @@ class QCToolsParser:
         flat_frames_excluded = 0
         black_segments = black_segments or []
         runs: List[Dict] = []
+
+        # The first frame's differences are 0 by construction, not by repetition
+        first_frame = True
 
         # Running state for the current candidate run
         run_start_time: Optional[float] = None
@@ -886,8 +897,10 @@ class QCToolsParser:
                 is_candidate = (
                     is_low_diff
                     and not is_flat
+                    and not first_frame
                     and not _in_excluded_region(timestamp)
                 )
+                first_frame = False
 
                 if is_candidate:
                     if run_start_time is None:
@@ -4755,7 +4768,7 @@ class EnhancedFrameAnalysis:
         self,
         color_bars_end_time: Optional[float] = None,
         black_segments: Optional[List[Tuple[float, float]]] = None,
-        min_run_length: int = 2,
+        min_run_length: int = 1,
     ) -> Optional[DuplicateFrameResult]:
         """Detect runs of frozen frames. See checks/duplicate_frame_detection.py."""
         return duplicate_frame_detection.detect_duplicate_frames(
@@ -5831,7 +5844,7 @@ class EnhancedFrameAnalysis:
             result = self._detect_duplicate_frames(
                 color_bars_end_time=color_bars_end_time,
                 black_segments=duplicate_avoid_segments,
-                min_run_length=getattr(frame_config, 'duplicate_min_run_length', 2),
+                min_run_length=getattr(frame_config, 'duplicate_min_run_length', 1),
             )
             return asdict(result) if result else None
 

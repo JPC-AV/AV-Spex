@@ -18,11 +18,17 @@ What is frozen from the run, because it reads the video:
 
 Thumbnails, the identical-channel sample comparison, bars evaluation, clamped levels and tone
 leak are switched off: none is a scored detector here and most need the video.
+
+duplicate_frames is the one detector here that needs the tape's drive mounted. Its candidates
+come from the stored QCTools report, but each is confirmed against the frames themselves, and
+an unconfirmed candidate is not a finding: without the video the tape scores as not run. The
+black segments it avoids are read back from the run; the bars are the replayed consensus.
 """
 import csv
 import json
 import logging
 import shutil
+import tempfile
 import time
 import traceback
 from pathlib import Path
@@ -33,8 +39,10 @@ REPLAYABLE = {
     "chroma_phase": "detect_chroma_phase_errors",
     "audio_dropout": "audio_analysis",
     "audible_timecode": "audio_analysis",
+    "duplicate_frames": None,        # not a qct-parse step; needs the video (see above)
 }
-NEEDS_VIDEO = ("tone_leak", "duplicate_frames", "dropped_samples")
+DEFAULT = ("bars", "chroma_phase", "audio_dropout", "audible_timecode")   # what needs no drive
+NEEDS_VIDEO = ("tone_leak", "dropped_samples")
 CLAMS_BARS_CSV = "clams_bars_colorbars_durations.csv"
 CLAMS_TONE_CSV = "clams_tone_detection_durations.csv"
 
@@ -72,9 +80,40 @@ def frozen_clams(csvs):
     return regions, head_start, head_end, True
 
 
-def run_configs(run_dir):
+def parse_overrides(pairs):
+    """["outputs.frame_analysis.duplicate_min_run_length=1", ...] -> a nested dict to lay over
+    the checks config. Values are read as JSON (1, true, "text"), else kept as text."""
+    out = {}
+    for pair in pairs or []:
+        key, sep, value = pair.partition("=")
+        if not sep or not key.strip():
+            raise ValueError(f"{pair!r}: expected KEY=VALUE, e.g. outputs.frame_analysis.duplicate_min_run_length=1")
+        try:
+            value = json.loads(value)
+        except ValueError:
+            pass
+        node = out
+        *parents, leaf = key.strip().split(".")
+        for part in parents:
+            node = node.setdefault(part, {})
+        node[leaf] = value
+    return out
+
+
+def _check_known(overrides, data, where=""):
+    for key, value in overrides.items():
+        if key not in data:
+            raise ValueError(f"no checks setting named {where}{key}")
+        if isinstance(value, dict):
+            if not isinstance(data[key], dict):
+                raise ValueError(f"{where}{key} is a value, not a group of settings")
+            _check_known(value, data[key], f"{where}{key}.")
+
+
+def run_configs(run_dir, overrides=None):
     """The run's checks and spex configs as dataclasses, over the bundled defaults (so a field
-    added since the run takes its default)."""
+    added since the run takes its default). `overrides` (see parse_overrides) is laid over the
+    checks config last: the way to try a setting the run was not collected with."""
     from AV_Spex.utils.config_manager import ConfigManager
     from AV_Spex.utils.config_setup import ChecksConfig, SpexConfig
     mgr, out = ConfigManager(), {}
@@ -83,15 +122,18 @@ def run_configs(run_dir):
         saved = Path(run_dir) / f"{name}_config.json"
         if saved.exists():
             mgr._update_dict_recursively(data, mgr._migrate_config_data(json.loads(saved.read_text()), name))
+        if name == "checks" and overrides:
+            _check_known(overrides, data)
+            mgr._update_dict_recursively(data, overrides)
         out[name] = mgr._deserialize_dataclass(cls, data)
     return out
 
 
-def _install_config(run_dir, detectors):
+def _install_config(run_dir, detectors, overrides=None):
     """Put the run's config in ConfigManager's cache, for this process only (nothing is saved),
     with qct-parse cut down to the steps the replay needs."""
     from AV_Spex.utils.config_manager import ConfigManager
-    configs = run_configs(run_dir)
+    configs = run_configs(run_dir, overrides)
     q = configs["checks"].tools.qct_parse
     steps = {REPLAYABLE[d] for d in detectors}
     q.run_tool = q.barsDetection = True
@@ -114,14 +156,35 @@ def _audio_stream_count(pkg):
     return max(n, 2)
 
 
-def replay_package(pkg_dir, out_dir, run_dir, detectors):
+def replay_duplicate_frames(pkg, report, video_path, fps, frame_config, merged_end, bars_spans):
+    """The duplicate-frame result dict frame analysis would record, from the stored QCTools
+    report and the video, called the way EnhancedFrameAnalysis calls it."""
+    from dataclasses import asdict
+    from AV_Spex.checks import duplicate_frame_detection
+    from AV_Spex.checks.frame_analysis import QCToolsParser, merge_avoid_segments
+    black = [(b["start"], b["end"]) for b in pkg.fa.get("black_segments") or []]
+    with tempfile.TemporaryDirectory() as tmp:          # thumbnails are written and not kept
+        result = duplicate_frame_detection.detect_duplicate_frames(
+            video_path, tmp, qctools_parser=QCToolsParser(str(report), fps=fps),
+            check_cancelled=lambda: False, color_bars_end_time=merged_end or 0,
+            black_segments=merge_avoid_segments(black, bars_spans),
+            min_run_length=frame_config.duplicate_min_run_length)
+    if result is None:
+        return None
+    out = asdict(result)
+    for run in out.get("runs") or []:
+        run["first_frame_thumbnail"] = run["last_frame_thumbnail"] = None
+    return out
+
+
+def replay_package(pkg_dir, out_dir, run_dir, detectors, overrides=None):
     """Replay one package into out_dir (a package directory of the replay). Returns a dict:
     video_id, ok, seconds, error, `skipped` (why, for a package with nothing to replay) and
     `no_evidence`: spans the bars arbiter could not judge
     because the recorded SSIM scores do not cover them and the video is not mounted."""
     started = time.time()
     pkg_dir, out_dir = Path(pkg_dir), Path(out_dir)
-    result = {"video_id": pkg_dir.name, "ok": False, "seconds": 0, "error": "", "no_evidence": []}
+    result = {"video_id": pkg_dir.name, "ok": False, "seconds": 0, "error": "", "no_evidence": [], "no_video": False}
     try:
         from AV_Spex.utils.log_setup import logger
         logger.setLevel(logging.CRITICAL)
@@ -142,7 +205,7 @@ def replay_package(pkg_dir, out_dir, run_dir, detectors):
             result["skipped"] = f"no .qctools.xml.gz report in the package ({report.name or 'none recorded'})"
             return result
 
-        configs = _install_config(run_dir, detectors)
+        configs = _install_config(run_dir, detectors, overrides)
         csvs = out_dir / f"{vid}_report_csvs"
         if csvs.exists():
             shutil.rmtree(csvs)
@@ -201,6 +264,12 @@ def replay_package(pkg_dir, out_dir, run_dir, detectors):
             fa["bars_regions"] = [{"start": s, "end": e} for s, e in spans]
         if merged_end:
             fa["color_bars_end_time"] = merged_end
+        if "duplicate_frames" in detectors:
+            found = replay_duplicate_frames(pkg, report, video_path, timing.fps,
+                                            configs["checks"].outputs.frame_analysis, merged_end, spans)
+            if found is not None:
+                fa["duplicate_frame_detection"] = found
+            result["no_video"] = not have_video
         qc = out_dir / f"{vid}_qc_metadata"
         qc.mkdir(parents=True, exist_ok=True)
         (qc / f"{vid}_enhanced_frame_analysis.json").write_text(json.dumps(fa, indent=2))

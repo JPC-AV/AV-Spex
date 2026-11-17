@@ -22,7 +22,8 @@ Everything goes through one command, `avspex-dev`, and everything is kept in one
 - [Scorecard](#scorecard-known-cases-per-detector), [Tape ledger](#tape-ledger-dev-vs-held-out),
   [Tables](#tables-aggregate)
 - Further reading in `docs/`: [corpus layout](docs/corpus_layout.md), [replays](docs/replays.md),
-  [weighing tags](docs/tag_weighing.md), [video dropout study](docs/video_dropout_study.md)
+  [fault injection](docs/fault_injection.md), [weighing tags](docs/tag_weighing.md),
+  [video dropout study](docs/video_dropout_study.md)
 
 ## Setup
 
@@ -213,7 +214,8 @@ with the same arguments, so the script form still works.
 | `ledger ...` | Which tape was used for what; held-out draws | `ledger.py` |
 | `labels` | Validate the bin label sheets | `labels.py` |
 | `label-sheet RUN ...` | Build a bin label sheet | `label_sheet.py` |
-| `replay detector [RUN]` | Re-run bars, chroma phase, audio dropout and audible timecode from a run's sidecars under the current code, and score them: minutes, no tapes needed ([replays](docs/replays.md#detector-replay)) | `replays/detector.py` |
+| `inject FAULT [RUN]` | Put known faults into clips of real tapes and count what the detector finds: `dropped-samples`, `tone-leak`, `duplicate-frames`. Measures misses, which sheets cannot ([fault injection](docs/fault_injection.md)) | `inject.py` |
+| `replay detector [RUN]` | Re-run bars, chroma phase, audio dropout and audible timecode from a run's sidecars under the current code, and score them: minutes, no tapes needed (duplicate frames too, with the drive mounted; `--set` tries a config value) ([replays](docs/replays.md#detector-replay)) | `replays/detector.py` |
 | `replay harness\|period-grid\|bin-table\|tag-weights ...` | Offline replays of period selection | `replays/*.py` |
 | `dropout scan\|sheet\|export ...` | Video dropout study tools | `dropout_scan.py`, `dropout_sheet.py`, `event_labels.py` |
 | `corpus ...` | `run-id`, `import`, and the pieces `collect` calls | `corpus.py` |

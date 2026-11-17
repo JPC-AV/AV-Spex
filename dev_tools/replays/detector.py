@@ -11,8 +11,19 @@ the hours a fresh collect takes, and it does not need the tapes.
 Replayable: bars, chroma_phase, audio_dropout, audible_timecode. The replay calls the real
 run_qctparse() and merge_head_bars_consensus() on the stored QCTools report. CLAMS is frozen:
 its bars and tone spans and its SSIM scores are read back from the run, so a change to the
-CLAMS detectors themselves is not replayed. tone_leak, duplicate_frames and dropped_samples
-read the video and need a collect.
+CLAMS detectors themselves is not replayed. tone_leak and dropped_samples read the video and
+need a collect.
+
+duplicate_frames can be replayed too, when asked for by name and with the tapes' drive
+mounted: its candidates come from the stored report and are confirmed against the video. A
+tape whose video is not there scores as not run.
+
+    avspex-dev replay detector --detector duplicate_frames
+    avspex-dev replay detector --detector duplicate_frames \
+        --set outputs.frame_analysis.duplicate_min_run_length=2
+
+--set KEY=VALUE (repeatable) lays a checks setting over the run's config, to try a value the
+run was not collected with. The replay is kept under a name that carries the settings.
 
 The report has four parts:
 
@@ -65,7 +76,7 @@ def code_tag():
     return code["commit"][:7] + (f"-d{code['src_diff_hash']}" if code["src_dirty"] else ""), code
 
 
-def run_replay(run, dest, tapes, detectors, jobs, force):
+def run_replay(run, dest, tapes, detectors, jobs, force, overrides=None):
     """Replay `tapes` ({video_id: package dir}) into dest/packages. Returns the failures."""
     todo = {}
     for vid, path in tapes.items():
@@ -83,7 +94,7 @@ def run_replay(run, dest, tapes, detectors, jobs, force):
     want = {vid: sorted(set(detectors) | set(_replayed(dest, path))) for vid, path in todo.items()}
     with ProcessPoolExecutor(max_workers=min(jobs, len(todo)), mp_context=get_context("spawn")) as pool:
         futures = [pool.submit(_detector.replay_package, str(path), str(dest / "packages" / path.name),
-                               str(run), want[vid]) for vid, path in todo.items()]
+                               str(run), want[vid], overrides) for vid, path in todo.items()]
         for n, fut in enumerate(as_completed(futures), start=1):
             r = fut.result()
             line = f"  [{n}/{len(todo)}] {r['video_id']}  {r['seconds']:.0f}s"
@@ -95,6 +106,8 @@ def run_replay(run, dest, tapes, detectors, jobs, force):
             print(line, flush=True)
             if r["no_evidence"]:
                 notes.append((r["video_id"], r["no_evidence"]))
+            if r.get("no_video"):
+                notes.append((r["video_id"], None))
     return failed, notes
 
 
@@ -219,7 +232,11 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("run", nargs="?", help="run ID, prefix or 'latest' (default)")
     ap.add_argument("--detector", action="append", choices=sorted(_detector.REPLAYABLE) + list(_detector.NEEDS_VIDEO),
-                    metavar="D", help=f"only this detector (repeatable): {', '.join(_detector.REPLAYABLE)}")
+                    metavar="D", help=f"only this detector (repeatable): {', '.join(_detector.REPLAYABLE)} "
+                                      f"(default: {', '.join(_detector.DEFAULT)})")
+    ap.add_argument("--set", action="append", metavar="KEY=VALUE", dest="overrides",
+                    help="lay a checks setting over the run's config (repeatable), e.g. "
+                         "outputs.frame_analysis.duplicate_min_run_length=2")
     ap.add_argument("--truth-only", action="store_true",
                     help="only the tapes with a verdict for one of the detectors (the fast loop while tuning)")
     ap.add_argument("--tapes", nargs="+", metavar="ID", help="only these tapes")
@@ -233,7 +250,12 @@ def main():
                          "(that uses those tapes up as a held-out test of it)")
     args = ap.parse_args()
 
-    detectors = args.detector or list(_detector.REPLAYABLE)
+    detectors = args.detector or list(_detector.DEFAULT)
+    try:
+        overrides = _detector.parse_overrides(args.overrides)
+        _detector.run_configs(resolve_run(args.run or "latest"), overrides)
+    except ValueError as e:
+        sys.exit(f"--set: {e}")
     cannot = [d for d in detectors if d in _detector.NEEDS_VIDEO]
     if cannot:
         sys.exit(f"{', '.join(cannot)}: reads the video, not the QCTools report, so it cannot be replayed "
@@ -261,20 +283,31 @@ def main():
         sys.exit("no tapes to replay")
 
     tag, code = code_tag()
-    dest = REPLAYS / f"replay-{run.name}-{tag}"
+    import hashlib
+    settings_tag = ("-set" + hashlib.sha1(json.dumps(overrides, sort_keys=True).encode()).hexdigest()[:6]
+                    if overrides else "")
+    dest = REPLAYS / f"replay-{run.name}-{tag}{settings_tag}"
     (dest / "packages").mkdir(parents=True, exist_ok=True)
     (dest / "run.json").write_text(json.dumps({
         "run_id": dest.name, "replay_of": run.name, "commit": code["commit"], "branch": code["branch"],
         "src_dirty": code["src_dirty"], "src_diff_hash": code["src_diff_hash"],
-        "created": datetime.now().isoformat(timespec="seconds"),
-        "labels": [f"replay of {run.name} under {tag}"]}, indent=2))
+        "created": datetime.now().isoformat(timespec="seconds"), "settings": overrides,
+        "labels": [f"replay of {run.name} under {tag}" + (f" with {' '.join(args.overrides)}" if overrides else "")]},
+        indent=2))
     was = json.loads((run / "run.json").read_text())
     same_code = was.get("commit") == code["commit"] and not code["src_dirty"] and not was.get("src_dirty")
     print(f"Replay of {run.name} under {tag}" + (" (the code the run was collected with)" if same_code else "")
-          + f"\ndetectors: {', '.join(detectors)}")
+          + f"\ndetectors: {', '.join(detectors)}"
+          + (f"\nsettings: {' '.join(args.overrides)}" if overrides else ""))
 
-    failed, notes = run_replay(run, dest, tapes, detectors, max(1, args.jobs), args.force)
+    failed, notes = run_replay(run, dest, tapes, detectors, max(1, args.jobs), args.force, overrides)
+    no_video = sorted(vid for vid, spans in notes if spans is None)
+    if no_video:
+        print(f"! duplicate_frames: the video of {len(no_video)} tape(s) is not on a mounted drive, so their "
+              f"candidates could not be confirmed and they score as not run: {', '.join(no_video)}")
     for vid, spans in notes:
+        if spans is None:
+            continue
         print(f"! {vid}: the bars arbiter had no recorded SSIM scores for "
               f"{', '.join(f'{lo}-{hi}s' for lo, hi in spans)} and the video is not mounted; "
               f"those spans were kept as bars (no evidence). Mount the drive and --force this tape.")

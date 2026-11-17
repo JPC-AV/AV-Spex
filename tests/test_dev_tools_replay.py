@@ -63,7 +63,7 @@ def test_the_runs_config_is_used_and_fields_added_since_take_their_default(tmp_p
     configs = _detector.run_configs(tmp_path)
     assert configs["checks"].tools.clams_detection.run_tool is True
     assert configs["checks"].tools.qct_parse.detect_tone_leak is True
-    assert configs["checks"].outputs.frame_analysis.duplicate_min_run_length == 2      # not in the run's file
+    assert configs["checks"].outputs.frame_analysis.duplicate_min_run_length == 1      # not in the run's file
 
 
 def test_a_replay_never_switches_on_a_step_that_needs_the_video(tmp_path, monkeypatch):
@@ -99,3 +99,26 @@ def test_a_replay_is_found_by_name_but_a_run_wins(tmp_path, monkeypatch):
         (tmp_path / d / "run.json").write_text("{}")
     assert corpus.resolve_run("replay-abc").name == "replay-abc1234-c1-ffff"
     assert corpus.resolve_run("abc").name == "abc1234-c1"
+
+
+def test_set_lays_a_setting_over_the_runs_config_and_refuses_unknown_names(tmp_path):
+    (tmp_path / "checks_config.json").write_text(json.dumps(
+        {"outputs": {"frame_analysis": {"duplicate_min_run_length": 2}}}))
+    assert _detector.run_configs(tmp_path)["checks"].outputs.frame_analysis.duplicate_min_run_length == 2
+    over = _detector.parse_overrides(["outputs.frame_analysis.duplicate_min_run_length=1",
+                                      "tools.clams_detection.run_tool=false"])
+    assert over == {"outputs": {"frame_analysis": {"duplicate_min_run_length": 1}},
+                    "tools": {"clams_detection": {"run_tool": False}}}
+    checks = _detector.run_configs(tmp_path, over)["checks"]
+    assert checks.outputs.frame_analysis.duplicate_min_run_length == 1
+    assert checks.tools.clams_detection.run_tool is False
+    with pytest.raises(ValueError, match="no checks setting named outputs.frame_analysis.nonsense"):
+        _detector.run_configs(tmp_path, _detector.parse_overrides(["outputs.frame_analysis.nonsense=1"]))
+    with pytest.raises(ValueError, match="KEY=VALUE"):
+        _detector.parse_overrides(["duplicate_min_run_length"])
+
+
+def test_what_runs_by_default_needs_no_drive():
+    assert "duplicate_frames" in _detector.REPLAYABLE and "duplicate_frames" not in _detector.DEFAULT
+    assert set(_detector.DEFAULT) < set(_detector.REPLAYABLE)
+

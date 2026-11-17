@@ -743,7 +743,7 @@ class DryRunAnalyzer:
 
         # Duplicate Frame Detection — requires QCTools YDIF/UDIF/VDIF data
         duplicate_enabled = getattr(frame_config, 'enable_duplicate_frame_detection', False)
-        duplicate_min_run = getattr(frame_config, 'duplicate_min_run_length', 2)
+        duplicate_min_run = getattr(frame_config, 'duplicate_min_run_length', 1)
         if has_qctools:
             duplicate_reason = (
                 f"Min run length: {duplicate_min_run} frames, "

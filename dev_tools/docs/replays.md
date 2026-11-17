@@ -65,7 +65,7 @@ avspex-dev replay detector --detector bars --truth-only     # the fast loop whil
 avspex-dev replay detector --tapes JPC_AV_02678 -v          # one tape, listing what changed
 ```
 
-- **What is replayed.** `bars`, `chroma_phase`, `audio_dropout`, `audible_timecode`. The replay
+- **What is replayed.** `bars`, `chroma_phase`, `audio_dropout`, `audible_timecode` by default. The replay
   calls the real `run_qctparse()` on the stored report and the real
   `merge_head_bars_consensus()`, so a change anywhere in those is picked up, wiring included.
 - **What is frozen.** CLAMS reads the video, so its bars and tone spans and its SSIM scores are
@@ -74,8 +74,16 @@ avspex-dev replay detector --tapes JPC_AV_02678 -v          # one tape, listing 
   arbiter uses the recorded SSIM scores; if a change makes it ask about a span they do not
   cover, it scans the video when the drive is mounted, and otherwise says so and keeps the span
   (no evidence is not a rejection).
-- **What cannot be replayed.** `tone_leak`, `duplicate_frames` and `dropped_samples` read the
-  video itself.
+- **What cannot be replayed.** `tone_leak` and `dropped_samples` read the video itself.
+- **`duplicate_frames` can be, with the drive mounted.** Ask for it by name
+  (`--detector duplicate_frames`); it is not in the default set. Its candidates come from the
+  stored QCTools report and each is confirmed against the frames, as in the app, at 5 to 10 s a
+  tape. A tape whose video is not on a mounted drive scores as not run. The black segments it
+  avoids are read back from the run; the bars are the replayed consensus.
+- **Trying a setting.** `--set KEY=VALUE` (repeatable) lays a checks setting over the run's
+  config, e.g. `--set outputs.frame_analysis.duplicate_min_run_length=2`. The replay is kept
+  under a name ending `-set<hash>`, and `run.json` in it records the settings. This is also how
+  to replay a *new bundled default*: the run's own saved value otherwise wins.
 - **Config.** The run's saved config, not the one AV Spex has saved now. Nothing is saved.
 - **The check that makes it believable.** "Reproduces the run?" counts the tapes whose events
   come back identical. Under the code the run was collected with it must be all of them (it is,

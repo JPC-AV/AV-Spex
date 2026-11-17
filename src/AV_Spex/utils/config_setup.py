@@ -302,7 +302,7 @@ class FrameAnalysisConfig:
 
     # Duplicate frame detection settings
     enable_duplicate_frame_detection: bool = False
-    duplicate_min_run_length: int = 2
+    duplicate_min_run_length: int = 1
 
     # Video dropout: a tape-level flag measured inside the analysis periods
     enable_video_dropout_detection: bool = False

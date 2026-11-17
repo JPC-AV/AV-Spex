@@ -8,7 +8,7 @@ inject` makes the faults, so where they are is known, and counts how many the de
 avspex-dev inject dropped-samples            # splices and digital-silence gaps
 avspex-dev inject tone-leak                  # a leaked 1 kHz reference tone, at a range of levels
 avspex-dev inject duplicate-frames           # freezes of 1 to 15 repeated frames
-avspex-dev inject duplicate-frames --min-run-length 1     # the same, with a detector setting changed
+avspex-dev inject duplicate-frames --min-run-length 2     # the same, with a detector setting changed
 avspex-dev inject dropped-samples --tapes JPC_AV_01954 --keep ~/clips    # keep the clips, to listen
 ```
 

@@ -21,6 +21,8 @@ Also:
     avspex-dev label-sheet RUN ...     build a bin label sheet                         (label_sheet.py)
     avspex-dev replay detector [RUN]   re-run the QCTools-report detectors from a run's sidecars and
                                        score them: minutes, no tapes needed            (replays/detector.py)
+    avspex-dev inject FAULT [RUN]      put known faults into clips of real tapes and count what the
+                                       detector finds: dropped-samples | tone-leak | duplicate-frames (inject.py)
     avspex-dev replay NAME ...         harness | period-grid | bin-table | tag-weights (replays/)
     avspex-dev dropout NAME ...        scan | sheet | export                           (dropout_*.py, event_labels.py)
     avspex-dev corpus ...              run-id, import, and what collect calls          (corpus.py)
@@ -56,6 +58,7 @@ SCRIPTS = {
     "labels": ("labels.py", []),
     "label-sheet": ("label_sheet.py", []),
     "corpus": ("corpus.py", []),
+    "inject": ("inject.py", []),
 }
 GROUPS = {
     "replay": {"detector": "replays/detector.py", "harness": "replays/harness.py",

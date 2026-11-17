@@ -75,7 +75,7 @@ def detect_duplicate_frames(
     check_cancelled=None,
     color_bars_end_time: Optional[float] = None,
     black_segments: Optional[List[Tuple[float, float]]] = None,
-    min_run_length: int = 2,
+    min_run_length: int = 1,
 ) -> Optional[DuplicateFrameResult]:
     """
     Detect runs of likely duplicate frames using QCTools YDIF/UDIF/VDIF
