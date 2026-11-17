@@ -258,7 +258,10 @@ def replay_package(pkg_dir, out_dir, run_dir, detectors, overrides=None):
         _, (merged_end, demoted, regions) = pm.consensus_after_qctparse(parsed, str(csvs), bars_consensus)
 
         # What frame analysis records of the consensus, which is what the scorecard reads
-        fa = {"replay": True, "head_demoted": demoted}
+        fa = {"replay": True, "head_demoted": demoted,
+              # not scored: what the color-bars evaluation would measure, against qct-parse's own "head"
+              "evaluation_bars_span": parsed.get("evaluation_bars_span"),
+              "qctparse_head": [parsed.get("head_bars_start"), parsed.get("head_bars_end")]}
         spans = [(s, e) for s, e in regions or [] if e > s]
         if spans:
             fa["bars_regions"] = [{"start": s, "end": e} for s, e in spans]

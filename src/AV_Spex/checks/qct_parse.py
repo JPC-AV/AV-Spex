@@ -641,8 +641,11 @@ def evalBars(startObj,pkt,durationStart,durationEnd,framesList,buffSize):
         for event, elem in parser_iter: # iterparse the xml doc
             if elem.attrib['media_type'] == "video": # get just the video frames
                 frame_pkt_dts_time = elem.attrib[pkt] # get the timestamps for the current frame we're looking at
-                if frame_pkt_dts_time >= str(durationStart): 	# only work on frames that are after the start time   # only work on frames that are after the start time
-                    if float(frame_pkt_dts_time) > durationEnd:        # only work on frames that are before the end time
+                # Compare as numbers: as strings "10.0" < "6.6" and "95.0" > "900.0",
+                # which dropped bars frames past 10 s and pulled in non-bars frames
+                # whenever the span did not start in the first few seconds
+                if float(frame_pkt_dts_time) >= float(durationStart): 	# only work on frames that are after the start time
+                    if float(frame_pkt_dts_time) > float(durationEnd):        # only work on frames that are before the end time
                         break
                     frameDict = {}  # start an empty dict for the new frame
                     frameDict[pkt] = frame_pkt_dts_time  # give the dict the timestamp, which we have now
@@ -4013,6 +4016,33 @@ def _time_in_bars_region(t, bars_regions, margin=DROPOUT_BARS_MARGIN_SEC):
     return False
 
 
+# The shortest consensus bars span the evaluation will take its reference
+# values from when there is no confirmed head-bars span. evalBars() takes a
+# median over the span, which needs a few seconds of frames to mean anything.
+EVAL_BARS_MIN_SECONDS = 3.0
+
+
+def _evaluation_bars_span(merged_end, spans):
+    """The (start, end) bars span the color-bars evaluation should measure, from
+    the qct-parse/CLAMS consensus (merged_end, spans), or None when the consensus
+    holds no usable bars.
+
+    The confirmed head bars when there are any: the span the consensus head end
+    falls in. Without a head claim, the earliest span of at least
+    EVAL_BARS_MIN_SECONDS — bars found only mid-tape or at the tail are still
+    this tape's own bars, which is what the evaluation wants to grade against.
+    """
+    spans = sorted((s, e) for s, e in (spans or []) if s is not None and e is not None and e > s)
+    if merged_end is not None:
+        for start, end in spans:
+            if start < merged_end <= end + 1.0:
+                return (start, end)
+    for start, end in spans:
+        if end - start >= EVAL_BARS_MIN_SECONDS:
+            return (start, end)
+    return None
+
+
 def _frame_is_black(ymax, yhigh, ylow, bit_depth_10=True):
     """True for an all-black video frame, from its signalstats luma values.
     False when any of the three is missing: no evidence is not black."""
@@ -4296,13 +4326,18 @@ def run_qctparse(video_path, qctools_output_path, report_directory, check_cancel
             -> (merged_end, head_demoted, spans), the qct-parse/CLAMS cross-
             validation (processing_mgmt.merge_head_bars_consensus). Called once
             bars detection is done, so chroma-phase detection skips the bars the
-            consensus confirmed instead of whatever this module labelled "head".
-            Without it, chroma-phase detection skips up to the "head" region's end.
+            consensus confirmed instead of whatever this module labelled "head";
+            the color-bars evaluation measures the confirmed head bars and skips
+            the consensus spans; audio-dropout suppression adds the consensus
+            spans to this module's own regions. Without it, all three use this
+            module's own regions.
 
     Returns:
         dict: {'head_bars_start', 'head_bars_end', 'all_bars_regions', 'audio_findings',
-        'bars_consensus'} or None if cancelled. 'bars_consensus' is what the
-        callable returned, or None when there was none or it failed.
+        'bars_consensus', 'evaluation_bars_span'} or None if cancelled.
+        'bars_consensus' is what the callable returned, or None when there was
+        none or it failed. 'evaluation_bars_span' is the (start, end) bars span
+        the color-bars evaluation measures (whether or not it ran), or None.
     """
     
     checks_config = config_mgr.get_config('checks', ChecksConfig)
@@ -4629,6 +4664,38 @@ def run_qctparse(video_path, qctools_output_path, report_directory, check_cancel
             chroma_bars_end_time = consensus[0]
             chroma_bars_regions = list(consensus[2] or [])
 
+    # The color-bars evaluation used the raw regions too. It took its
+    # reference values from the "head" span, so on those tapes it graded the
+    # whole programme against a few seconds of graphics, and it skipped every
+    # raw region as bars, false ones included. With a consensus it measures
+    # the confirmed head bars (or falls back to SMPTE when the consensus holds
+    # no bars) and skips the consensus spans. Without one (qct-parse run on its
+    # own) the raw regions stand.
+    #
+    # Audio-dropout suppression takes the union instead: bars only CLAMS found
+    # are added, but the raw regions the consensus rejects are kept. Those are
+    # mostly slates, and a slate's line-up tone cutting off reads as a dropout
+    # (JPC_AV_02740: four slate ends, each a 40+ dB drop right as the slate
+    # ends); suppressing them only through the consensus would add those back.
+    confirmed_bars_regions = all_bars_regions
+    dropout_bars_regions = all_bars_regions
+    evaluation_bars_span = None
+    if consensus is not None:
+        confirmed_bars_regions = [("consensus", s, e) for s, e in (consensus[2] or [])]
+        dropout_bars_regions = list(all_bars_regions) + confirmed_bars_regions
+        evaluation_bars_span = _evaluation_bars_span(consensus[0], consensus[2])
+        raw_span = (durationStart, durationEnd)
+        durationStart, durationEnd = evaluation_bars_span if evaluation_bars_span else ("", "")
+        if qct_parse['barsDetection'] and raw_span != (durationStart, durationEnd):
+            logger.info(
+                "Color bars evaluation reference: "
+                + (f"{durationStart:.1f}s-{durationEnd:.1f}s (consensus bars)" if evaluation_bars_span
+                   else "none (the consensus confirmed no bars)")
+                + (f", not qct-parse's {float(raw_span[0]):.1f}s-{float(raw_span[1]):.1f}s"
+                   if raw_span[0] not in ("", None) and raw_span[1] not in ("", None) else "") + "\n")
+    elif durationStart not in ("", None) and durationEnd not in ("", None):
+        evaluation_bars_span = (float(durationStart), float(durationEnd))
+
     if check_cancelled():
         return None
 
@@ -4714,13 +4781,14 @@ def run_qctparse(video_path, qctools_output_path, report_directory, check_cancel
             else:
                 print_color_bar_values(baseName, smpte_color_bars, maxBarsDict, colorbars_values_output)
 
-            # Skip the detected bars regions themselves (head + additional):
+            # Skip the bars regions themselves (the consensus spans when there
+            # is a consensus, else the detected head + additional regions):
             # the evaluation scores content against the bars-derived
             # thresholds, and scoring bars against bars is self-referential
             # (additional bars would just flag against the head-bars values).
             bars_skip_regions = [
                 (region_start, region_end)
-                for _, region_start, region_end in all_bars_regions
+                for _, region_start, region_end in confirmed_bars_regions
                 if region_start is not None and region_end is not None
             ]
 
@@ -4761,6 +4829,13 @@ def run_qctparse(video_path, qctools_output_path, report_directory, check_cancel
         # Evaluate windowed (non-head) bars regions: produce a SMPTE
         # comparison CSV and first-frame thumbnail for each.
         windowed_regions = [r for r in all_bars_regions if r[0] != "head" and r[0] != "head-relaxed"]
+        if consensus is not None:
+            # A region the consensus threw out is not bars: nothing to compare with SMPTE
+            windowed_regions = [
+                r for r in windowed_regions
+                if r[1] is not None and r[2] is not None and any(
+                    r[1] < span_end and r[2] > span_start for _, span_start, span_end in confirmed_bars_regions)
+            ]
         for idx, (region_label, region_start, region_end) in enumerate(windowed_regions):
             if check_cancelled and check_cancelled():
                 break
@@ -4882,7 +4957,7 @@ def run_qctparse(video_path, qctools_output_path, report_directory, check_cancel
             detect_identical=True,
             signals=signals, total_duration=total_duration, fps=video_fps,
             tc_start_frames=tc_start_frames, tc_drop_frame=tc_drop_frame,
-            bars_regions=all_bars_regions,
+            bars_regions=dropout_bars_regions,
             video_path=video_path, audio_stream_indexes=audio_stream_indexes,
             check_cancelled=check_cancelled, bit_depth_10=bit_depth_10
         )
@@ -4943,6 +5018,7 @@ def run_qctparse(video_path, qctools_output_path, report_directory, check_cancel
         'all_bars_regions': all_bars_regions,
         'audio_findings': audio_findings,
         'bars_consensus': consensus,
+        'evaluation_bars_span': evaluation_bars_span,
     }
 
 

@@ -270,6 +270,31 @@ def test_eval_bars_brng_falls_back_to_floor_when_unmeasured(tmp_path, monkeypatc
     assert bars["YMIN"] == 1023
 
 
+def test_eval_bars_compares_span_bounds_as_numbers(tmp_path, monkeypatch):
+    """evalBars once compared timestamps as strings: "10.0" < "6.6" dropped
+    every bars frame from 10 s on, and "95.0" > "100.0" pulled frames from
+    long before the span into it. Each case below has a different median
+    under the two comparisons."""
+    import collections
+    monkeypatch.setattr(qp, "_get_smpte_brng_floor", lambda: 0.01)
+
+    def run(level_at, start, end):
+        frames = []
+        for index in range(1200):
+            t = index * 0.1
+            tags = {tag: level_at(t) for tag in _EVAL_BARS_LEVEL_TAGS}
+            tags["BRNG"] = 0.02
+            frames.append((f"{t:.3f}", tags))
+        path = tmp_path / f"report_{start}.qctools.xml.gz"
+        _write_qctools_gz(path, frames)
+        return qp.evalBars(str(path), "pkt_dts_time", start, end, collections.deque(maxlen=11), 11)
+
+    # 6.6-10 s reads 900, 10-16 s reads 500: most of the span is 500
+    assert run(lambda t: 900 if t < 10 else 500, 6.6, 16.0)["YMAX"] == 500
+    # Everything before 100 s reads 900, the span itself 100
+    assert run(lambda t: 900 if t < 100 else 100, 100.0, 110.0)["YMAX"] == 100
+
+
 def test_get_smpte_brng_floor_reads_config(monkeypatch):
     fake_spex = MagicMock()
     fake_spex.qct_parse_values.smpte_color_bars.BRNG = 0.025
@@ -1515,3 +1540,33 @@ def test_dropout_results_drop_cut_to_black_events(tmp_path):
     dropped = qp._detect_and_write_dropout_results(
         list(cands), str(tmp_path), 1000, rms_series=_rms(-69.0), black_series=_black(from_time=100.2))
     assert dropped['dropout_events'] == 0 and dropped['cut_to_black_suppressed'] == 1
+
+
+# ---------------------------------------------------------------------------
+# Section 4d — _evaluation_bars_span (what the color-bars evaluation measures)
+# ---------------------------------------------------------------------------
+
+def test_evaluation_span_is_the_consensus_head_bars():
+    # JPC_AV_04178: qct-parse's "head" was 262-267 s of graphics; the consensus
+    # head ends at 16 s and its spans no longer hold the false one
+    assert qp._evaluation_bars_span(16.0, [(6.6, 16.0), (566.2, 567.8)]) == (6.6, 16.0)
+
+
+def test_evaluation_span_takes_the_span_the_head_end_falls_in_not_the_first():
+    assert qp._evaluation_bars_span(46.0, [(0.5, 1.2), (1.6, 46.0)]) == (1.6, 46.0)
+    # the consensus end can sit a hair past the span it closes
+    assert qp._evaluation_bars_span(24.5, [(2.0, 24.0)]) == (2.0, 24.0)
+
+
+def test_evaluation_span_without_a_head_is_the_first_bars_long_enough_to_measure():
+    # JPC_AV_02678: bars found only as "additional", so no head end inside qct-parse
+    assert qp._evaluation_bars_span(None, [(6.7, 37.1)]) == (6.7, 37.1)
+    assert qp._evaluation_bars_span(None, [(100.0, 101.5), (900.0, 930.0)]) == (900.0, 930.0)
+
+
+def test_evaluation_span_is_none_when_the_consensus_holds_no_usable_bars():
+    # JPC_AV_02217: the only claim, 160-164 s, was thrown out -> SMPTE fallback
+    assert qp._evaluation_bars_span(None, None) is None
+    assert qp._evaluation_bars_span(None, []) is None
+    assert qp._evaluation_bars_span(None, [(100.0, 101.5)]) is None
+    assert qp._evaluation_bars_span(None, [(None, 5.0), (8.0, 8.0)]) is None
