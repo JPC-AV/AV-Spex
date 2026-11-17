@@ -273,13 +273,35 @@ def test_the_sheet_arguments_parse_the_way_scorecard_reads_them(corp, monkeypatc
     from AV_Spex.utils.log_setup import logger
     monkeypatch.setattr(logger, "level", logger.level)   # scorecard.main() quiets the app logger
     seen = {}
-    monkeypatch.setattr(scorecard, "write_sheet", lambda run, truth, tol, names, dest, heldout=False:
-                        seen.update(run=run.name, names=names, dest=dest, heldout=heldout))
+    monkeypatch.setattr(scorecard, "write_sheet",
+                        lambda run, truth, tol, names, dest, heldout=False, max_per_tape=None, seed=None:
+                        seen.update(run=run.name, names=names, dest=dest, heldout=heldout,
+                                    max_per_tape=max_per_tape, seed=seed))
     add_package(corp, "abc1234", A, "2026-11-01T10:00:00")
     _, args = cli.script_call("sheet", ["abc", "--detector", "bars", "-o", "r.xlsx"])
     monkeypatch.setattr(sys, "argv", ["scorecard.py", *args])
     scorecard.main()
-    assert seen == {"run": "abc1234", "names": ["bars"], "dest": "r.xlsx", "heldout": False}
+    assert seen.pop("seed")            # today's date when none is given
+    assert seen == {"run": "abc1234", "names": ["bars"], "dest": "r.xlsx", "heldout": False,
+                    "max_per_tape": None}
+    _, args = cli.script_call("sheet", ["abc", "--heldout", "--max-per-tape", "10", "--seed", "7"])
+    monkeypatch.setattr(sys, "argv", ["scorecard.py", *args])
+    scorecard.main()
+    assert (seen["heldout"], seen["max_per_tape"], seen["seed"]) == (True, 10, "7")
+
+
+def test_a_sheet_sample_caps_each_tape_and_can_be_repeated():
+    rows = [("T1", f"00:00:{n:02d}:00", f"00:00:{n:02d}:10", 0.3, "v") for n in range(30)]
+    rows += [("T2", "00:01:00:00", "00:01:00:10", 0.3, "v"), ("T3", "", "", "", "v")]
+    kept, dropped = scorecard.sample_per_tape(rows, 10, "20261116")
+    assert dropped == 20
+    assert [r[0] for r in kept].count("T1") == 10
+    assert [r for r in kept if r[0] != "T1"] == rows[30:]           # small tapes and whole-tape rows untouched
+    t1 = [r[1] for r in kept if r[0] == "T1"]
+    assert t1 == sorted(t1)                                          # still in time order
+    assert scorecard.sample_per_tape(rows, 10, "20261116") == (kept, dropped)
+    assert scorecard.sample_per_tape(rows, 10, "other")[0] != kept
+    assert scorecard.sample_per_tape(rows, None, "x") == (rows, 0)
 
 
 def test_unknown_commands_and_bad_group_names_are_refused():

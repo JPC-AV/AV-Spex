@@ -91,12 +91,19 @@ def script_call(command, argv):
         ap.add_argument("--detector", action="append", help="only this detector (repeatable)")
         ap.add_argument("--heldout", action="store_true",
                         help="the held-out test form: only tapes the ledger reserves for the detector")
+        ap.add_argument("--max-per-tape", type=int, metavar="N",
+                        help="at most N events from any one tape, picked at random by --seed")
+        ap.add_argument("--seed", help="with --max-per-tape: default is today's date as YYYYMMDD")
         a = ap.parse_args(argv)
         out = [a.run] if a.run else []
         for d in a.detector or []:
             out += ["--detector", d]
         if a.heldout:
             out.append("--heldout")
+        if a.max_per_tape:
+            out += ["--max-per-tape", str(a.max_per_tape)]
+        if a.seed:
+            out += ["--seed", a.seed]
         return HERE / "scorecard.py", [*out, "--sheet", *([a.out] if a.out else [])]
     return None
 

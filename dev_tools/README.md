@@ -126,7 +126,9 @@ run: bd5014b-cb355033 (latest)
 ```
 
 One row per thing a detector reported that nobody has judged yet. `--detector bars` limits it
-to one detector (repeatable).
+to one detector (repeatable). `--max-per-tape 10` keeps a tape that reports hundreds of events
+from being most of the sheet: it contributes a random 10 (the seed is printed), and the rest
+stay unjudged.
 
 **4. Fill it in.** Open the workbook (the `instructions` tab repeats this). For each row, open
 the video at `tc_in`. The timecodes are the file's own, as your NLE or player shows them.

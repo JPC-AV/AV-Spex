@@ -425,8 +425,27 @@ def default_sheet_path(run):
     return path
 
 
-def write_sheet(run, truth, tolerance, names, dest, heldout=False):
-    """One workbook of every unjudged event, with a verdict dropdown, for an operator to fill in."""
+def sample_per_tape(rows, limit, seed):
+    """At most `limit` of each tape's events, picked by a seed so the choice can be repeated,
+    kept in time order. Whole-tape rows (no span) are never dropped. Returns (rows, left out)."""
+    import random
+    by_tape, out, dropped = {}, [], 0
+    for row in rows:
+        by_tape.setdefault(row[0], []).append(row)
+    for vid, tape_rows in by_tape.items():
+        events = [r for r in tape_rows if r[1]]
+        if limit and len(events) > limit:
+            keep = set(random.Random(f"{seed}:{vid}").sample(range(len(events)), limit))
+            dropped += len(events) - limit
+            events = [r for i, r in enumerate(events) if i in keep]
+        out += [r for r in tape_rows if not r[1]] + events
+    return out, dropped
+
+
+def write_sheet(run, truth, tolerance, names, dest, heldout=False, max_per_tape=None, seed=None):
+    """One workbook of every unjudged event, with a verdict dropdown, for an operator to fill in.
+    With max_per_tape, a tape reporting more events than that contributes a seeded sample of them;
+    the rest stay unjudged."""
     import openpyxl
     from openpyxl.styles import Alignment, Font
     from openpyxl.worksheet.datavalidation import DataValidation
@@ -436,9 +455,11 @@ def write_sheet(run, truth, tolerance, names, dest, heldout=False):
     ws.append(SHEET_COLUMNS)
     for c in ws[1]:
         c.font = Font(bold=True)
-    counts = Counter()
+    counts, left_out = Counter(), Counter()
     for name in names:
-        for vid, tc_in, tc_out, secs, video in unjudged_events(run, truth, tolerance, name, heldout):
+        rows, left_out[name] = sample_per_tape(
+            list(unjudged_events(run, truth, tolerance, name, heldout)), max_per_tape, seed)
+        for vid, tc_in, tc_out, secs, video in rows:
             ws.append((name, vid, tc_in, tc_out, secs, "", "", video))
             counts[name] += 1
     dv = DataValidation(type="list", formula1='"%s"' % ",".join(VERDICTS), allow_blank=True)
@@ -453,6 +474,10 @@ def write_sheet(run, truth, tolerance, names, dest, heldout=False):
     info.column_dimensions["B"].width = 110
     for term, text in SHEET_INSTRUCTIONS:
         info.append((term, text))
+    if sum(left_out.values()):
+        info.append(("Sampled", f"Tapes reporting more than {max_per_tape} events show a random {max_per_tape} of "
+                                f"them (seed {seed}); {sum(left_out.values())} event(s) are not on this sheet and "
+                                f"stay unjudged."))
     for row in info.iter_rows():
         row[0].font = Font(bold=True)
         for c in row:
@@ -461,7 +486,8 @@ def write_sheet(run, truth, tolerance, names, dest, heldout=False):
     wb.save(dest)
     print(f"{sum(counts.values())} unjudged event(s) from {run.name} -> {dest}")
     for name in names:
-        print(f"    {name:<18} {counts[name]:>4}")
+        more = f"   ({left_out[name]} more left off: at most {max_per_tape} per tape, seed {seed})" if left_out[name] else ""
+        print(f"    {name:<18} {counts[name]:>4}{more}")
     print(f"Fill in the verdict column (see the instructions tab), then: avspex-dev import-sheet {dest}")
 
 
@@ -520,6 +546,10 @@ def main():
     ap.add_argument("--heldout", action="store_true",
                     help="with --sheet: only the tapes the ledger holds out for each detector "
                          "(the form for scoring a held-out test)")
+    ap.add_argument("--max-per-tape", type=int, metavar="N",
+                    help="with --sheet: at most N events from any one tape, picked at random by --seed "
+                         "(a tape that reports hundreds would otherwise be most of the sheet)")
+    ap.add_argument("--seed", help="with --max-per-tape: default is today's date as YYYYMMDD")
     ap.add_argument("--import-sheet", metavar="XLSX", help="append a filled-in workbook's verdicts to truth/")
     ap.add_argument("--tolerance", type=float, default=1.0, help="seconds of slack either side of a span")
     ap.add_argument("--out", help="write one CSV row per truth row")
@@ -556,8 +586,10 @@ def main():
         unjudged(run, truth, args.tolerance, args.unjudged)
         return
     if args.sheet is not None:
+        import datetime
         write_sheet(run, truth, args.tolerance, args.detector or list(DETECTORS),
-                    args.sheet or default_sheet_path(run), args.heldout)
+                    args.sheet or default_sheet_path(run), args.heldout, args.max_per_tape,
+                    args.seed or datetime.date.today().strftime("%Y%m%d"))
         return
     if args.compare:
         other = resolve_run(args.compare)
