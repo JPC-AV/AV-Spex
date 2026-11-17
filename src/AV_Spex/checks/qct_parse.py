@@ -16,6 +16,7 @@ import shutil
 import sys
 import re
 import operator
+import bisect
 import collections      # for circular buffer
 import statistics       # for median of bars values
 import csv
@@ -1282,6 +1283,29 @@ DROPOUT_LONG_EVENT_SEC = 2.0          # events longer than this require high con
 DROPOUT_LONG_EVENT_MIN_CORR = 2       # minimum corroborating metrics for long events
 DROPOUT_BARS_MARGIN_SEC = 1.0         # suppress candidates this long past a bars region (tone-off cliff)
 DROPOUT_ZCR_XCHAN_TOLERANCE_SEC = 0.5  # ZCR-only events need another channel firing within this window
+# A programme that fades or cuts out goes silent exactly as a dropout does, and
+# at the 0.1 s the report measures audio in, the two fall at the same rate. What
+# differs is the picture: at a programme end it goes to black and the sound
+# stays away; over a dropout the picture carries on. An event is dropped when,
+# from DROPOUT_CUT_SETTLE_SEC after it, the channel is still at least
+# DROPOUT_CUT_STAY_DOWN_DB under its level before the event for
+# DROPOUT_CUT_WINDOW_SEC, and the picture is black for that same stretch.
+# Calibrated on the five fade-outs judged on JPC_AV_04372/04374/04381/04382
+# (black within 0.3 s, silent for 2 s or more); every dropout judged real over
+# continuing picture keeps a non-black picture, and the ones in black
+# (JPC_AV_02213) recover within a frame.
+DROPOUT_CUT_SETTLE_SEC = 0.5
+DROPOUT_CUT_WINDOW_SEC = 1.0
+DROPOUT_CUT_STAY_DOWN_DB = 20.0
+DROPOUT_CUT_BLACK_SHARE = 0.9
+DROPOUT_CUT_MIN_AUDIO_FRAMES = 3
+DROPOUT_CUT_MIN_VIDEO_FRAMES = 10
+# An all-black frame, 10-bit scale (divided by 4 for 8-bit reports). The same
+# three limits as frame_analysis._is_black_frame, which is what the report's
+# black segments are built from; keep the two in step.
+BLACK_FRAME_YMAX_10BIT = 300.0
+BLACK_FRAME_YHIGH_10BIT = 115.0
+BLACK_FRAME_YLOW_10BIT = 97.0
 
 # ---------------------------------------------------------------------------
 # Identical channel (dual mono) detection thresholds
@@ -1684,7 +1708,7 @@ CHROMA_THUMBS_DIRNAME = "ChromaPhaseThumbs"
 
 def analyzeChromaPhaseErrors(startObj, pkt, report_directory, bit_depth_10,
                              bars_end_time=None, video_path=None,
-                             signals=None, total_duration=None):
+                             signals=None, total_duration=None, bars_regions=None):
     """
     Detect chroma phase errors - typically caused by helical-scan tracking
     failures on tape source, producing sudden shifts of the chroma signal so
@@ -1705,10 +1729,15 @@ def analyzeChromaPhaseErrors(startObj, pkt, report_directory, bit_depth_10,
             thumbnails are generated for the top-N events by frame count.
         signals: Optional signals object for emitting progress updates.
         total_duration (float or None): Total video duration in seconds for progress.
+        bars_regions (list or None): (start_seconds, end_seconds) colour-bars
+            spans anywhere in the file; frames inside one are skipped too.
+            Bars are saturated colour edge to edge, which is what both rules
+            look for, so they have to be spans something has confirmed as bars.
 
     Returns:
         dict or None: Results dict (also written to CSV), or None on failure.
     """
+    bars_regions = [(s, e) for s, e in (bars_regions or []) if s is not None and e is not None and e > s]
     etree = load_etree()
     if etree is None:
         return None
@@ -1756,7 +1785,8 @@ def analyzeChromaPhaseErrors(startObj, pkt, report_directory, bit_depth_10,
                     signals.qctparse_progress.emit(pct)
                     last_pct = pct
 
-            if bars_end_time is not None and frame_time < bars_end_time:
+            if (bars_end_time is not None and frame_time < bars_end_time) or any(
+                    region_start <= frame_time <= region_end for region_start, region_end in bars_regions):
                 frames_skipped_bars += 1
                 elem.clear()
                 continue
@@ -1984,7 +2014,7 @@ def _write_chroma_phase_results(report_directory, results):
         )
 
 
-def analyzeAudio(startObj, pkt, report_directory, detect_clipping=False, detect_imbalance=False, detect_timecode=False, detect_dropout=False, detect_identical=False, signals=None, total_duration=None, fps=None, tc_start_frames=0, tc_drop_frame=False, bars_regions=None, video_path=None, audio_stream_indexes=None, check_cancelled=None):
+def analyzeAudio(startObj, pkt, report_directory, detect_clipping=False, detect_imbalance=False, detect_timecode=False, detect_dropout=False, detect_identical=False, signals=None, total_duration=None, fps=None, tc_start_frames=0, tc_drop_frame=False, bars_regions=None, video_path=None, audio_stream_indexes=None, check_cancelled=None, bit_depth_10=True):
     """
     Analyzes audio frames in a QCTools report in a single pass. Optionally detects
     audio clipping (Peak_level >= threshold), channel imbalance (comparing
@@ -2062,9 +2092,28 @@ def analyzeAudio(startObj, pkt, report_directory, detect_clipping=False, detect_
     dropout_max_diff_windows = {}
     dropout_rms_diff_windows = {}
     dropout_zcr_windows = {}
+    # What the cut-to-black check reads after the pass: each channel's level over
+    # time, and whether each video frame is black. Both in report order.
+    dropout_rms_series = {}       # {ch_num: ([time, ...], [rms, ...])}
+    dropout_black_series = ([], [])
 
     try:
         for event, elem in parser_iter:
+            if detect_dropout and elem.attrib.get('media_type') == "video":
+                luma = {}
+                for t in elem:
+                    key = t.attrib.get('key', '')
+                    if key in ('lavfi.signalstats.YMAX', 'lavfi.signalstats.YHIGH', 'lavfi.signalstats.YLOW'):
+                        try:
+                            luma[key.rsplit('.', 1)[1]] = float(t.attrib['value'])
+                        except (ValueError, KeyError):
+                            pass
+                try:
+                    dropout_black_series[0].append(float(elem.attrib.get(pkt, "")))
+                    dropout_black_series[1].append(_frame_is_black(
+                        luma.get('YMAX'), luma.get('YHIGH'), luma.get('YLOW'), bit_depth_10))
+                except ValueError:
+                    pass
             if elem.attrib.get('media_type') == "audio":
                 total_audio_frames += 1
                 frame_pkt_dts_time = elem.attrib.get(pkt, "0")
@@ -2194,6 +2243,9 @@ def analyzeAudio(startObj, pkt, report_directory, detect_clipping=False, detect_
                         rms = metrics.get('RMS_level')
                         if rms is None:
                             continue
+                        ch_times, ch_levels = dropout_rms_series.setdefault(ch_num, ([], []))
+                        ch_times.append(frame_time)
+                        ch_levels.append(rms)
 
                         # Initialize rolling windows for this channel
                         if ch_num not in dropout_rms_windows:
@@ -2296,7 +2348,8 @@ def analyzeAudio(startObj, pkt, report_directory, detect_clipping=False, detect_
         dropout_results = _detect_and_write_dropout_results(
             dropout_candidates, report_directory, total_audio_frames,
             fps=fps, tc_start_frames=tc_start_frames, tc_drop_frame=tc_drop_frame,
-            bars_regions=bars_regions
+            bars_regions=bars_regions,
+            rms_series=dropout_rms_series, black_series=dropout_black_series,
         )
 
     # Run identical-channel (dual mono) detection
@@ -3960,6 +4013,46 @@ def _time_in_bars_region(t, bars_regions, margin=DROPOUT_BARS_MARGIN_SEC):
     return False
 
 
+def _frame_is_black(ymax, yhigh, ylow, bit_depth_10=True):
+    """True for an all-black video frame, from its signalstats luma values.
+    False when any of the three is missing: no evidence is not black."""
+    if ymax is None or yhigh is None or ylow is None:
+        return False
+    scale = 1.0 if bit_depth_10 else 0.25
+    return (ymax < BLACK_FRAME_YMAX_10BIT * scale and yhigh < BLACK_FRAME_YHIGH_10BIT * scale
+            and ylow < BLACK_FRAME_YLOW_10BIT * scale)
+
+
+def _series_between(series, lo, hi):
+    """Values of a (times, values) pair of parallel lists with lo < time <= hi."""
+    if not series:
+        return []
+    times, values = series
+    return values[bisect.bisect_right(times, lo):bisect.bisect_right(times, hi)]
+
+
+def _is_cut_to_black(event, rms_series, black_series):
+    """True when a dropout event is the programme ending rather than the tape dropping out:
+    the channel stays down and the picture is black (see DROPOUT_CUT_* above).
+
+    `rms_series` is {channel: (times, RMS levels)} and `black_series` is
+    (times, is-black flags) for the video frames. Too few frames of either after
+    the event (end of file, or a report without video frames, as the per-stream
+    audio stats sidecar is) is not enough evidence and returns False.
+    """
+    lo = event.end_time + DROPOUT_CUT_SETTLE_SEC
+    hi = lo + DROPOUT_CUT_WINDOW_SEC
+    levels = _series_between((rms_series or {}).get(event.channel), event.end_time, hi)
+    if len(levels) < DROPOUT_CUT_MIN_AUDIO_FRAMES:
+        return False
+    if max(levels) > event.median_rms_level - DROPOUT_CUT_STAY_DOWN_DB:
+        return False
+    black = _series_between(black_series, lo, hi)
+    if len(black) < DROPOUT_CUT_MIN_VIDEO_FRAMES:
+        return False
+    return sum(black) / len(black) >= DROPOUT_CUT_BLACK_SHARE
+
+
 def _is_zcr_only(event):
     """True if the event's sole corroborating metric is the Zero_crossings_rate
     spike. ZCR climbs during ordinary silence (the noise floor hovers around
@@ -4071,7 +4164,7 @@ def _merge_dropout_candidates(candidates):
 
 def _detect_and_write_dropout_results(dropout_candidates, report_directory, total_audio_frames,
                                       fps=None, tc_start_frames=0, tc_drop_frame=False,
-                                      bars_regions=None):
+                                      bars_regions=None, rms_series=None, black_series=None):
     """Merge dropout candidates into events, write CSV, and return results dict.
 
     Event Timestamp Start/End are written as the file's own timecode (NDF
@@ -4081,6 +4174,9 @@ def _detect_and_write_dropout_results(dropout_candidates, report_directory, tota
     `bars_regions` (the run_qctparse `all_bars_regions` list) suppresses
     candidates inside a color-bars region or just past its end — a reference
     tone shutting off there mimics a dropout's RMS cliff but isn't one.
+
+    `rms_series` and `black_series` (see _is_cut_to_black) drop events where
+    the programme ends: the sound stays away and the picture is black.
     """
 
     # Drop candidates that fall in a color-bars/tone region before merging.
@@ -4116,6 +4212,16 @@ def _detect_and_write_dropout_results(dropout_candidates, report_directory, tota
             f"without cross-channel support\n")
     events = zcr_kept
 
+    # Suppress events where the programme fades or cuts out to black. Last, so an
+    # event dropped here still counted as cross-channel support above.
+    cut_kept = [ev for ev in events if not _is_cut_to_black(ev, rms_series, black_series)]
+    cut_suppressed = len(events) - len(cut_kept)
+    if cut_suppressed:
+        logger.debug(
+            f"Dropout: suppressed {cut_suppressed} event(s) where the sound stays "
+            f"away and the picture is black (programme end, not a dropout)\n")
+    events = cut_kept
+
     dropout_detected = len(events) > 0
     frames_flagged = len(dropout_candidates)
 
@@ -4125,6 +4231,7 @@ def _detect_and_write_dropout_results(dropout_candidates, report_directory, tota
         'frames_flagged': frames_flagged,
         'total_audio_frames': total_audio_frames,
         'events': events,
+        'cut_to_black_suppressed': cut_suppressed,
     }
 
     audio_dropout_csv = os.path.join(report_directory, "qct-parse_audio_dropout.csv")
@@ -4172,7 +4279,7 @@ def _detect_and_write_dropout_results(dropout_candidates, report_directory, tota
     return results
 
 
-def run_qctparse(video_path, qctools_output_path, report_directory, check_cancelled=None, signals=None, clams_regions=None):
+def run_qctparse(video_path, qctools_output_path, report_directory, check_cancelled=None, signals=None, clams_regions=None, bars_consensus=None):
     """
     Executes the qct-parse analysis on a given video file, exporting relevant data and thumbnails based on specified thresholds and profiles.
 
@@ -4185,9 +4292,17 @@ def run_qctparse(video_path, qctools_output_path, report_directory, check_cancel
         clams_regions (list or None): List of (start_seconds, end_seconds, label)
             tuples from CLAMS detection. qct-parse runs additional detectBars()
             passes on regions beyond the head scan window.
+        bars_consensus (callable or None): (head_start, head_end, all_bars_regions)
+            -> (merged_end, head_demoted, spans), the qct-parse/CLAMS cross-
+            validation (processing_mgmt.merge_head_bars_consensus). Called once
+            bars detection is done, so chroma-phase detection skips the bars the
+            consensus confirmed instead of whatever this module labelled "head".
+            Without it, chroma-phase detection skips up to the "head" region's end.
 
     Returns:
-        dict: {'head_bars_start', 'head_bars_end', 'all_bars_regions'} or None if cancelled.
+        dict: {'head_bars_start', 'head_bars_end', 'all_bars_regions', 'audio_findings',
+        'bars_consensus'} or None if cancelled. 'bars_consensus' is what the
+        callable returned, or None when there was none or it failed.
     """
     
     checks_config = config_mgr.get_config('checks', ChecksConfig)
@@ -4491,6 +4606,29 @@ def run_qctparse(video_path, qctools_output_path, report_directory, check_cancel
         except (TypeError, ValueError):
             chroma_bars_end_time = None
 
+    # The "head" label above is only the first span the luma thresholds caught
+    # in the head scan. On degraded head bars that is often a few seconds of
+    # saturated graphics minutes into the program, with the real bars found
+    # later as "additional" (JPC_AV_04178: "head" 262-267 s, bars 7-16 s), or
+    # there is no "head" at all (JPC_AV_02678). The consensus sorts that out
+    # against the CLAMS SSIM evidence, so take the bars to skip from it.
+    consensus = None
+    chroma_bars_regions = []
+    if bars_consensus is not None:
+        head_region = next((r for r in all_bars_regions if r[0] in ("head", "head-relaxed")), None)
+        try:
+            consensus = bars_consensus(
+                head_region[1] if head_region else None,
+                head_region[2] if head_region else None,
+                all_bars_regions,
+            )
+        except Exception as e:
+            logger.warning(f"Bars consensus failed inside qct-parse ({e}); chroma-phase detection "
+                           f"falls back to the qct-parse head bars\n")
+        if consensus is not None:
+            chroma_bars_end_time = consensus[0]
+            chroma_bars_regions = list(consensus[2] or [])
+
     if check_cancelled():
         return None
 
@@ -4672,6 +4810,7 @@ def run_qctparse(video_path, qctools_output_path, report_directory, check_cancel
             bars_end_time=chroma_bars_end_time,
             video_path=video_path,
             signals=signals, total_duration=total_duration,
+            bars_regions=chroma_bars_regions,
         )
         if chroma_results is None:
             logger.warning("Chroma-phase detection could not be performed\n")
@@ -4745,7 +4884,7 @@ def run_qctparse(video_path, qctools_output_path, report_directory, check_cancel
             tc_start_frames=tc_start_frames, tc_drop_frame=tc_drop_frame,
             bars_regions=all_bars_regions,
             video_path=video_path, audio_stream_indexes=audio_stream_indexes,
-            check_cancelled=check_cancelled
+            check_cancelled=check_cancelled, bit_depth_10=bit_depth_10
         )
         if clipping_results is None:
             logger.warning("Audio clipping detection could not be performed\n")
@@ -4803,6 +4942,7 @@ def run_qctparse(video_path, qctools_output_path, report_directory, check_cancel
         'head_bars_end': head_region[2] if head_region else None,
         'all_bars_regions': all_bars_regions,
         'audio_findings': audio_findings,
+        'bars_consensus': consensus,
     }
 
 

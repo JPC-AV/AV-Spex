@@ -6,7 +6,8 @@ What is re-run, under the code as it is now:
 
     run_qctparse()               bars detection, chroma phase, audio analysis, read from the
                                  package's QCTools report (and its audio stats sidecar)
-    merge_head_bars_consensus()  the qct-parse / CLAMS cross-validation
+    merge_head_bars_consensus()  the qct-parse / CLAMS cross-validation, handed to
+    consensus_after_qctparse()   run_qctparse and finished the way process_qctools_output() does
 
 What is frozen from the run, because it reads the video:
 
@@ -169,25 +170,29 @@ def replay_package(pkg_dir, out_dir, run_dir, detectors):
         clams_regions, clams_head_start, clams_head_end, clams_ran = frozen_clams(pkg.csvs)
         clams_ran = clams_ran and bool(configs["checks"].tools.clams_detection.run_tool)
 
-        parsed = qct_parse.run_qctparse(video_path, str(report), str(csvs),
-                                        check_cancelled=lambda: False, clams_regions=clams_regions)
-        if parsed is None:
-            raise RuntimeError("run_qctparse returned nothing")
-
         def region_is_bars(lo, hi):
             if lo is not None and hi is not None and hi > lo and not have_video:
                 score, samples = pm._clams_max_ssim_in_span(str(csvs), vid, lo, hi)
-                if samples < 3 or score is None:
+                if (samples < 3 or score is None) and (round(lo, 2), round(hi, 2)) not in result["no_evidence"]:
                     result["no_evidence"].append((round(lo, 2), round(hi, 2)))
+                if samples < 3 or score is None:
                     return None
             return pm._clams_region_is_bars(video_path, str(csvs), vid, lo, hi)
 
-        merged_end, demoted, regions = pm.merge_head_bars_consensus(
-            qctparse_head_start=parsed.get("head_bars_start"),
-            qctparse_head_end=parsed.get("head_bars_end"),
-            qctparse_all_regions=parsed.get("all_bars_regions") or [],
-            clams_head_start=clams_head_start, clams_head_end_raw=clams_head_end,
-            clams_regions=clams_regions, clams_ran=clams_ran, region_is_bars=region_is_bars)
+        # As process_qctools_output() builds it, with the frozen CLAMS claims
+        def bars_consensus(head_start, head_end, all_regions):
+            return pm.merge_head_bars_consensus(
+                qctparse_head_start=head_start, qctparse_head_end=head_end,
+                qctparse_all_regions=all_regions,
+                clams_head_start=clams_head_start, clams_head_end_raw=clams_head_end,
+                clams_regions=clams_regions, clams_ran=clams_ran, region_is_bars=region_is_bars)
+
+        parsed = qct_parse.run_qctparse(video_path, str(report), str(csvs),
+                                        check_cancelled=lambda: False, clams_regions=clams_regions,
+                                        bars_consensus=bars_consensus)
+        if parsed is None:
+            raise RuntimeError("run_qctparse returned nothing")
+        _, (merged_end, demoted, regions) = pm.consensus_after_qctparse(parsed, str(csvs), bars_consensus)
 
         # What frame analysis records of the consensus, which is what the scorecard reads
         fa = {"replay": True, "head_demoted": demoted}

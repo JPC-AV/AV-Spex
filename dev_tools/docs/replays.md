@@ -86,6 +86,9 @@ avspex-dev replay detector --tapes JPC_AV_02678 -v          # one tape, listing 
   a new miss; `-v` lists those so they can be reviewed.
 - **Held-out tapes** are replayed (computing is not looking) but left out of everything printed
   for the detector they are reserved for.
+- **Fresh tapes** (never looked at for the detector) are counted, but `-v` does not list their
+  events unless `--list-fresh` is given. Reading that list uses the tapes up as a test, so draw
+  the held-out set first (`avspex-dev ledger draw`).
 - **Where it goes.** `out/replays/replay-<run>-<code>/` in the corpus, untracked. `<code>` is
   the commit plus a hash of uncommitted `src/` changes, so each state of the code gets its own
   replay and re-running skips tapes already done (`--force` redoes them; use it after editing

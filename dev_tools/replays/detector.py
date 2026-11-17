@@ -32,7 +32,8 @@ corpus (not tracked by git), so the other tools take it wherever they take a run
 
 Held-out tapes are replayed like any other (nothing is looked at by computing), but a tape
 reserved for a detector in the ledger is left out of everything this command prints for that
-detector. The run's saved config is used, not the one AV Spex has saved now; nothing is saved.
+detector. Tapes nobody has looked at for a detector are counted, but -v does not list their
+events unless --list-fresh is given, so they stay usable as a held-out test. The run's saved config is used, not the one AV Spex has saved now; nothing is saved.
 Running again under the same code skips tapes already replayed (--force redoes them).
 """
 import argparse
@@ -121,7 +122,7 @@ def _overlaps(ev, others, tol):
     return any(ev[0] <= o[1] + tol and ev[1] >= o[0] - tol for o in others)
 
 
-def report(run, dest, tapes, detectors, tolerance, verbose):
+def report(run, dest, tapes, detectors, tolerance, verbose, list_fresh=False):
     from AV_Spex.checks.qct_parse import _tc_format_timecode
     truth, problems = sc.load_truth(detectors)
     for p in problems:
@@ -132,6 +133,8 @@ def report(run, dest, tapes, detectors, tolerance, verbose):
     res_run, _ = sc.score(run, truth, tolerance)
     res_new, _ = sc.score(dest, truth, tolerance)
     held = {d: ledger.reserved(d) for d in detectors}
+    uses = ledger.by_tape(ledger.read_rows())
+    fresh = lambda d, vid: ledger.status(uses.get(vid, {}).get(d)) == "fresh"
     shown = {d: {v: p for v, p in tapes.items() if v in new_pkgs and v not in held[d]} for d in detectors}
 
     events, differ = {}, {d: [] for d in detectors}
@@ -192,13 +195,24 @@ def report(run, dest, tapes, detectors, tolerance, verbose):
         print(f"  {d:<18} {n_old:>4} -> {n_new:<4}  {n_gone} no longer reported, {n_added} new")
     if listing and verbose:
         print()
+        hidden = Counter()
         for d, vid, what, tc_in, tc_out, secs in listing:
+            if fresh(d, vid) and not list_fresh:
+                hidden[d] += 1
+                continue
             print(f"  {what} {d:<17} {vid}  {tc_in} - {tc_out}  ({secs:.1f}s)")
+        for d, n in hidden.items():
+            tapes_hidden = len({vid for dd, vid, *_ in listing if dd == d and fresh(d, vid)})
+            print(f"  {d}: {n} more on {tapes_hidden} tape(s) nobody has looked at for {d}; not listed, so they "
+                  f"can still be drawn as a held-out test (--list-fresh lists them)")
     elif listing:
         print("  (-v lists them; an unjudged event that is no longer reported may be a fix or a miss)")
     for d in detectors:
         if differ[d] and verbose:
-            print(f"\n  {d}: tapes that differ from the run: {', '.join(sorted(differ[d]))}")
+            known = sorted(v for v in differ[d] if list_fresh or not fresh(d, v))
+            rest = len(differ[d]) - len(known)
+            print(f"\n  {d}: tapes that differ from the run: {', '.join(known) or 'none looked at before'}"
+                  + (f" (+{rest} fresh)" if rest else ""))
 
 
 def main():
@@ -212,7 +226,11 @@ def main():
     ap.add_argument("-j", "--jobs", type=int, default=min(8, os.cpu_count() or 2), help="tapes at once")
     ap.add_argument("--force", action="store_true", help="replay again tapes already replayed under this code")
     ap.add_argument("--tolerance", type=float, default=1.0, help="seconds of slack either side of a span")
-    ap.add_argument("-v", "--verbose", action="store_true", help="list the events and tapes that changed")
+    ap.add_argument("-v", "--verbose", action="store_true",
+                    help="list the events and tapes that changed, on tapes already looked at for the detector")
+    ap.add_argument("--list-fresh", action="store_true",
+                    help="with -v: also list them on tapes nobody has looked at for the detector "
+                         "(that uses those tapes up as a held-out test of it)")
     args = ap.parse_args()
 
     detectors = args.detector or list(_detector.REPLAYABLE)
@@ -260,7 +278,7 @@ def main():
         print(f"! {vid}: the bars arbiter had no recorded SSIM scores for "
               f"{', '.join(f'{lo}-{hi}s' for lo, hi in spans)} and the video is not mounted; "
               f"those spans were kept as bars (no evidence). Mount the drive and --force this tape.")
-    report(run, dest, tapes, detectors, args.tolerance, args.verbose)
+    report(run, dest, tapes, detectors, args.tolerance, args.verbose, args.list_fresh)
     if failed:
         print(f"\n{len(failed)} tape(s) failed to replay and are not in the figures above: {', '.join(sorted(failed))}")
     print(f"\nKept as {dest.name}  ({dest})")
