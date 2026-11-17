@@ -103,8 +103,8 @@ def test_a_replay_is_found_by_name_but_a_run_wins(tmp_path, monkeypatch):
 
 def test_set_lays_a_setting_over_the_runs_config_and_refuses_unknown_names(tmp_path):
     (tmp_path / "checks_config.json").write_text(json.dumps(
-        {"outputs": {"frame_analysis": {"duplicate_min_run_length": 2}}}))
-    assert _detector.run_configs(tmp_path)["checks"].outputs.frame_analysis.duplicate_min_run_length == 2
+        {"outputs": {"frame_analysis": {"duplicate_min_run_length": 4}}}))
+    assert _detector.run_configs(tmp_path)["checks"].outputs.frame_analysis.duplicate_min_run_length == 4
     over = _detector.parse_overrides(["outputs.frame_analysis.duplicate_min_run_length=1",
                                       "tools.clams_detection.run_tool=false"])
     assert over == {"outputs": {"frame_analysis": {"duplicate_min_run_length": 1}},
@@ -121,4 +121,15 @@ def test_set_lays_a_setting_over_the_runs_config_and_refuses_unknown_names(tmp_p
 def test_what_runs_by_default_needs_no_drive():
     assert "duplicate_frames" in _detector.REPLAYABLE and "duplicate_frames" not in _detector.DEFAULT
     assert set(_detector.DEFAULT) < set(_detector.REPLAYABLE)
+
+
+def test_a_runs_config_is_read_as_the_app_now_reads_it_and_set_comes_last(tmp_path):
+    """The run's config goes through AV Spex's own migrations (a saved 2 for the duplicate
+    minimum run length is the old default, now read as 1); --set is laid over the result, so
+    the old value can still be replayed."""
+    (tmp_path / "checks_config.json").write_text(json.dumps(
+        {"outputs": {"frame_analysis": {"duplicate_min_run_length": 2}}}))
+    assert _detector.run_configs(tmp_path)["checks"].outputs.frame_analysis.duplicate_min_run_length == 1
+    over = _detector.parse_overrides(["outputs.frame_analysis.duplicate_min_run_length=2"])
+    assert _detector.run_configs(tmp_path, over)["checks"].outputs.frame_analysis.duplicate_min_run_length == 2
 

@@ -83,7 +83,9 @@ avspex-dev replay detector --tapes JPC_AV_02678 -v          # one tape, listing 
 - **Trying a setting.** `--set KEY=VALUE` (repeatable) lays a checks setting over the run's
   config, e.g. `--set outputs.frame_analysis.duplicate_min_run_length=2`. The replay is kept
   under a name ending `-set<hash>`, and `run.json` in it records the settings. This is also how
-  to replay a *new bundled default*: the run's own saved value otherwise wins.
+  to replay a *new bundled default*: the run's own saved value otherwise wins. (The run's
+  config goes through AV Spex's own migrations first, so a value those rewrite, such as a
+  `duplicate_min_run_length` of 2, is replayed as the app would now read it.)
 - **Config.** The run's saved config, not the one AV Spex has saved now. Nothing is saved.
 - **The check that makes it believable.** "Reproduces the run?" counts the tapes whose events
   come back identical. Under the code the run was collected with it must be all of them (it is,

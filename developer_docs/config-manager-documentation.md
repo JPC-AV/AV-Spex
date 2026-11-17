@@ -236,7 +236,7 @@ class FrameAnalysisConfig:
     analysis_period_count: int = 6       # Number of windows
 
     # Duplicate frame detection
-    duplicate_min_run_length: int = 1
+    duplicate_min_run_length: int = 1   # was 2 until Nov 2026; a saved 2 is migrated to 1 on load
 ```
 
 #### SpexConfig
