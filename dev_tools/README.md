@@ -116,7 +116,10 @@ avspex-dev sheet
 
 ```
 run: bd5014b-cb355033 (latest)
-41 unjudged event(s) from bd5014b-cb355033 -> /Users/you/avspex_corpus/truth/review_bd5014b-cb355033_Ada_2026-11-16.xlsx
+
+41 unjudged event(s) from bd5014b-cb355033
+    -> /Users/you/avspex_corpus/truth/review_bd5014b-cb355033_Ada_2026-11-16.xlsx
+
     audio_dropout         9
     audible_timecode      0
     tone_leak             2
@@ -124,6 +127,9 @@ run: bd5014b-cb355033 (latest)
     bars                 12
     duplicate_frames      3
     dropped_samples       1
+
+Fill in the verdict column (see the instructions tab), then:
+    avspex-dev import-sheet /Users/you/avspex_corpus/truth/review_bd5014b-cb355033_Ada_2026-11-16.xlsx
 ```
 
 One row per thing a detector reported that nobody has judged yet. `--detector bars` limits it
@@ -156,6 +162,7 @@ avspex-dev import-sheet <the .xlsx>
 ```
 bars               +11 present  +1 absent -> bars.csv
 audio_dropout      +4 present  +5 absent -> audio_dropout.csv
+
 29 row(s) added, 12 left blank (still unjudged)
 ```
 

@@ -54,6 +54,7 @@ import csv
 import json
 import re
 import sys
+import textwrap
 from collections import Counter
 from pathlib import Path
 
@@ -297,7 +298,7 @@ def score(run, truth, tolerance):
 
 
 def print_report(run, results):
-    print(f"Scorecard: {run.name}\n")
+    print(f"\nScorecard: {run.name}\n")
     print(f"{'detector':<18} {'present':>9} {'absent':>9} {'not run':>8} {'no pkg':>7}")
     for name in dict.fromkeys(r["detector"] for r in results):
         rows = [r for r in results if r["detector"] == name]
@@ -308,16 +309,18 @@ def print_report(run, results):
     print("\n(present = real events found / scored; absent = confirmed-clean spans left alone / scored)")
     bad = [r for r in results if r["outcome"] in BAD]
     if bad:
-        print()
+        print(f"\nMisses and false alarms ({len(bad)}):")
     for r in bad:
         span = f"{r['tc_in']} - {r['tc_out']}" if r["tc_in"] else "whole tape"
         got = f"  reported {r['matched']}" if r["matched"] else ""
-        print(f"  {r['outcome']:<11} {r['detector']:<17} {r['video_id']}  {span}{got}\n"
-              f"              {r['note']}")
+        print(f"  {r['outcome']:<11} {r['detector']:<17} {r['video_id']}  {span}{got}")
+        if r["note"]:
+            print(f"              {r['note']}")
     quiet = Counter(r["detector"] for r in results if r["outcome"] == "not_run")
     if quiet:
-        print("\nNot run (no output from the detector in this run): "
-              + ", ".join(f"{k} x{v}" for k, v in quiet.items()))
+        print("\nNot run (no output from the detector in this run):")
+        for k, v in quiet.items():
+            print(f"    {k:<18} {v:>4}")
 
 
 def compare(run_a, run_b, truth, tolerance):
@@ -354,8 +357,9 @@ def unjudged_events(run, truth, tolerance, name, heldout=False):
     held = ledger.reserved(name)
     skipped = sorted(held & set(packages(run)))
     if skipped and not heldout:
-        print(f"leaving out {len(skipped)} tape(s) held out for {name} (ledger.py): "
-              f"{', '.join(skipped)}", file=sys.stderr)
+        print(f"\nLeaving out {len(skipped)} tape(s) held out for {name} (ledger.py):\n"
+              + textwrap.fill(" ".join(skipped), width=88, initial_indent="    ",
+                              subsequent_indent="    "), file=sys.stderr)
     for vid, path in packages(run).items():
         if (vid in held) != heldout:
             continue
@@ -484,11 +488,12 @@ def write_sheet(run, truth, tolerance, names, dest, heldout=False, max_per_tape=
             c.alignment = Alignment(vertical="top", wrap_text=True)
     Path(dest).parent.mkdir(parents=True, exist_ok=True)
     wb.save(dest)
-    print(f"{sum(counts.values())} unjudged event(s) from {run.name} -> {dest}")
+    print(f"\n{sum(counts.values())} unjudged event(s) from {run.name}\n    -> {dest}\n")
     for name in names:
         more = f"   ({left_out[name]} more left off: at most {max_per_tape} per tape, seed {seed})" if left_out[name] else ""
         print(f"    {name:<18} {counts[name]:>4}{more}")
-    print(f"Fill in the verdict column (see the instructions tab), then: avspex-dev import-sheet {dest}")
+    print(f"\nFill in the verdict column (see the instructions tab), then:\n"
+          f"    avspex-dev import-sheet {dest}")
 
 
 def import_sheet(src, truth):
@@ -531,7 +536,7 @@ def import_sheet(src, truth):
             w.writerows(new)
         c = Counter(r["verdict"] for r in new)
         print(f"{name:<18} +{c['present']} present  +{c['absent']} absent -> {path.name}")
-    print(f"{sum(len(v) for v in add.values())} row(s) added, {blank} left blank (still unjudged)")
+    print(f"\n{sum(len(v) for v in add.values())} row(s) added, {blank} left blank (still unjudged)")
 
 
 def main():
