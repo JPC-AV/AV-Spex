@@ -270,6 +270,31 @@ def test_eval_bars_brng_falls_back_to_floor_when_unmeasured(tmp_path, monkeypatc
     assert bars["YMIN"] == 1023
 
 
+def test_eval_bars_compares_span_bounds_as_numbers(tmp_path, monkeypatch):
+    """evalBars once compared timestamps as strings: "10.0" < "6.6" dropped
+    every bars frame from 10 s on, and "95.0" > "100.0" pulled frames from
+    long before the span into it. Each case below has a different median
+    under the two comparisons."""
+    import collections
+    monkeypatch.setattr(qp, "_get_smpte_brng_floor", lambda: 0.01)
+
+    def run(level_at, start, end):
+        frames = []
+        for index in range(1200):
+            t = index * 0.1
+            tags = {tag: level_at(t) for tag in _EVAL_BARS_LEVEL_TAGS}
+            tags["BRNG"] = 0.02
+            frames.append((f"{t:.3f}", tags))
+        path = tmp_path / f"report_{start}.qctools.xml.gz"
+        _write_qctools_gz(path, frames)
+        return qp.evalBars(str(path), "pkt_dts_time", start, end, collections.deque(maxlen=11), 11)
+
+    # 6.6-10 s reads 900, 10-16 s reads 500: most of the span is 500
+    assert run(lambda t: 900 if t < 10 else 500, 6.6, 16.0)["YMAX"] == 500
+    # Everything before 100 s reads 900, the span itself 100
+    assert run(lambda t: 900 if t < 100 else 100, 100.0, 110.0)["YMAX"] == 100
+
+
 def test_get_smpte_brng_floor_reads_config(monkeypatch):
     fake_spex = MagicMock()
     fake_spex.qct_parse_values.smpte_color_bars.BRNG = 0.025
@@ -1438,3 +1463,110 @@ def test_dropout_candidate_distinct_default_lists():
     b = qp._DropoutCandidate()
     a.corroborating.append("metric_x")
     assert b.corroborating == []
+
+
+# ---------------------------------------------------------------------------
+# Section 4c — _is_cut_to_black (programme end vs dropout)
+# ---------------------------------------------------------------------------
+
+def _cut_event(end=100.0, channel=1, median=-27.0):
+    return qp._DropoutEvent(start_time=end, end_time=end, channel=channel,
+                            worst_rms_level=-69.0, median_rms_level=median,
+                            confidence='high', corroborating=['Max_difference drop', 'RMS_difference drop'])
+
+
+def _rms(after, start=100.0, step=0.1, channel=1):
+    """{channel: (times, levels)}: programme level up to `start`, then `after` (a level or a list)."""
+    times = [round(start - 2.0 + i * step, 3) for i in range(60)]
+    levels = [-27.0 if t <= start else (after if not isinstance(after, list) else None) for t in times]
+    if isinstance(after, list):
+        tail = iter(after)
+        levels = [lvl if lvl is not None else next(tail, after[-1]) for lvl in levels]
+    return {channel: (times, levels)}
+
+
+def _black(from_time=None, start=98.0, seconds=6.0, fps=30.0):
+    times = [start + i / fps for i in range(int(seconds * fps))]
+    return times, [from_time is not None and t >= from_time for t in times]
+
+
+def test_cut_to_black_true_when_sound_stays_away_and_picture_is_black():
+    # JPC_AV_04372 01:34:20: -27 dB crowd noise, then -69 dB and black
+    assert qp._is_cut_to_black(_cut_event(), _rms(-69.0), _black(from_time=100.2)) is True
+
+
+def test_cut_to_black_false_when_picture_carries_on():
+    # JPC_AV_02678 46:55:23: the channel stays down but the picture continues
+    assert qp._is_cut_to_black(_cut_event(), _rms(-69.0), _black(from_time=None)) is False
+
+
+def test_cut_to_black_false_when_sound_comes_back():
+    # JPC_AV_02213 29:08:08: one frame of silence inside a black segment
+    levels = [-99.0] + [-27.0] * 40
+    assert qp._is_cut_to_black(_cut_event(), _rms(levels), _black(from_time=95.0)) is False
+
+
+def test_cut_to_black_false_when_black_ends_inside_the_window():
+    times, flags = _black(from_time=100.2)
+    flags = [f and t < 100.9 for t, f in zip(times, flags)]
+    assert qp._is_cut_to_black(_cut_event(), _rms(-69.0), (times, flags)) is False
+
+
+def test_cut_to_black_needs_the_events_own_channel():
+    assert qp._is_cut_to_black(_cut_event(channel=2), _rms(-69.0, channel=1), _black(from_time=100.2)) is False
+
+
+def test_cut_to_black_false_without_evidence():
+    # No video frames (the per-stream audio stats sidecar), no series, or the file ends
+    assert qp._is_cut_to_black(_cut_event(), _rms(-69.0), ([], [])) is False
+    assert qp._is_cut_to_black(_cut_event(), None, None) is False
+    assert qp._is_cut_to_black(_cut_event(end=100.95), _rms(-69.0), _black(from_time=100.2, seconds=3.2)) is False
+
+
+def test_frame_is_black_matches_the_frame_analysis_limits():
+    assert qp._frame_is_black(130.0, 90.0, 80.0) is True
+    assert qp._frame_is_black(940.0, 90.0, 80.0) is False       # a bright pixel
+    assert qp._frame_is_black(130.0, 120.0, 80.0) is False      # 03801-style grey, not black
+    assert qp._frame_is_black(130.0, None, 80.0) is False       # missing value: not black
+    assert qp._frame_is_black(40.0, 25.0, 20.0, bit_depth_10=False) is True
+    assert qp._frame_is_black(130.0, 90.0, 80.0, bit_depth_10=False) is False
+
+
+def test_dropout_results_drop_cut_to_black_events(tmp_path):
+    cands = [qp._DropoutCandidate(time=100.0, channel=1, rms_level=-69.0, median_rms=-27.0,
+                                  corroborating=['Max_difference drop', 'RMS_difference drop'])]
+    kept = qp._detect_and_write_dropout_results(list(cands), str(tmp_path), 1000)
+    assert kept['dropout_events'] == 1 and kept['cut_to_black_suppressed'] == 0
+    dropped = qp._detect_and_write_dropout_results(
+        list(cands), str(tmp_path), 1000, rms_series=_rms(-69.0), black_series=_black(from_time=100.2))
+    assert dropped['dropout_events'] == 0 and dropped['cut_to_black_suppressed'] == 1
+
+
+# ---------------------------------------------------------------------------
+# Section 4d — _evaluation_bars_span (what the color-bars evaluation measures)
+# ---------------------------------------------------------------------------
+
+def test_evaluation_span_is_the_consensus_head_bars():
+    # JPC_AV_04178: qct-parse's "head" was 262-267 s of graphics; the consensus
+    # head ends at 16 s and its spans no longer hold the false one
+    assert qp._evaluation_bars_span(16.0, [(6.6, 16.0), (566.2, 567.8)]) == (6.6, 16.0)
+
+
+def test_evaluation_span_takes_the_span_the_head_end_falls_in_not_the_first():
+    assert qp._evaluation_bars_span(46.0, [(0.5, 1.2), (1.6, 46.0)]) == (1.6, 46.0)
+    # the consensus end can sit a hair past the span it closes
+    assert qp._evaluation_bars_span(24.5, [(2.0, 24.0)]) == (2.0, 24.0)
+
+
+def test_evaluation_span_without_a_head_is_the_first_bars_long_enough_to_measure():
+    # JPC_AV_02678: bars found only as "additional", so no head end inside qct-parse
+    assert qp._evaluation_bars_span(None, [(6.7, 37.1)]) == (6.7, 37.1)
+    assert qp._evaluation_bars_span(None, [(100.0, 101.5), (900.0, 930.0)]) == (900.0, 930.0)
+
+
+def test_evaluation_span_is_none_when_the_consensus_holds_no_usable_bars():
+    # JPC_AV_02217: the only claim, 160-164 s, was thrown out -> SMPTE fallback
+    assert qp._evaluation_bars_span(None, None) is None
+    assert qp._evaluation_bars_span(None, []) is None
+    assert qp._evaluation_bars_span(None, [(100.0, 101.5)]) is None
+    assert qp._evaluation_bars_span(None, [(None, 5.0), (8.0, 8.0)]) is None

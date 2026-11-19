@@ -26,7 +26,7 @@
       "analysis_period_count": 6,
       "enable_dropped_sample_detection": false,
       "enable_duplicate_frame_detection": false,
-      "duplicate_min_run_length": 2,
+      "duplicate_min_run_length": 1,
       "enable_video_dropout_detection": false
     }
   },

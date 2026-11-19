@@ -769,7 +769,7 @@ The exported file wraps everything in a top-level key naming the config, so `my_
       "qctools_ext": "qctools.xml.gz",
       "frame_analysis": {
         "enable_duplicate_frame_detection": true,
-        "duplicate_min_run_length": 2
+        "duplicate_min_run_length": 1
       }
     },
     "fixity": { "...": "..." },
@@ -778,7 +778,7 @@ The exported file wraps everything in a top-level key naming the config, so `my_
 }
 ```
 
-Change `duplicate_min_run_length` from `2` to `4` — the value is the number of consecutive low-difference frames, so a run of 4 means a freeze of 5 identical frames — save the file, and import it:
+Change `duplicate_min_run_length` from `1` to `4` — the value is the number of consecutive low-difference frames, so a run of 4 means a freeze of 5 identical frames — save the file, and import it:
 
 ```bash
 av-spex --import-config my_checks.json

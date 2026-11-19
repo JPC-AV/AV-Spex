@@ -533,7 +533,49 @@ def test_find_duplicate_runs_keeps_low_diff_frames_with_spatial_structure(tmp_pa
     parser = fa.QCToolsParser(path)
     runs, _ = parser.find_duplicate_frame_candidates(min_run_length=2)
     assert len(runs) == 1
-    assert runs[0]["duplicate_count"] == 5
+    # Four, not five: the report's first frame has no frame before it, so its
+    # near-zero differences say nothing and it is never a candidate.
+    assert runs[0]["duplicate_count"] == 4
+    assert runs[0]["start_time"] == pytest.approx(1.0)
+
+
+def test_find_duplicate_runs_reports_a_single_repeat_by_default(tmp_path):
+    """One low-diff frame is one frame shown twice: what a dropped frame looks
+    like. The default minimum run length is 1 so that it is reported."""
+    frames = [
+        {"pkt_pts_time": str(t), "tags": {"YMAX": "200", "YDIF": "5", "UDIF": "5", "VDIF": "5"}}
+        for t in range(0, 3)
+    ] + [
+        {"pkt_pts_time": "3", "tags": {"YMAX": "200", "YDIF": "0.1", "UDIF": "0.1", "VDIF": "0.1"}}
+    ] + [
+        {"pkt_pts_time": str(t), "tags": {"YMAX": "200", "YDIF": "5", "UDIF": "5", "VDIF": "5"}}
+        for t in range(4, 7)
+    ]
+    parser = fa.QCToolsParser(_write_qctools(tmp_path, frames))
+    runs, _ = parser.find_duplicate_frame_candidates()
+    assert [(r["start_time"], r["end_time"], r["duplicate_count"]) for r in runs] == [(3.0, 3.0, 1)]
+
+
+def test_find_duplicate_runs_never_takes_the_first_frame(tmp_path):
+    """Frame 0's differences are 0 because nothing precedes it (seen on
+    JPC_AV_01954 and JPC_AV_03802), not because it repeats anything."""
+    frames = [
+        {"pkt_pts_time": "0", "tags": {"YMAX": "200", "YDIF": "0", "UDIF": "0", "VDIF": "0"}}
+    ] + [
+        {"pkt_pts_time": str(t), "tags": {"YMAX": "200", "YDIF": "5", "UDIF": "5", "VDIF": "5"}}
+        for t in range(1, 5)
+    ]
+    parser = fa.QCToolsParser(_write_qctools(tmp_path, frames))
+    assert parser.find_duplicate_frame_candidates(min_run_length=1)[0] == []
+
+
+def test_bundled_default_minimum_run_length_is_one():
+    import json
+    from pathlib import Path
+    from AV_Spex.utils.config_setup import FrameAnalysisConfig
+    bundled = json.loads((Path(fa.__file__).parents[1] / "config" / "checks_config.json").read_text())
+    assert bundled["outputs"]["frame_analysis"]["duplicate_min_run_length"] == 1
+    assert FrameAnalysisConfig.__dataclass_fields__["duplicate_min_run_length"].default == 1
 
 
 def test_find_duplicate_runs_uses_10bit_thresholds_when_detected(tmp_path):

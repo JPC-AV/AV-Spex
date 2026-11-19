@@ -6910,7 +6910,7 @@ def generate_duplicate_frame_html(frame_outputs):
     ydif_thresh = duplicate_data.get('ydif_threshold', 0)
     udif_thresh = duplicate_data.get('udif_threshold', 0)
     vdif_thresh = duplicate_data.get('vdif_threshold', 0)
-    min_run_length = duplicate_data.get('min_run_length', 2)
+    min_run_length = duplicate_data.get('min_run_length', 1)
     total_loss = duplicate_data.get('estimated_loss_seconds', 0.0)
 
     if status == 'critical':
@@ -6960,8 +6960,9 @@ def generate_duplicate_frame_html(frame_outputs):
                 against the preceding frame. Candidates that don't confirm as near-identical are dropped.</li>
             <li style="margin-bottom: 4px;"><strong>Minimum run length</strong> &mdash; A run of K
                 consecutive low-diff frames represents a freeze of K+1 identical frames. The minimum run
-                length is configurable (default {min_run_length}, freeze of &ge;{min_run_length + 1} frames)
-                to suppress single-frame matches that occur naturally on static content.</li>
+                length is configurable; this report used {min_run_length} (a freeze of
+                &ge;{min_run_length + 1} frames). The default of 1 reports a single repeated frame, which
+                is what one dropped frame looks like.</li>
         </ul>
         <p style="margin: 0;">
             Detected file is {bit_depth_label}; thresholds in use:

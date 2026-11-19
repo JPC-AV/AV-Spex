@@ -881,6 +881,46 @@ def merge_head_bars_consensus(
     return merged_end, head_demoted, all_bars_regions
 
 
+def consensus_after_qctparse(qctparse_result, report_directory, bars_consensus):
+    """The head-bars consensus once qct-parse has finished.
+
+    Reuses the consensus run_qctparse() already computed for its chroma-phase
+    step. When qct-parse reports no head bars, the durations CSV is read back
+    instead, which also takes the first region of any label as the head claim
+    (so bars qct-parse only found as "additional" can still set the head-bars
+    end time); the consensus is then computed again for that claim.
+
+    Args:
+        qctparse_result: what run_qctparse() returned, or None.
+        report_directory: where the qct-parse durations CSV is, or None when
+            qct-parse did not run.
+        bars_consensus: (head_start, head_end, all_regions) ->
+            (merged_end, head_demoted, all_bars_regions).
+
+    Returns:
+        (qctparse_head_end, (merged_end, head_demoted, all_bars_regions))
+    """
+    head_start = head_end = None
+    all_regions = []
+    consensus = None
+    if qctparse_result:
+        head_start = qctparse_result.get('head_bars_start')
+        head_end = qctparse_result.get('head_bars_end')
+        all_regions = qctparse_result.get('all_bars_regions') or []
+        consensus = qctparse_result.get('bars_consensus')
+
+    if head_end is None and report_directory:
+        colorbars_csv = Path(report_directory) / "qct-parse_colorbars_durations.csv"
+        if colorbars_csv.exists():
+            head_start, head_end, all_regions = parse_colorbars_duration_csv(str(colorbars_csv))
+            if head_end is not None:
+                consensus = None
+
+    if consensus is None:
+        consensus = bars_consensus(head_start, head_end, all_regions)
+    return head_end, consensus
+
+
 def process_qctools_output(video_path, source_directory, destination_directory, video_id, report_directory=None, check_cancelled=None, signals=None):
     """
     Process QCTools output, including running QCTools and optional parsing.
@@ -1254,10 +1294,26 @@ def process_qctools_output(video_path, source_directory, destination_directory, 
 
     # ---- qct-parse (runs AFTER CLAMS, receives CLAMS regions for
     # additional windowed bars scans beyond the head area) ----
-    qctparse_head_start = None
-    qctparse_head_end = None
-    qctparse_all_regions = []
+    clams_ran = bool(clams_cfg and getattr(clams_cfg, 'run_tool', False))
 
+    def bars_consensus(head_start, head_end, all_regions):
+        """The cross-validated head-bars consensus for one set of qct-parse claims."""
+        return merge_head_bars_consensus(
+            qctparse_head_start=head_start,
+            qctparse_head_end=head_end,
+            qctparse_all_regions=all_regions,
+            clams_head_start=results.get('clams_bars_start_time'),
+            clams_head_end_raw=results.get('clams_bars_end_time'),
+            clams_regions=clams_regions,
+            clams_ran=clams_ran,
+            region_is_bars=lambda lo, hi: _clams_region_is_bars(
+                video_path, report_directory, video_id, lo, hi,
+                check_cancelled=check_cancelled,
+            ),
+        )
+
+    qctparse_result = None
+    qctparse_ran = False
     if qct_parse_run_tool:
         if not results['qctools_output_path'] or not os.path.isfile(results['qctools_output_path']):
             logger.critical(f"Unable to check qctools report. No QCTools report file found in input directory.\n")
@@ -1268,48 +1324,26 @@ def process_qctools_output(video_path, source_directory, destination_directory, 
             logger.info(f"Running qct-parse on: {results['qctools_output_path']}")
             if signals and hasattr(signals, 'qctparse_progress'):
                 signals.qctparse_progress.emit(0)
+            qctparse_ran = True
+            # qct-parse gets the consensus too: its chroma-phase step has to
+            # skip the confirmed bars, which are not always what it labels "head".
             qctparse_result = run_qctparse(
                 video_path, results['qctools_output_path'], report_directory,
                 check_cancelled=check_cancelled, signals=signals,
                 clams_regions=clams_regions,
+                bars_consensus=bars_consensus,
             )
             if signals:
                 signals.step_completed.emit("QCT Parse")
-
             if qctparse_result:
-                qctparse_head_start = qctparse_result.get('head_bars_start')
-                qctparse_head_end = qctparse_result.get('head_bars_end')
-                qctparse_all_regions = qctparse_result.get('all_bars_regions') or []
                 results['audio_findings'] = qctparse_result.get('audio_findings')
 
-            # Fallback: read CSV if run_qctparse returned None (cancelled/error)
-            if qctparse_head_end is None:
-                colorbars_csv = Path(report_directory) / "qct-parse_colorbars_durations.csv"
-                if colorbars_csv.exists():
-                    start_seconds, end_seconds, csv_regions = parse_colorbars_duration_csv(str(colorbars_csv))
-                    qctparse_head_start = start_seconds
-                    qctparse_head_end = end_seconds
-                    qctparse_all_regions = csv_regions
-
-            if qctparse_head_end:
-                logger.debug(f"qct-parse head bars detected, ending at {qctparse_head_end:.1f}s\n")
-
     # ---- Merge: cross-validated head-bars consensus ----
-    clams_ran = bool(clams_cfg and getattr(clams_cfg, 'run_tool', False))
-
-    merged_end, head_demoted, all_bars_regions = merge_head_bars_consensus(
-        qctparse_head_start=qctparse_head_start,
-        qctparse_head_end=qctparse_head_end,
-        qctparse_all_regions=qctparse_all_regions,
-        clams_head_start=results.get('clams_bars_start_time'),
-        clams_head_end_raw=results.get('clams_bars_end_time'),
-        clams_regions=clams_regions,
-        clams_ran=clams_ran,
-        region_is_bars=lambda lo, hi: _clams_region_is_bars(
-            video_path, report_directory, video_id, lo, hi,
-            check_cancelled=check_cancelled,
-        ),
+    qctparse_head_end, (merged_end, head_demoted, all_bars_regions) = consensus_after_qctparse(
+        qctparse_result, report_directory if qctparse_ran else None, bars_consensus
     )
+    if qctparse_head_end:
+        logger.debug(f"qct-parse head bars detected, ending at {qctparse_head_end:.1f}s\n")
 
     results['color_bars_end_time'] = merged_end
     if merged_end is not None:

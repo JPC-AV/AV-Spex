@@ -192,6 +192,40 @@ def test_migrate_skips_signalstats_rename_when_new_field_already_present(config_
     assert fa["signalstats_duration"] == 90
 
 
+def test_migrate_moves_the_old_duplicate_min_run_length_default_to_the_new_one(config_mgr):
+    """A saved 2 is the pre-November-2026 default carried along (nothing in the
+    GUI or CLI ever set it), so it becomes 1: single repeated frames are reported."""
+    data = {"outputs": {"frame_analysis": {"duplicate_min_run_length": 2}}}
+    result = config_mgr._migrate_config_data(data, "checks")
+    assert result["outputs"]["frame_analysis"]["duplicate_min_run_length"] == 1
+
+
+@pytest.mark.parametrize("value", [1, 3, 4])
+def test_migrate_leaves_other_duplicate_min_run_lengths_alone(config_mgr, value):
+    data = {"outputs": {"frame_analysis": {"duplicate_min_run_length": value}}}
+    result = config_mgr._migrate_config_data(data, "checks")
+    assert result["outputs"]["frame_analysis"]["duplicate_min_run_length"] == value
+
+
+def test_migrate_duplicate_min_run_length_tolerates_a_config_without_it(config_mgr):
+    assert config_mgr._migrate_config_data({"outputs": {}}, "checks") == \
+        {"outputs": {}, "validate_filename": True}
+    data = {"outputs": {"frame_analysis": {"enable_signalstats": True}}}
+    fa = config_mgr._migrate_config_data(data, "checks")["outputs"]["frame_analysis"]
+    assert "duplicate_min_run_length" not in fa
+
+
+def test_migrate_duplicate_min_run_length_in_custom_checks_profiles(config_mgr):
+    data = {"custom_profiles": {
+        "Mine": {"outputs": {"frame_analysis": {"duplicate_min_run_length": 2}}},
+        "Strict": {"outputs": {"frame_analysis": {"duplicate_min_run_length": 4}}},
+        "Bare": {"outputs": {}},
+    }}
+    profiles = config_mgr._migrate_config_data(data, "profiles_checks")["custom_profiles"]
+    assert profiles["Mine"]["outputs"]["frame_analysis"]["duplicate_min_run_length"] == 1
+    assert profiles["Strict"]["outputs"]["frame_analysis"]["duplicate_min_run_length"] == 4
+
+
 def test_migrate_audio_analysis_merge_with_yes_no_strings(config_mgr):
     data = {"tools": {"qct_parse": {
         "detect_audio_clipping": "no",

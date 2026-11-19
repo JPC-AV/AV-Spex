@@ -19,6 +19,10 @@ Also:
     avspex-dev ledger ...              which tape was used for what; held-out draws    (ledger.py)
     avspex-dev labels                  validate the bin label sheets                   (labels.py)
     avspex-dev label-sheet RUN ...     build a bin label sheet                         (label_sheet.py)
+    avspex-dev replay detector [RUN]   re-run the QCTools-report detectors from a run's sidecars and
+                                       score them: minutes, no tapes needed            (replays/detector.py)
+    avspex-dev inject FAULT [RUN]      put known faults into clips of real tapes and count what the
+                                       detector finds: dropped-samples | tone-leak | duplicate-frames (inject.py)
     avspex-dev replay NAME ...         harness | period-grid | bin-table | tag-weights (replays/)
     avspex-dev dropout NAME ...        scan | sheet | export                           (dropout_*.py, event_labels.py)
     avspex-dev corpus ...              run-id, import, and what collect calls          (corpus.py)
@@ -54,10 +58,12 @@ SCRIPTS = {
     "labels": ("labels.py", []),
     "label-sheet": ("label_sheet.py", []),
     "corpus": ("corpus.py", []),
+    "inject": ("inject.py", []),
 }
 GROUPS = {
-    "replay": {"harness": "replays/harness.py", "period-grid": "replays/period_grid.py",
-               "bin-table": "replays/bin_table.py", "tag-weights": "replays/tag_weights.py"},
+    "replay": {"detector": "replays/detector.py", "harness": "replays/harness.py",
+               "period-grid": "replays/period_grid.py", "bin-table": "replays/bin_table.py",
+               "tag-weights": "replays/tag_weights.py"},
     "dropout": {"scan": "dropout_scan.py", "sheet": "dropout_sheet.py", "export": "event_labels.py"},
 }
 TOOLS = ("av-spex", "ffmpeg", "ffprobe", "qcli", "mediainfo", "exiftool", "mediaconch")
@@ -88,12 +94,19 @@ def script_call(command, argv):
         ap.add_argument("--detector", action="append", help="only this detector (repeatable)")
         ap.add_argument("--heldout", action="store_true",
                         help="the held-out test form: only tapes the ledger reserves for the detector")
+        ap.add_argument("--max-per-tape", type=int, metavar="N",
+                        help="at most N events from any one tape, picked at random by --seed")
+        ap.add_argument("--seed", help="with --max-per-tape: default is today's date as YYYYMMDD")
         a = ap.parse_args(argv)
         out = [a.run] if a.run else []
         for d in a.detector or []:
             out += ["--detector", d]
         if a.heldout:
             out.append("--heldout")
+        if a.max_per_tape:
+            out += ["--max-per-tape", str(a.max_per_tape)]
+        if a.seed:
+            out += ["--seed", a.seed]
         return HERE / "scorecard.py", [*out, "--sheet", *([a.out] if a.out else [])]
     return None
 

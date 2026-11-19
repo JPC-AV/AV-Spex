@@ -280,8 +280,32 @@ class ConfigManager:
                 fa = ((profile or {}).get('outputs') or {}).get('frame_analysis')
                 if isinstance(fa, dict):
                     self._migrate_frame_analysis_period_fields(fa)
+                    self._migrate_duplicate_min_run_length(fa)
+
+        if config_name == 'checks':
+            fa = (config_data.get('outputs') or {}).get('frame_analysis')
+            if isinstance(fa, dict):
+                self._migrate_duplicate_min_run_length(fa)
 
         return config_data
+
+    # The default until November 2026. No GUI or CLI control has ever set this
+    # value, so a saved 2 is that default carried along, not a choice.
+    _OLD_DUPLICATE_MIN_RUN_LENGTH = 2
+
+    def _migrate_duplicate_min_run_length(self, fa: dict) -> None:
+        """Move a saved duplicate_min_run_length from the old default to the new one, in place.
+
+        The default went from 2 to 1 so that a single repeated frame (what one
+        dropped frame looks like) is reported. Every saved config and custom
+        profile carries the old 2, which would otherwise outlive the change.
+        This runs on every load, including configs brought in by an import, so
+        a 2 cannot be kept on purpose; any other value (3 and up) is left alone.
+        """
+        if fa.get('duplicate_min_run_length') == self._OLD_DUPLICATE_MIN_RUN_LENGTH:
+            fa['duplicate_min_run_length'] = 1
+            logger.info("Migrated 'duplicate_min_run_length' 2 → 1 (the new default: "
+                        "single repeated frames are reported)")
 
     def _migrate_frame_analysis_period_fields(self, fa: dict) -> None:
         """Rename signalstats_duration/_periods to the shared analysis_period_* names, in place."""

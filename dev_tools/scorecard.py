@@ -54,6 +54,7 @@ import csv
 import json
 import re
 import sys
+import textwrap
 from collections import Counter
 from pathlib import Path
 
@@ -297,7 +298,7 @@ def score(run, truth, tolerance):
 
 
 def print_report(run, results):
-    print(f"Scorecard: {run.name}\n")
+    print(f"\nScorecard: {run.name}\n")
     print(f"{'detector':<18} {'present':>9} {'absent':>9} {'not run':>8} {'no pkg':>7}")
     for name in dict.fromkeys(r["detector"] for r in results):
         rows = [r for r in results if r["detector"] == name]
@@ -308,16 +309,18 @@ def print_report(run, results):
     print("\n(present = real events found / scored; absent = confirmed-clean spans left alone / scored)")
     bad = [r for r in results if r["outcome"] in BAD]
     if bad:
-        print()
+        print(f"\nMisses and false alarms ({len(bad)}):")
     for r in bad:
         span = f"{r['tc_in']} - {r['tc_out']}" if r["tc_in"] else "whole tape"
         got = f"  reported {r['matched']}" if r["matched"] else ""
-        print(f"  {r['outcome']:<11} {r['detector']:<17} {r['video_id']}  {span}{got}\n"
-              f"              {r['note']}")
+        print(f"  {r['outcome']:<11} {r['detector']:<17} {r['video_id']}  {span}{got}")
+        if r["note"]:
+            print(f"              {r['note']}")
     quiet = Counter(r["detector"] for r in results if r["outcome"] == "not_run")
     if quiet:
-        print("\nNot run (no output from the detector in this run): "
-              + ", ".join(f"{k} x{v}" for k, v in quiet.items()))
+        print("\nNot run (no output from the detector in this run):")
+        for k, v in quiet.items():
+            print(f"    {k:<18} {v:>4}")
 
 
 def compare(run_a, run_b, truth, tolerance):
@@ -354,8 +357,9 @@ def unjudged_events(run, truth, tolerance, name, heldout=False):
     held = ledger.reserved(name)
     skipped = sorted(held & set(packages(run)))
     if skipped and not heldout:
-        print(f"leaving out {len(skipped)} tape(s) held out for {name} (ledger.py): "
-              f"{', '.join(skipped)}", file=sys.stderr)
+        print(f"\nLeaving out {len(skipped)} tape(s) held out for {name} (ledger.py):\n"
+              + textwrap.fill(" ".join(skipped), width=88, initial_indent="    ",
+                              subsequent_indent="    "), file=sys.stderr)
     for vid, path in packages(run).items():
         if (vid in held) != heldout:
             continue
@@ -425,8 +429,27 @@ def default_sheet_path(run):
     return path
 
 
-def write_sheet(run, truth, tolerance, names, dest, heldout=False):
-    """One workbook of every unjudged event, with a verdict dropdown, for an operator to fill in."""
+def sample_per_tape(rows, limit, seed):
+    """At most `limit` of each tape's events, picked by a seed so the choice can be repeated,
+    kept in time order. Whole-tape rows (no span) are never dropped. Returns (rows, left out)."""
+    import random
+    by_tape, out, dropped = {}, [], 0
+    for row in rows:
+        by_tape.setdefault(row[0], []).append(row)
+    for vid, tape_rows in by_tape.items():
+        events = [r for r in tape_rows if r[1]]
+        if limit and len(events) > limit:
+            keep = set(random.Random(f"{seed}:{vid}").sample(range(len(events)), limit))
+            dropped += len(events) - limit
+            events = [r for i, r in enumerate(events) if i in keep]
+        out += [r for r in tape_rows if not r[1]] + events
+    return out, dropped
+
+
+def write_sheet(run, truth, tolerance, names, dest, heldout=False, max_per_tape=None, seed=None):
+    """One workbook of every unjudged event, with a verdict dropdown, for an operator to fill in.
+    With max_per_tape, a tape reporting more events than that contributes a seeded sample of them;
+    the rest stay unjudged."""
     import openpyxl
     from openpyxl.styles import Alignment, Font
     from openpyxl.worksheet.datavalidation import DataValidation
@@ -436,9 +459,11 @@ def write_sheet(run, truth, tolerance, names, dest, heldout=False):
     ws.append(SHEET_COLUMNS)
     for c in ws[1]:
         c.font = Font(bold=True)
-    counts = Counter()
+    counts, left_out = Counter(), Counter()
     for name in names:
-        for vid, tc_in, tc_out, secs, video in unjudged_events(run, truth, tolerance, name, heldout):
+        rows, left_out[name] = sample_per_tape(
+            list(unjudged_events(run, truth, tolerance, name, heldout)), max_per_tape, seed)
+        for vid, tc_in, tc_out, secs, video in rows:
             ws.append((name, vid, tc_in, tc_out, secs, "", "", video))
             counts[name] += 1
     dv = DataValidation(type="list", formula1='"%s"' % ",".join(VERDICTS), allow_blank=True)
@@ -453,16 +478,22 @@ def write_sheet(run, truth, tolerance, names, dest, heldout=False):
     info.column_dimensions["B"].width = 110
     for term, text in SHEET_INSTRUCTIONS:
         info.append((term, text))
+    if sum(left_out.values()):
+        info.append(("Sampled", f"Tapes reporting more than {max_per_tape} events show a random {max_per_tape} of "
+                                f"them (seed {seed}); {sum(left_out.values())} event(s) are not on this sheet and "
+                                f"stay unjudged."))
     for row in info.iter_rows():
         row[0].font = Font(bold=True)
         for c in row:
             c.alignment = Alignment(vertical="top", wrap_text=True)
     Path(dest).parent.mkdir(parents=True, exist_ok=True)
     wb.save(dest)
-    print(f"{sum(counts.values())} unjudged event(s) from {run.name} -> {dest}")
+    print(f"\n{sum(counts.values())} unjudged event(s) from {run.name}\n    -> {dest}\n")
     for name in names:
-        print(f"    {name:<18} {counts[name]:>4}")
-    print(f"Fill in the verdict column (see the instructions tab), then: avspex-dev import-sheet {dest}")
+        more = f"   ({left_out[name]} more left off: at most {max_per_tape} per tape, seed {seed})" if left_out[name] else ""
+        print(f"    {name:<18} {counts[name]:>4}{more}")
+    print(f"\nFill in the verdict column (see the instructions tab), then:\n"
+          f"    avspex-dev import-sheet {dest}")
 
 
 def import_sheet(src, truth):
@@ -505,7 +536,7 @@ def import_sheet(src, truth):
             w.writerows(new)
         c = Counter(r["verdict"] for r in new)
         print(f"{name:<18} +{c['present']} present  +{c['absent']} absent -> {path.name}")
-    print(f"{sum(len(v) for v in add.values())} row(s) added, {blank} left blank (still unjudged)")
+    print(f"\n{sum(len(v) for v in add.values())} row(s) added, {blank} left blank (still unjudged)")
 
 
 def main():
@@ -520,6 +551,10 @@ def main():
     ap.add_argument("--heldout", action="store_true",
                     help="with --sheet: only the tapes the ledger holds out for each detector "
                          "(the form for scoring a held-out test)")
+    ap.add_argument("--max-per-tape", type=int, metavar="N",
+                    help="with --sheet: at most N events from any one tape, picked at random by --seed "
+                         "(a tape that reports hundreds would otherwise be most of the sheet)")
+    ap.add_argument("--seed", help="with --max-per-tape: default is today's date as YYYYMMDD")
     ap.add_argument("--import-sheet", metavar="XLSX", help="append a filled-in workbook's verdicts to truth/")
     ap.add_argument("--tolerance", type=float, default=1.0, help="seconds of slack either side of a span")
     ap.add_argument("--out", help="write one CSV row per truth row")
@@ -556,8 +591,10 @@ def main():
         unjudged(run, truth, args.tolerance, args.unjudged)
         return
     if args.sheet is not None:
+        import datetime
         write_sheet(run, truth, args.tolerance, args.detector or list(DETECTORS),
-                    args.sheet or default_sheet_path(run), args.heldout)
+                    args.sheet or default_sheet_path(run), args.heldout, args.max_per_tape,
+                    args.seed or datetime.date.today().strftime("%Y%m%d"))
         return
     if args.compare:
         other = resolve_run(args.compare)
