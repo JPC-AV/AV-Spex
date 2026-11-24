@@ -327,6 +327,7 @@ avspex-dev ledger fresh bars --run RUN         # tapes never used for bars (--un
 avspex-dev ledger draw bars 15 --run RUN       # hold out 15 fresh tapes, picked by a recorded seed
 avspex-dev ledger add bars dev 02213 02216 --source "bars retune" --note "..."
 avspex-dev ledger check                        # validate; flag tapes that were dev before held out
+avspex-dev ledger ack bars 01106 --note "..."  # accept a flagged problem, with the reason
 ```
 
 - **dev**: someone looked at the tape's results for the topic (labeled, reviewed, tuned). It can
@@ -336,6 +337,11 @@ avspex-dev ledger check                        # validate; flag tapes that were 
   `dev` row says the test is over, the tape is **reserved** and `sheet` / `score --unjudged`
   leave it out. Afterwards it is **spent**: usable for development, never again as a test.
   `sheet --heldout --detector D` builds the form for scoring the test itself.
+- **ack**: when `check` flags a tape that was dev before it was held out and nothing can undo
+  it (say a review on another machine reached the corpus after the draw), `ack` records that
+  the problem is known and why, so `check` and `doctor` stop failing on it. The tape's standing
+  is unchanged, and the pair is still not a fair test: say so wherever the result is reported.
+  An ack covers held-out rows dated on or before it, not later tests.
 - **The order that keeps a test fair**: `draw` the held-out tapes before looking at them, tune on
   the rest, freeze, score the held-out tapes once, then `add ... dev` to release them.
 - Collecting a run does not use a tape. Looking at its results does: reviewing a new run's
