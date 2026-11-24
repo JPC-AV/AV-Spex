@@ -390,6 +390,32 @@ def test_check_flags_a_tape_that_was_dev_before_it_was_held_out(corpus):
     assert any(C in p and "truth/bars.csv" in p for p in found)
 
 
+def test_ack_accepts_a_known_problem_without_releasing_the_tape(corpus, monkeypatch, capsys):
+    ledger.append([use(A, "bars", "dev", "2026-11-01"), use(A, "bars", "heldout", "2026-11-10"),
+                   use(B, "bars", "dev", "2026-11-01"), use(B, "bars", "heldout", "2026-11-10")])
+    run_ledger(monkeypatch, "ack", "bars", A, "--note", "reviewed on another machine before the draw")
+    found = ledger.problems(ledger.read_rows())
+    assert len(found) == 1 and B in found[0]
+    assert ledger.acknowledged(ledger.read_rows()) == [(A, "bars", "2026-11-10",
+                                                       "reviewed on another machine before the draw")]
+    assert ledger.reserved("bars") == {A, B}          # an ack is not a release
+    with pytest.raises(SystemExit):                    # nothing to acknowledge for this topic
+        run_ledger(monkeypatch, "ack", "chroma_phase", A, "--note", "x")
+
+
+def test_an_ack_does_not_cover_a_later_held_out_test(corpus):
+    ledger.append([use(A, "bars", "dev", "2026-11-01"), use(A, "bars", "heldout", "2026-11-10"),
+                   {**use(A, "bars", "ack", "2026-11-11"), "note": "known"},
+                   use(A, "bars", "heldout", "2026-11-20")])
+    found = ledger.problems(ledger.read_rows())
+    assert len(found) == 1 and "2026-11-20" in found[0]
+
+
+def test_check_flags_an_ack_with_no_note(corpus):
+    ledger.append([use(A, "bars", "ack", "2026-11-01")])
+    assert any("ack with no note" in p for p in ledger.problems(ledger.read_rows()))
+
+
 def test_check_flags_malformed_rows(corpus):
     ledger.append([use("02213", "bars", "dev", "2026-11-01"), use(A, "bars", "tested", "2026-11-01"),
                    use(A, "", "dev", "2026-11-01"), use(A, "bars", "dev", "Nov 1")])

@@ -12,6 +12,10 @@ period_selection, ...), as one of two roles:
               the day it was drawn).
     heldout   set aside as a test for the topic, to be scored once against a frozen detector.
               Until a later `dev` row says the test is over, the tape is reserved: do not look.
+    ack       a known `check` problem for this tape and topic, accepted and explained in the note
+              (for example, a review on another machine that reached the corpus after the draw).
+              It silences the problem for held-out rows dated on or before it; it changes no
+              tape's standing and does not make the test fair.
 
 It lives in $AVSPEX_CORPUS/ledger.csv, one row per use:
 
@@ -25,6 +29,7 @@ an operator reviewed that detector's output on them.
     ledger.py fresh TOPIC [--run RUN]   tapes never used for TOPIC (--untouched: never used at all)
     ledger.py draw TOPIC N [--run RUN]  pick N fresh tapes at random and record them as heldout
     ledger.py add TOPIC ROLE ID...      record a use by hand (--date, --source, --note)
+    ledger.py ack TOPIC ID... --note N  accept a known `check` problem, with the reason
     ledger.py check                     validate; report tapes that were dev before being held out
 
 `draw` exists so the test set is chosen before anyone has seen it, by a recorded seed, not by
@@ -49,7 +54,7 @@ from corpus import CORPUS, resolve_run  # noqa: E402
 LEDGER = CORPUS / "ledger.csv"
 TRUTH = CORPUS / "truth"
 COLUMNS = ("video_id", "topic", "role", "date", "source", "note")
-ROLES = ("dev", "heldout")
+ROLES = ("dev", "heldout", "ack")
 
 
 def tape_id(text):
@@ -137,6 +142,19 @@ def reserved(topic, rows=None):
     return {vid for vid, topics in tapes.items() if status(topics.get(topic)) == "reserved"}
 
 
+def acknowledged(rows):
+    """The check problems someone has accepted: (vid, topic, held-out date, note)."""
+    out = []
+    for vid, topics in sorted(by_tape(rows).items()):
+        for topic, uses in sorted(topics.items()):
+            acks = [u for u in uses if u["role"] == "ack"]
+            for h in (u for u in uses if u["role"] == "heldout"):
+                ack = next((a for a in acks if a["date"] >= h["date"]), None)
+                if ack and any(u["role"] == "dev" and not _after(u, h) for u in uses):
+                    out.append((vid, topic, h["date"], ack["note"]))
+    return out
+
+
 def problems(rows):
     out = []
     for i, r in enumerate(rows, start=2):
@@ -151,12 +169,14 @@ def problems(rows):
             out.append(f"{where}: no topic")
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", r["date"]):
             out.append(f"{where}: date {r['date']!r} (want YYYY-MM-DD)")
+        if r["role"] == "ack" and not r["note"]:
+            out.append(f"{where}: ack with no note (say why the problem is accepted)")
     for vid, topics in sorted(by_tape(rows).items()):
         for topic, uses in sorted(topics.items()):
             for h in (u for u in uses if u["role"] == "heldout"):
                 # an undated dev use (a truth row with no date in its source) counts as earlier
                 before = [u for u in uses if u["role"] == "dev" and not _after(u, h)]
-                if before:
+                if before and not any(a["role"] == "ack" and a["date"] >= h["date"] for a in uses):
                     out.append(f"{vid} was dev for {topic} ({before[0]['source'] or before[0]['date']}) "
                                f"before it was held out on {h['date']}: not a fair test")
     return out
@@ -214,9 +234,12 @@ def main():
     p.add_argument("--run"); p.add_argument("--untouched", action="store_true")
     p.add_argument("--seed", type=int, help="default: today's date as YYYYMMDD")
     p.add_argument("--note", default="")
-    p = sub.add_parser("add"); p.add_argument("topic"); p.add_argument("role", choices=ROLES)
+    p = sub.add_parser("add"); p.add_argument("topic"); p.add_argument("role", choices=("dev", "heldout"))
     p.add_argument("ids", nargs="+"); p.add_argument("--date"); p.add_argument("--source", default="")
     p.add_argument("--note", default="")
+    p = sub.add_parser("ack", help="accept a known check problem; the note says why")
+    p.add_argument("topic"); p.add_argument("ids", nargs="+"); p.add_argument("--note", required=True)
+    p.add_argument("--date"); p.add_argument("--source", default="")
     sub.add_parser("check")
     args = ap.parse_args()
 
@@ -224,11 +247,23 @@ def main():
     today = datetime.date.today().isoformat()
     if args.cmd == "check":
         bad = problems(rows)
+        for vid, topic, held, note in acknowledged(rows):
+            print(f"~ {vid} {topic} (held out {held}): acknowledged: {note}")
         for line in bad:
             print(f"! {line}")
         print(f"{len(bad)} problem(s)" if bad else f"ledger ok: {sum(1 for r in rows if not r.get('_derived'))} "
               f"row(s), plus {sum(1 for r in rows if r.get('_derived'))} dev use(s) implied by truth/")
         sys.exit(1 if bad else 0)
+    if args.cmd == "ack":
+        new = [{"video_id": tape_id(i), "topic": args.topic, "role": "ack",
+                "date": args.date or today, "source": args.source, "note": args.note} for i in args.ids]
+        unknown = [n["video_id"] for n in new
+                   if not any(f"{n['video_id']} was dev for {args.topic} " in b for b in problems(rows))]
+        if unknown:
+            sys.exit(f"no {args.topic} problem to acknowledge for: {' '.join(unknown)}")
+        append(new)
+        print(f"{len(new)} problem(s) acknowledged in {LEDGER}")
+        return
     if args.cmd == "add":
         new = [{"video_id": tape_id(i), "topic": args.topic, "role": args.role,
                 "date": args.date or today, "source": args.source, "note": args.note} for i in args.ids]
